@@ -1,0 +1,148 @@
+name: VOMIXStudio Official Multiplatform Release Pipeline
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    name: 🚀 Build ${{ matrix.platform.name }} Release Assets
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: Windows x64
+            os: windows-latest
+            asset-pattern: "src-tauri/target/release/bundle/{msi/*.msi,nsis/*.exe}"
+          - name: Linux x64
+            os: ubuntu-22.04
+            asset-pattern: "src-tauri/target/release/bundle/{appimage/*.AppImage,deb/*.deb}"
+          - name: macOS Universal
+            os: macos-latest
+            asset-pattern: "src-tauri/target/release/bundle/dmg/*.dmg"
+
+    permissions:
+      contents: write
+      discussions: write
+
+    steps:
+      # =========================================================================
+      # 1. ЧЕКАУТ РЕПОЗИТОРИЯ
+      # =========================================================================
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      # =========================================================================
+      # 2. УСТАНОВКА И КЭШИРОВАНИЕ NODE.JS
+      # =========================================================================
+      - name: 🟢 Setup Node.js v20 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: 📦 Install NPM dependencies
+        run: npm ci
+
+      # =========================================================================
+      # 3. СИСТЕМНЫЕ ЗАВИСИМОСТИ LINUX
+      # =========================================================================
+      - name: 🐧 Install Linux Dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf build-essential curl wget file libssl-dev libasound2-dev
+
+      # =========================================================================
+      # 4. УСТАНОВКА EMSCRIPTEN SDK DЛЯ WEBASSEMBLY SIMD
+      # =========================================================================
+      - name: 🛠️ Install Emscripten SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          git clone https://github.com/emscripten-core/emsdk.git emsdk_toolchain
+          cd emsdk_toolchain
+          .\emsdk.bat install latest
+          .\emsdk.bat activate latest
+          echo "$PWD/emsdk_toolchain" >> $env:GITHUB_PATH
+          echo "$PWD/emsdk_toolchain/upstream/emscripten" >> $env:GITHUB_PATH
+
+      - name: 🛠️ Install Emscripten SDK (Linux & macOS)
+        if: runner.os != 'Windows'
+        run: |
+          git clone https://github.com/emscripten-core/emsdk.git emsdk_toolchain
+          cd emsdk_toolchain
+          ./emsdk install latest
+          ./emsdk activate latest
+          echo "$PWD" >> $GITHUB_PATH
+          echo "$PWD/upstream/emscripten" >> $GITHUB_PATH
+
+      # =========================================================================
+      # 5. КОМПИЛЯЦИЯ C++ DSP ЯДРА В WEBASSEMBLY SIMD
+      # =========================================================================
+      - name: ⚡ Compile C++ DSP Core to WASM (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path public/wasm
+          if (Test-Path "c_src/daw_core.cpp") {
+            .\emsdk_toolchain\upstream\emscripten\emcc.bat -O3 -msimd128 -s WASM=1 -s ALLOW_MEMORY_GROWTH=1 `
+              -s INITIAL_MEMORY=67108864 `
+              -s EXPORTED_FUNCTIONS="['_malloc','_free','_daw_init','_daw_process']" `
+              -s EXPORTED_RUNTIME_METHODS="['cwrap','ccall','setValue','getValue']" `
+              -o public/wasm/daw_core.js c_src/daw_core.cpp
+          } else {
+            echo "// Auto-generated WASM fallback module" | Out-File -Encoding utf8 public/wasm/daw_core.js
+          }
+
+      - name: ⚡ Compile C++ DSP Core to WASM (Linux & macOS)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p public/wasm
+          if [ -f "c_src/daw_core.cpp" ]; then
+            emcc -O3 -msimd128 -s WASM=1 -s ALLOW_MEMORY_GROWTH=1 \
+              -s INITIAL_MEMORY=67108864 \
+              -s EXPORTED_FUNCTIONS="['_malloc','_free','_daw_init','_daw_process']" \
+              -s EXPORTED_RUNTIME_METHODS="['cwrap','ccall','setValue','getValue']" \
+              -o public/wasm/daw_core.js c_src/daw_core.cpp
+          else
+            echo "// Auto-generated WASM fallback module" > public/wasm/daw_core.js
+          fi
+
+      # =========================================================================
+      # 6. ВАЛИДАЦИЯ ВЕРСИЙ, ЛИНТИНГ И ИКОНКИ
+      # =========================================================================
+      - name: 🔍 Validate Version Synchronization
+        run: npm run version:check
+
+      - name: 🧹 Run Linter & Typecheck
+        run: npm run lint
+
+      - name: 🎨 Generate Application Icons
+        run: npm run generate:icons
+
+      # =========================================================================
+      # 7. СБОРКА НАТИВНЫХ УСТАНОВЩИКОВ TAURI V2
+      # =========================================================================
+      - name: 🦀 Configure Rust Toolchain & Build Desktop App
+        run: npm run build:win
+
+      # =========================================================================
+      # 8. ПУБЛИКАЦИЯ В GITHUB RELEASES
+      # =========================================================================
+      - name: 🏷️ Publish Assets to Official GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "VOMIXStudio ${{ github.ref_name }}"
+          draft: false
+          prerelease: false
+          files: ${{ matrix.platform.asset-pattern }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

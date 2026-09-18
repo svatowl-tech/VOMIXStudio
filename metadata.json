@@ -1,0 +1,6 @@
+{
+  "name": "VOMIXStudio",
+  "description": "High-performance C++17 multitrack audio engine with AudioWorklet bridge, Silero VAD AI dubbing, Video Monitor frame sync, and FFmpeg WASM video muxing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
