@@ -51,14 +51,14 @@ jobs:
       # =========================================================================
       # 2. УСТАНОВКА И КЭШИРОВАНИЕ NODE.JS
       # =========================================================================
-      - name: 🟢 Setup Node.js v20 LTS
+      - name: 🟢 Setup Node.js v22 LTS
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: 'npm'
 
       - name: 📦 Install NPM dependencies
-        run: npm ci
+        run: npm ci --legacy-peer-deps
 
       # =========================================================================
       # 3. СИСТЕМНЫЕ ЗАВИСИМОСТИ LINUX (WebKit2GTK, AppImage tools)
