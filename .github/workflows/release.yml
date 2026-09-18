@@ -131,7 +131,9 @@ jobs:
       # 7. СБОРКА НАТИВНЫХ УСТАНОВЩИКОВ TAURI V2
       # =========================================================================
       - name: 🦀 Configure Rust Toolchain & Build Desktop App
-        run: npm run build:win
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # =========================================================================
       # 8. ПУБЛИКАЦИЯ В GITHUB RELEASES

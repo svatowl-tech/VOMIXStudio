@@ -141,7 +141,9 @@ jobs:
       # 7. СБОРКА НАТИВНОГО ПРИЛОЖЕНИЯ TAURI V2
       # =========================================================================
       - name: 🏗️ Build Native Desktop Application
-        run: npm run build:win
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # =========================================================================
       # 8. СОХРАНЕНИЕ АРТЕФАКТОВ СБОРКИ В GITHUB ACTIONS

@@ -11,6 +11,7 @@
     "prebuild": "node scripts/generate-icons.js",
     "prebuild:win": "node scripts/generate-icons.js",
     "tauri": "tauri",
+    "build:app": "tauri build",
     "build:win": "tauri build",
     "version:check": "node scripts/validate-release.js",
     "clean": "rm -rf dist server.js",
@@ -43,5 +44,12 @@
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^5.8.2"
+  },
+  "optionalDependencies": {
+    "@tauri-apps/cli-win32-x64-msvc": "^2.11.4",
+    "@tauri-apps/cli-linux-x64-gnu": "^2.11.4",
+    "@tauri-apps/cli-darwin-x64": "^2.11.4",
+    "@tauri-apps/cli-darwin-arm64": "^2.11.4",
+    "@tauri-apps/cli-darwin-universal": "^2.11.4"
   }
 }
