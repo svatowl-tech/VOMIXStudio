@@ -13,6 +13,7 @@ src-tauri/target/
 src-tauri/gen/
 
 # C++ & CMake build directories
+emsdk_toolchain/
 c_src/build/
 c_src/out/
 *.o

@@ -60,24 +60,24 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf build-essential curl wget file libssl-dev libasound2-dev
 
       # =========================================================================
-      # 4. УСТАНОВКА EMSCRIPTEN SDK DЛЯ WEBASSEMBLY SIMD
+      # 4. УСТАНОВКА EMSCRIPTEN SDK DЛЯ WEBASSEMBLY SIMD (Вне рабочей директории)
       # =========================================================================
       - name: 🛠️ Install Emscripten SDK (Windows)
         if: runner.os == 'Windows'
         shell: powershell
         run: |
-          git clone https://github.com/emscripten-core/emsdk.git emsdk_toolchain
-          cd emsdk_toolchain
+          git clone https://github.com/emscripten-core/emsdk.git ..\emsdk_toolchain
+          cd ..\emsdk_toolchain
           .\emsdk.bat install latest
           .\emsdk.bat activate latest
-          echo "$PWD/emsdk_toolchain" >> $env:GITHUB_PATH
-          echo "$PWD/emsdk_toolchain/upstream/emscripten" >> $env:GITHUB_PATH
+          echo "$PWD" >> $env:GITHUB_PATH
+          echo "$PWD/upstream/emscripten" >> $env:GITHUB_PATH
 
       - name: 🛠️ Install Emscripten SDK (Linux & macOS)
         if: runner.os != 'Windows'
         run: |
-          git clone https://github.com/emscripten-core/emsdk.git emsdk_toolchain
-          cd emsdk_toolchain
+          git clone https://github.com/emscripten-core/emsdk.git ../emsdk_toolchain
+          cd ../emsdk_toolchain
           ./emsdk install latest
           ./emsdk activate latest
           echo "$PWD" >> $GITHUB_PATH
@@ -92,7 +92,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path public/wasm
           if (Test-Path "c_src/daw_core.cpp") {
-            .\emsdk_toolchain\upstream\emscripten\emcc.bat -O3 -msimd128 -s WASM=1 -s ALLOW_MEMORY_GROWTH=1 `
+            ..\emsdk_toolchain\upstream\emscripten\emcc.bat -O3 -msimd128 -s WASM=1 -s ALLOW_MEMORY_GROWTH=1 `
               -s INITIAL_MEMORY=67108864 `
               -s EXPORTED_FUNCTIONS="['_malloc','_free','_daw_init','_daw_process']" `
               -s EXPORTED_RUNTIME_METHODS="['cwrap','ccall','setValue','getValue']" `
@@ -106,7 +106,7 @@ jobs:
         run: |
           mkdir -p public/wasm
           if [ -f "c_src/daw_core.cpp" ]; then
-            emcc -O3 -msimd128 -s WASM=1 -s ALLOW_MEMORY_GROWTH=1 \
+            ../emsdk_toolchain/upstream/emscripten/emcc -O3 -msimd128 -s WASM=1 -s ALLOW_MEMORY_GROWTH=1 \
               -s INITIAL_MEMORY=67108864 \
               -s EXPORTED_FUNCTIONS="['_malloc','_free','_daw_init','_daw_process']" \
               -s EXPORTED_RUNTIME_METHODS="['cwrap','ccall','setValue','getValue']" \
