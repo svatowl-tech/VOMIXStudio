@@ -140,13 +140,22 @@ export class MediaNormalizer {
       }
     }
 
+    // Подсказка GC: очищаем исходные данные, так как у нас есть rawInputPcm
+    (decodedBuffer as any) = null;
+    (arrayBuffer as any) = null;
+
     try {
       // Ресэмплинг выполняется ИСКЛЮЧИТЕЛЬНО на C++ через globalNativeDAWBridge.resampleCatmullRom()
-      return globalNativeDAWBridge.resampleCatmullRom(
+      const resampled = globalNativeDAWBridge.resampleCatmullRom(
         rawInputPcm,
         inSampleRate,
         numChannels === 1 ? 1 : 2
       );
+      
+      // Очищаем промежуточный буфер
+      (rawInputPcm as any) = null;
+      
+      return resampled;
     } catch (err: any) {
       const msg = `[C++ MediaNormalizer] Ошибка обработки аудио при ресэмплинге в C++ ядре: ${err?.message || err}`;
       systemLogger.error('MediaNormalizer', msg);

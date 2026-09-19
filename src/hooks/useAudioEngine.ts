@@ -201,12 +201,12 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             console.warn('[useAudioEngine] Предупреждение инициализации NativeDAWBridge:', bridgeErr);
           });
 
-          // Передаем байты WASM модуля в AudioWorklet процессор
+          // Передаем байты WASM модуля в AudioWorklet процессор (используем transfer для эффективности)
           workletNode.port.postMessage({
             type: 'INIT_WASM',
             wasmBytes,
             sampleRate: ctx.sampleRate || 48000
-          });
+          }, [wasmBytes]);
 
           setIsAudioWorkletActive(true);
           systemLogger.info('AudioWorklet', 'AudioWorklet-процессор успешно смонтирован и запущен.');
@@ -297,15 +297,52 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
 
       // Отправляем интерливированные Float32Array PCM аудиоданные в AudioWorklet C++ Mixer
       if (workletNodeRef.current) {
-        workletNodeRef.current.port.postMessage({
-          type: 'LOAD_TRACK_CLIP',
-          trackId,
-          clipId,
-          audioData: pcmFloat32,
-          offsetSec,
-          gain: 1.0,
-          pan: 0.0,
-          isStereo: true
+        // Чтобы избежать перегрузки памяти (OOM) при пакетной загрузке, мы ждем подтверждения от ворклера,
+        // прежде чем считать операцию завершенной. Это предотвращает накопление огромных клонированных буферов в очереди MessagePort.
+        
+        return new Promise((resolve, reject) => {
+          if (!workletNodeRef.current) {
+            reject(new Error('AudioWorklet is not initialized'));
+            return;
+          }
+
+          const timeout = setTimeout(() => {
+            workletNodeRef.current?.port.removeEventListener('message', handleAck);
+            // Если подтверждение не пришло вовремя, все равно продолжаем, чтобы не блокировать UI навсегда,
+            // но логируем предупреждение.
+            systemLogger.warn('System', `Таймаут подтверждения загрузки клипа #${clipId}. Продолжаем.`);
+            resolve({
+              durationSec,
+              samplesCount: totalFrames,
+              pcmData: pcmFloat32
+            });
+          }, 5000);
+
+          const handleAck = (e: MessageEvent) => {
+            if (e.data && e.data.type === 'CLIP_LOADED_SUCCESS' && e.data.clipId === clipId) {
+              clearTimeout(timeout);
+              workletNodeRef.current?.port.removeEventListener('message', handleAck);
+              resolve({
+                durationSec,
+                samplesCount: totalFrames,
+                pcmData: pcmFloat32
+              });
+            }
+          };
+
+          workletNodeRef.current.port.addEventListener('message', handleAck);
+          workletNodeRef.current.port.start();
+
+          workletNodeRef.current.port.postMessage({
+            type: 'LOAD_TRACK_CLIP',
+            trackId,
+            clipId,
+            audioData: pcmFloat32,
+            offsetSec,
+            gain: 1.0,
+            pan: 0.0,
+            isStereo: true
+          });
         });
       }
 
@@ -329,6 +366,17 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
       isStereo: boolean = true
     ) => {
       if (workletNodeRef.current) {
+        // Добавляем ACK-контроль потока для предотвращения OOM при быстрой последовательной отправке
+        const handleAck = (e: MessageEvent) => {
+          if (e.data && e.data.type === 'CLIP_LOADED_SUCCESS' && e.data.clipId === clipId) {
+            workletNodeRef.current?.port.removeEventListener('message', handleAck);
+            systemLogger.debug('System', `ACK получен для сырого PCM клипа #${clipId}`);
+          }
+        };
+
+        workletNodeRef.current.port.addEventListener('message', handleAck);
+        workletNodeRef.current.port.start();
+
         workletNodeRef.current.port.postMessage({
           type: 'LOAD_TRACK_CLIP',
           trackId,
@@ -358,7 +406,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
           pan: typeof c.pan === 'number' ? c.pan : 0.0,
           fadeInSamples: c.fadeInSamples || 0,
           fadeOutSamples: c.fadeOutSamples || 0,
-          buffer: c.buffer,
+          // Опускаем buffer, так как он уже должен быть загружен в ворклер через LOAD_TRACK_CLIP
           isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true
         }))
       });
@@ -385,7 +433,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             pan: typeof c.pan === 'number' ? c.pan : 0.0,
             fadeInSamples: c.fadeInSamples || 0,
             fadeOutSamples: c.fadeOutSamples || 0,
-            buffer: c.buffer,
+            // Опускаем buffer, так как он уже должен быть загружен в ворклер через LOAD_TRACK_CLIP
             isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true
           }))
         }))

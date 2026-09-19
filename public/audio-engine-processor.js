@@ -274,11 +274,16 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           this.jsTracks.set(trackId, { volumeDb: 0.0, pan: 0.0, solo: false, mute: false, clips: new Map() });
         }
         const track = this.jsTracks.get(trackId);
+        
+        // Сохраняем старые клипы для поиска буферов
+        const oldClips = new Map(track.clips);
         track.clips.clear();
 
         for (const c of clips) {
           const clipId = c.id;
-          const pcmBuffer = c.buffer || new Float32Array(0);
+          const oldClip = oldClips.get(clipId);
+          const pcmBuffer = c.buffer || (oldClip ? oldClip.pcm : new Float32Array(0));
+          
           if (pcmBuffer.length === 0) continue;
 
           const isStereo = c.isStereo !== undefined ? c.isStereo : true;
@@ -309,42 +314,56 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           if (mallocFn && addClipFn) {
             for (const c of clips) {
               const clipId = c.id;
-              const pcmBuffer = c.buffer || new Float32Array(0);
-              if (pcmBuffer.length === 0) continue;
-
-              const isStereo = c.isStereo !== undefined ? c.isStereo : true;
-              const lengthSamples = c.lengthSamples || (isStereo ? Math.floor(pcmBuffer.length / 2) : pcmBuffer.length);
-              const offsetSamples = c.offsetSamples || 0;
-              const gain = typeof c.gain === 'number' ? c.gain : 1.0;
-              const pan = typeof c.pan === 'number' ? c.pan : 0.0;
-              const fadeIn = c.fadeInSamples || 0;
-              const fadeOut = c.fadeOutSamples || 0;
-
               const key = `${trackId}:${clipId}`;
-              if (this.clipAllocations.has(key) && freeFn) {
-                freeFn(this.clipAllocations.get(key));
+              const oldClip = oldClips.get(clipId);
+              
+              // Если передан новый буфер, переаллоцируем в WASM
+              if (c.buffer && c.buffer.length > 0) {
+                const pcmBuffer = c.buffer;
+                if (this.clipAllocations.has(key) && freeFn) {
+                  freeFn(this.clipAllocations.get(key));
+                }
+
+                const pcmPtr = mallocFn(pcmBuffer.length * 4);
+                this.clipAllocations.set(key, pcmPtr);
+
+                const heapF32 = new Float32Array(this.wasmMemory.buffer);
+                heapF32.set(pcmBuffer, pcmPtr >> 2);
+
+                addClipFn(
+                  this.mixerPtr,
+                  trackId,
+                  clipId,
+                  pcmPtr,
+                  pcmBuffer.length,
+                  c.offsetSamples || 0,
+                  c.lengthSamples || (c.isStereo ? Math.floor(pcmBuffer.length / 2) : pcmBuffer.length),
+                  typeof c.gain === 'number' ? c.gain : 1.0,
+                  typeof c.pan === 'number' ? c.pan : 0.0,
+                  c.fadeInSamples || 0,
+                  c.fadeOutSamples || 0,
+                  c.isStereo !== undefined ? c.isStereo : true
+                );
+              } else if (this.clipAllocations.has(key)) {
+                // Если буфера нет, но аллокация уже существует, просто обновляем параметры в WASM
+                const pcmPtr = this.clipAllocations.get(key);
+                const pcmLength = oldClip ? oldClip.pcm.length : 0;
+                
+                addClipFn(
+                  this.mixerPtr,
+                  trackId,
+                  clipId,
+                  pcmPtr,
+                  pcmLength,
+                  c.offsetSamples || 0,
+                  c.lengthSamples || (c.isStereo ? Math.floor(pcmLength / 2) : pcmLength),
+                  typeof c.gain === 'number' ? c.gain : 1.0,
+                  typeof c.pan === 'number' ? c.pan : 0.0,
+                  c.fadeInSamples || 0,
+                  c.fadeOutSamples || 0,
+                  c.isStereo !== undefined ? c.isStereo : true
+                );
               }
-
-              const pcmPtr = mallocFn(pcmBuffer.length * 4);
-              this.clipAllocations.set(key, pcmPtr);
-
-              const heapF32 = new Float32Array(this.wasmMemory.buffer);
-              heapF32.set(pcmBuffer, pcmPtr >> 2);
-
-              addClipFn(
-                this.mixerPtr,
-                trackId,
-                clipId,
-                pcmPtr,
-                pcmBuffer.length,
-                offsetSamples,
-                lengthSamples,
-                gain,
-                pan,
-                fadeIn,
-                fadeOut,
-                isStereo
-              );
             }
           }
         }
@@ -354,8 +373,10 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       case 'SET_ALL_TRACKS': {
         const tracks = Array.isArray(msg.tracks) ? msg.tracks : [];
 
-        // Всегда синхронизируем JS-состояние
+        // Сохраняем старое состояние для поиска буферов
+        const oldTracks = new Map(this.jsTracks);
         this.jsTracks.clear();
+
         for (const t of tracks) {
           const trackId = t.id;
           const trackVolumeDb = typeof t.volumeDb === 'number' ? t.volumeDb : 0.0;
@@ -363,11 +384,16 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           const trackSolo = !!t.solo;
           const trackMute = !!t.mute;
 
+          const oldTrack = oldTracks.get(trackId);
           const trackClips = new Map();
+          
           if (Array.isArray(t.clips)) {
             for (const c of t.clips) {
-              const pcmBuffer = c.buffer || new Float32Array(0);
+              const oldClip = oldTrack ? oldTrack.clips.get(c.id) : null;
+              const pcmBuffer = c.buffer || (oldClip ? oldClip.pcm : new Float32Array(0));
+              
               if (pcmBuffer.length === 0) continue;
+              
               const isStereo = c.isStereo !== undefined ? c.isStereo : true;
               const lengthSamples = c.lengthSamples || (isStereo ? Math.floor(pcmBuffer.length / 2) : pcmBuffer.length);
               const offsetSamples = c.offsetSamples || 0;
@@ -414,43 +440,56 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
             if (setMuteFn) setMuteFn(this.mixerPtr, t.id, !!t.mute);
 
             if (Array.isArray(t.clips) && mallocFn && addClipFn) {
+              const oldTrack = oldTracks.get(t.id);
               for (const c of t.clips) {
-                const pcmBuffer = c.buffer || new Float32Array(0);
-                if (pcmBuffer.length === 0) continue;
-
-                const isStereo = c.isStereo !== undefined ? c.isStereo : true;
-                const lengthSamples = c.lengthSamples || (isStereo ? Math.floor(pcmBuffer.length / 2) : pcmBuffer.length);
-                const offsetSamples = c.offsetSamples || 0;
-                const gain = typeof c.gain === 'number' ? c.gain : 1.0;
-                const pan = typeof c.pan === 'number' ? c.pan : 0.0;
-                const fadeIn = c.fadeInSamples || 0;
-                const fadeOut = c.fadeOutSamples || 0;
-
                 const key = `${t.id}:${c.id}`;
-                if (this.clipAllocations.has(key) && freeFn) {
-                  freeFn(this.clipAllocations.get(key));
+                const oldClip = oldTrack ? oldTrack.clips.get(c.id) : null;
+
+                if (c.buffer && c.buffer.length > 0) {
+                  const pcmBuffer = c.buffer;
+                  if (this.clipAllocations.has(key) && freeFn) {
+                    freeFn(this.clipAllocations.get(key));
+                  }
+
+                  const pcmPtr = mallocFn(pcmBuffer.length * 4);
+                  this.clipAllocations.set(key, pcmPtr);
+
+                  const heapF32 = new Float32Array(this.wasmMemory.buffer);
+                  heapF32.set(pcmBuffer, pcmPtr >> 2);
+
+                  addClipFn(
+                    this.mixerPtr,
+                    t.id,
+                    c.id,
+                    pcmPtr,
+                    pcmBuffer.length,
+                    c.offsetSamples || 0,
+                    c.lengthSamples || (c.isStereo ? Math.floor(pcmBuffer.length / 2) : pcmBuffer.length),
+                    typeof c.gain === 'number' ? c.gain : 1.0,
+                    typeof c.pan === 'number' ? c.pan : 0.0,
+                    c.fadeInSamples || 0,
+                    c.fadeOutSamples || 0,
+                    c.isStereo !== undefined ? c.isStereo : true
+                  );
+                } else if (this.clipAllocations.has(key)) {
+                  const pcmPtr = this.clipAllocations.get(key);
+                  const pcmLength = oldClip ? oldClip.pcm.length : 0;
+                  
+                  addClipFn(
+                    this.mixerPtr,
+                    t.id,
+                    c.id,
+                    pcmPtr,
+                    pcmLength,
+                    c.offsetSamples || 0,
+                    c.lengthSamples || (c.isStereo ? Math.floor(pcmLength / 2) : pcmLength),
+                    typeof c.gain === 'number' ? c.gain : 1.0,
+                    typeof c.pan === 'number' ? c.pan : 0.0,
+                    c.fadeInSamples || 0,
+                    c.fadeOutSamples || 0,
+                    c.isStereo !== undefined ? c.isStereo : true
+                  );
                 }
-
-                const pcmPtr = mallocFn(pcmBuffer.length * 4);
-                this.clipAllocations.set(key, pcmPtr);
-
-                const heapF32 = new Float32Array(this.wasmMemory.buffer);
-                heapF32.set(pcmBuffer, pcmPtr >> 2);
-
-                addClipFn(
-                  this.mixerPtr,
-                  t.id,
-                  c.id,
-                  pcmPtr,
-                  pcmBuffer.length,
-                  offsetSamples,
-                  lengthSamples,
-                  gain,
-                  pan,
-                  fadeIn,
-                  fadeOut,
-                  isStereo
-                );
               }
             }
           }
