@@ -14,12 +14,12 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import { TrackState, MasterState } from '../audio/dawEngine';
-import { WavBitDepth } from '../utils/wavEncoder';
 import {
   NativeDAWBridge,
   globalNativeDAWBridge,
   NativeRenderAudioResult,
-  NativeStemExportItem
+  NativeStemExportItem,
+  WavBitDepth
 } from './NativeDAWBridge';
 import { systemLogger } from './SystemLogger';
 
@@ -142,7 +142,7 @@ export class RenderManager {
     tracks: TrackState[],
     master: MasterState,
     sampleRate: number = NativeDAWBridge.TARGET_SAMPLE_RATE,
-    bitDepth: WavBitDepth = 24,
+    bitDepth: WavBitDepth = 16,
     customDurationSec?: number
   ): Promise<RenderAudioResult> {
     this.logs = [];
@@ -245,12 +245,13 @@ export class RenderManager {
       await this.ffmpeg.exec([
         '-i', 'input_video.mp4',
         '-i', 'audio_mix.wav',
+        '-map', '0:v:0',
+        '-map', '1:a:0',
         '-c:v', 'copy',
         '-c:a', 'aac',
         '-b:a', '320k',
-        '-map', '0:v:0',
-        '-map', '1:a:0',
         '-shortest',
+        '-movflags', '+faststart',
         'output.mp4'
       ]);
 

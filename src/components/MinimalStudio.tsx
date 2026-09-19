@@ -74,6 +74,7 @@ export const MinimalStudio: React.FC = () => {
     uploadAudioFileToTrack,
     uploadRawPCMToTrack,
     syncTrackClips,
+    syncAllTracks,
     setTrackVolume,
     setTrackPan,
     setTrackSolo,
@@ -88,6 +89,13 @@ export const MinimalStudio: React.FC = () => {
 
   // --- 2. Состояние дорожек и мастера проекта (Поддержка до 32 дорожек) ---
   const [tracks, setTracks] = useState<TrackState[]>(() => new LiveDAWEngine().getTracks());
+
+  // Автоматическая фоновая синхронизация дорожек и клипов с AudioWorklet
+  useEffect(() => {
+    if (isInitialized && tracks && tracks.length > 0) {
+      syncAllTracks(tracks);
+    }
+  }, [isInitialized, tracks, syncAllTracks]);
   const [activeDspTrack, setActiveDspTrack] = useState<TrackState | null>(null);
   const [dbStats, setDbStats] = useState<DatabaseStats | null>(null);
   const [showDbModal, setShowDbModal] = useState<boolean>(false);
@@ -138,6 +146,28 @@ export const MinimalStudio: React.FC = () => {
     });
     AssetDatabase.getInstance().getStats().then(setDbStats).catch(() => {});
   }, []);
+
+  // --- Горячая клавиша Space для строго синхронного запуска и остановки видео и аудиотаймлайна ---
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        const target = e.target as HTMLElement | null;
+        if (
+          target &&
+          (target.tagName === 'INPUT' ||
+            target.tagName === 'TEXTAREA' ||
+            target.tagName === 'SELECT' ||
+            target.isContentEditable)
+        ) {
+          return;
+        }
+        e.preventDefault();
+        togglePlay();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [togglePlay]);
 
   // --- 6. Синхронизация видео-плеера с таймлайном C++ движка (Jitter-free Micro-Rate Sync) ---
   useEffect(() => {
@@ -769,6 +799,17 @@ export const MinimalStudio: React.FC = () => {
     triggerAutoSave();
   };
 
+  /**
+   * Сброс рабочего пространства при открытии нового проекта
+   */
+  const handleResetMinimalProjectState = () => {
+    setTracks([createNewTrack(1, 'Дублер 1 (Диалоги)', '#10b981')]);
+    setVideoFile(null);
+    setVideoSrc(null);
+    setVideoDuration(0);
+    setSubtitles([]);
+  };
+
   // Обновление DSP настроек дорожки из C++ DSP рэка
   const handleUpdateDspTrack = (updated: TrackState) => {
     setTracks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
@@ -835,10 +876,24 @@ export const MinimalStudio: React.FC = () => {
     setTimeout(() => setLoudnessMatchReport(null), 8000);
   };
 
-  // --- 11. Сквозной рабочий процесс «Свести и вшить звук в видео» в один клик ---
+  // --- 11. Сквозной рабочий процесс «Свести и сохранить готовое видео» в один клик ---
   const handleExportAndMuxVideo = async () => {
+    // Краевой случай 1: Отсутствие видеофайла
     if (!videoFile) {
-      alert('Пожалуйста, выберите рабочую папку или загрузите исходный видеофайл перед запуском финального сведения и муксинга.');
+      const confirmAudioOnly = window.confirm(
+        'Исходный видеофайл не выбран.\n\nХотите выполнить сведение аудиодорожек и сохранить мастер-файл (WAV 48kHz / 24-bit)?\nИли нажмите "Отмена", чтобы сначала догрузить видеофайл.'
+      );
+      if (!confirmAudioOnly) {
+        setShowMediaImportModal(true);
+        return;
+      }
+    }
+
+    // Краевой случай 2: Отсутствие аудиоклипов на дорожках
+    const hasActiveClips = tracks.some((t) => t.clips && t.clips.length > 0 && t.clips.some((c) => c.lengthSamples > 0));
+    if (!hasActiveClips) {
+      alert('На таймлайне нет аудиодорожек или клипов для сведения. Пожалуйста, догрузите аудиофайлы или выберите рабочую папку.');
+      setShowMediaImportModal(true);
       return;
     }
 
@@ -846,39 +901,32 @@ export const MinimalStudio: React.FC = () => {
     setExportedVideoBlob(null);
     setExportedVideoUrl(null);
     setStatusMessage('Запуск сквозного C++ конвейера сведения и муксинга...');
-    systemLogger.info('RenderManager', `Старт 6-этапного сквозного процесса сведения для [${videoFile.name}]...`, {
-      videoSize: videoFile.size,
+    systemLogger.info('RenderManager', `Старт сквозного процесса сведения (MVP) для ${videoFile ? `[${videoFile.name}]` : 'Мастер-аудио'}...`, {
+      videoSize: videoFile?.size || 0,
       videoDuration,
       tracksCount: tracks.length
     });
 
     try {
-      // ШАГ 1: Чтение и валидация аудиодорожек и видео из открытой папки (ProjectManager)
+      // 0% -> 30%: C++ DSP & Loudness Matching
       setExportProgress({
         stage: 'rendering_audio',
         progressPercent: 10,
-        message: 'Шаг 1/6: Подготовка аудиодорожек и дескрипторов видео из проекта...',
-        logs: ['[Шаг 1] Сбор аудиоклипов и видеопотока из ProjectManager']
+        message: 'Шаг 1/4 (0% → 30%): C++ DSP подготовка и нормализация громкости (-18 dBFS)...',
+        logs: ['[Шаг 1] Выравнивание громкости и инициализация WASM SIMD памяти']
       });
 
-      // ШАГ 2: Вызов нативного C++ метода autoMatchAllTracks(-18.0) для аппаратного выравнивания громкости по EBU R128
-      setExportProgress({
-        stage: 'rendering_audio',
-        progressPercent: 25,
-        message: 'Шаг 2/6: C++ аппаратно-ускоренное EBU R128 автовыравнивание громкости (-18 dBFS)...',
-        logs: ['[Шаг 2] Вызов C++ autoMatchAllTracks(-18.0, True Peak <= -1.0 dBFS)']
-      });
       const normResult = performLoudnessMatching(tracks, -18.0, -1.0);
       const normalizedTracks = normResult.updatedTracks;
       setTracks(normalizedTracks);
 
-      // ШАГ 3 & 4: Запуск C++ BatchOfflineRenderer (NativeDAWBridge.renderMasterMix) + C++ NativeWavPacker (24-bit RIFF WAV)
       setExportProgress({
         stage: 'rendering_audio',
-        progressPercent: 45,
-        message: 'Шаг 3-4/6: C++ BatchOfflineRenderer (100x) & упаковка в 24-bit RIFF WAV в памяти...',
-        logs: ['[Шаг 3-4] Высокоскоростной C++ DSP микс (100x) и NativeWavPacker 24-bit WAV']
+        progressPercent: 30,
+        message: 'Шаг 2/4 (30%): C++ BatchOfflineRenderer (100x DSP) & RIFF WAV упаковка...',
+        logs: ['[Шаг 2] Высокоскоростное суммирование клипов, фейдов и оффсетов в C++ ядре']
       });
+
       const renderDuration = videoDuration > 0 ? videoDuration : undefined;
       const renderResult = await globalRenderManager.renderMasterMix(
         normalizedTracks,
@@ -888,16 +936,29 @@ export const MinimalStudio: React.FC = () => {
         renderDuration
       );
 
-      // Сохраняем мастер-микс WAV в папку project/
+      // Сохраняем мастер-микс WAV в папку project/ через File System Access API
       await globalProjectManager.saveRenderedAsset('master_mix.wav', renderResult.wavBlob, true);
 
-      // ШАГ 5: Передача сгенерированного WAV в @ffmpeg/ffmpeg WASM -> выполнение команды (-c:v copy -c:a aac -b:a 320k)
+      // Если видео нет — отдаем готовый мастер WAV
+      if (!videoFile) {
+        setExportProgress({
+          stage: 'completed',
+          progressPercent: 100,
+          message: 'Готово! Мастер-микс WAV (48 кГц / 24-bit) успешно сведен и сохранен в папку проекта.',
+          logs: ['Мастер-файл master_mix.wav сохранен в project/']
+        });
+        setStatusMessage('Мастер-микс WAV успешно сведен и сохранен в project/!');
+        return;
+      }
+
+      // 30% -> 70%: FFmpeg WASM Muxing
       setExportProgress({
         stage: 'muxing_video',
         progressPercent: 70,
-        message: 'Шаг 5/6: Муксинг FFmpeg WASM (-c:v copy -c:a aac -b:a 320k)...',
-        logs: ['[Шаг 5] Замена аудиодорожки без перекодирования видеопотока']
+        message: 'Шаг 3/4 (70%): FFmpeg WASM муксинг (-c:v copy -c:a aac -b:a 320k)...',
+        logs: ['[Шаг 3] Подмена оригинального аудиопотока в видеофайле без перекодирования картинки']
       });
+
       const outputFileName = `mixed_${videoFile.name.replace(/\.[^/.]+$/, '')}.mp4`;
       const finalVideoBlob = await globalRenderManager.muxAudioIntoVideo(
         videoFile,
@@ -913,18 +974,20 @@ export const MinimalStudio: React.FC = () => {
       const finalUrl = URL.createObjectURL(finalVideoBlob);
       setExportedVideoUrl(finalUrl);
 
-      // ШАГ 6: Прямая запись готового MP4 в подпапку "project/" через ProjectManager.saveRenderedAsset()
+      // 70% -> 100%: Запись в подпапку project/ через File System Access API
       setExportProgress({
         stage: 'completed',
         progressPercent: 95,
-        message: 'Шаг 6/6: Прямая запись готового MP4 в папку проекта (File System Access API)...',
-        logs: [`[Шаг 6] Сохранение ${outputFileName} в подпапку project/`]
+        message: 'Шаг 4/4 (95% → 100%): Запись готового MP4 в подпапку project/ (File System Access API)...',
+        logs: [`[Шаг 4] Прямая запись ${outputFileName} в хранилище проекта`]
       });
+
+      // Сохраняем в подпапку project/
       await globalProjectManager.saveRenderedAsset(outputFileName, finalVideoBlob, true);
-      // Также сохраняем копию в корне для мгновенного доступа
+      // И в корень для быстрого доступа
       await globalProjectManager.saveRenderedAsset(outputFileName, finalVideoBlob, false);
 
-      // Кэшируем готовый ассет рендера в локальную SQL базу данных
+      // Кэшируем ассет рендера в локальную SQL базу данных
       await AssetDatabase.getInstance().saveAsset({
         id: `render_${Date.now()}`,
         name: outputFileName,
@@ -939,8 +1002,8 @@ export const MinimalStudio: React.FC = () => {
       setExportProgress({
         stage: 'completed',
         progressPercent: 100,
-        message: `Готово! Видео успешно сведено и сохранено в проект: ${outputFileName}`,
-        logs: [`Файл ${outputFileName} (${(finalVideoBlob.size / (1024 * 1024)).toFixed(2)} МБ) сохранен.`]
+        message: `Готово! Видео успешно сведено и сохранено: ${outputFileName}`,
+        logs: [`Файл ${outputFileName} (${(finalVideoBlob.size / (1024 * 1024)).toFixed(2)} МБ) готов к просмотру.`]
       });
       setStatusMessage(`Видео [${outputFileName}] успешно сведено и сохранено в project/!`);
       systemLogger.info('RenderManager', `Сквозной процесс завершен: ${outputFileName} (${Math.round(finalVideoBlob.size / 1024)} КБ)`);
@@ -1030,10 +1093,10 @@ export const MinimalStudio: React.FC = () => {
               id="btn-media-import-modal"
               onClick={() => setShowMediaImportModal(true)}
               className="px-4 py-2 bg-gradient-to-r from-cyan-600 to-emerald-600 hover:from-cyan-500 hover:to-emerald-500 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-2 shadow-lg shadow-cyan-950/40 cursor-pointer"
-              title="Единый хаб загрузки медиаматериалов (видео, дубли, субтитры)"
+              title="Догрузить недостающие медиаматериалы (видео, аудио, субтитры)"
             >
               <Upload size={14} />
-              Импорт медиа (Hub)
+              Догрузить файлы
             </button>
 
             {/* Кнопка открытия директории */}
@@ -1048,7 +1111,7 @@ export const MinimalStudio: React.FC = () => {
               ) : (
                 <FolderOpen size={14} />
               )}
-              Выбрать папку с файлами
+              Выбрать рабочую папку
             </button>
 
             <input
@@ -1200,7 +1263,7 @@ export const MinimalStudio: React.FC = () => {
                 }`}
               >
                 <Headphones size={12} />
-                Сведенный микс DAW
+                Новый сведенный микс
               </button>
 
               <button
@@ -1213,7 +1276,7 @@ export const MinimalStudio: React.FC = () => {
                 }`}
               >
                 <Volume2 size={12} />
-                Оригинал видео
+                Только оригинальный звук видео
               </button>
             </div>
           </div>
@@ -1229,7 +1292,7 @@ export const MinimalStudio: React.FC = () => {
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-slate-100">Экспорт и вшивание в видео</h3>
-                  <p className="text-[11px] text-slate-400">FFmpeg WebAssembly (-c:v copy -c:a aac)</p>
+                  <p className="text-[11px] text-slate-400">FFmpeg WebAssembly (-c:v copy -c:a aac -b:a 320k)</p>
                 </div>
               </div>
 
@@ -1303,7 +1366,7 @@ export const MinimalStudio: React.FC = () => {
             <button
               id="btn-export-and-mux"
               onClick={handleExportAndMuxVideo}
-              disabled={isExporting || !videoFile}
+              disabled={isExporting}
               className="w-full py-3 bg-gradient-to-r from-purple-600 to-emerald-600 hover:from-purple-500 hover:to-emerald-500 disabled:from-slate-800 disabled:to-slate-800 text-white font-bold rounded-xl text-sm transition-all shadow-xl shadow-purple-950/50 flex items-center justify-center gap-2 cursor-pointer"
             >
               {isExporting ? (
@@ -1314,7 +1377,7 @@ export const MinimalStudio: React.FC = () => {
               ) : (
                 <>
                   <Sparkles size={16} className="text-amber-300" />
-                  Свести и вшить в видео
+                  Свести и сохранить готовое видео
                 </>
               )}
             </button>
@@ -1331,6 +1394,8 @@ export const MinimalStudio: React.FC = () => {
           isPlaying={isPlaying}
           onSeek={seek}
           onUpdateTrack={handleUpdateTrack}
+          syncAllTracks={syncAllTracks}
+          syncTrackClips={syncTrackClips}
           videoFile={videoFile}
           videoSrc={videoSrc}
           videoDuration={videoDuration}
@@ -1364,7 +1429,7 @@ export const MinimalStudio: React.FC = () => {
               title="Догрузить дубли актеров, звуки или субтитры без сброса проекта"
             >
               <Upload size={14} className="text-cyan-400" />
-              + Догрузить файлы / дубли
+              Догрузить файлы
             </button>
 
             <button
@@ -1395,9 +1460,10 @@ export const MinimalStudio: React.FC = () => {
               id="btn-loudness-match-broadcast"
               onClick={() => handleAutoLoudnessMatch(-18.0)}
               className="px-3.5 py-2 bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 shadow-lg shadow-blue-950/40 cursor-pointer"
+              title="Выровнять громкость всех дорожек под стандарт дубляжа (-18 dBFS True Peak <= -1.0)"
             >
               <Wand2 size={14} className="text-amber-300" />
-              Выровнять громкость (EBU R128)
+              Выровнять громкость всех дорожек (-18 dBFS)
             </button>
 
             <button
@@ -1663,6 +1729,7 @@ export const MinimalStudio: React.FC = () => {
         onClose={() => setShowMediaImportModal(false)}
         existingTracks={tracks}
         currentVideoFile={videoFile}
+        onResetProjectState={handleResetMinimalProjectState}
         onImportVideo={handleModalImportVideo}
         onImportAudioTrack={handleModalImportAudioTrack}
         onImportSubtitles={handleModalImportSubtitles}

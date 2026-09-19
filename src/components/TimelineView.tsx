@@ -44,6 +44,10 @@ export interface TimelineViewProps {
   isPlaying?: boolean;
   onSeek: (timeSec: number) => void;
   onUpdateTrack?: (updatedTrack: TrackState) => void;
+  syncAllTracks?: (tracks: TrackState[]) => void;
+  syncTrackClips?: (trackId: number, clips: ClipConfig[]) => void;
+  onSyncAllTracks?: (tracks: TrackState[]) => void;
+  onSyncTrackClips?: (trackId: number, clips: ClipConfig[]) => void;
   // Видеодорожка и синхронизация
   videoFile?: File | null;
   videoSrc?: string | null;
@@ -94,6 +98,10 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   isPlaying = false,
   onSeek,
   onUpdateTrack,
+  syncAllTracks,
+  syncTrackClips,
+  onSyncAllTracks,
+  onSyncTrackClips,
   videoFile,
   videoSrc,
   videoDuration = 0,
@@ -104,6 +112,24 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   onSelectCue
 }) => {
   const sampleRate = 48000;
+  const tracksRef = useRef<TrackState[]>(tracks);
+  tracksRef.current = tracks;
+
+  const handleSyncAllTracks = useCallback((updatedTracks: TrackState[]) => {
+    if (syncAllTracks) {
+      syncAllTracks(updatedTracks);
+    } else if (onSyncAllTracks) {
+      onSyncAllTracks(updatedTracks);
+    }
+  }, [syncAllTracks, onSyncAllTracks]);
+
+  const handleSyncTrackClips = useCallback((trackId: number, clips: ClipConfig[]) => {
+    if (syncTrackClips) {
+      syncTrackClips(trackId, clips);
+    } else if (onSyncTrackClips) {
+      onSyncTrackClips(trackId, clips);
+    }
+  }, [syncTrackClips, onSyncTrackClips]);
 
   // Локальное состояние субтитров (синхронизировано с external)
   const [internalSubtitles, setInternalSubtitles] = useState<SubtitleCue[]>(() => {
@@ -176,6 +202,15 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   const [timelineNotice, setTimelineNotice] = useState<{ text: string; type: 'success' | 'info' | 'warn' } | null>(
     null
   );
+
+  // Состояние нативной C++ ошибки
+  const [nativeError, setNativeError] = useState<{ message: string; context: string } | null>(null);
+
+  const handleNativeError = useCallback((err: any, context: string) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[Native C++ Error in ${context}]:`, err);
+    setNativeError({ message: msg, context });
+  }, []);
 
   // Ссылки на контейнеры для синхронизации прокрутки и 60 FPS плейхеда
   const timelineScrollRef = useRef<HTMLDivElement | null>(null);
@@ -378,39 +413,51 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     }
 
     const leftLength = splitSample - clipStartSample;
-    const rightLength = clip.lengthSamples - leftLength;
-
     const isStereo = clip.buffer.length >= clip.lengthSamples * 2;
-    const stride = isStereo ? 2 : 1;
+    const channels = isStereo ? 2 : 1;
 
-    const leftBuffer = clip.buffer.slice(0, leftLength * stride);
-    const rightBuffer = clip.buffer.slice(leftLength * stride, (leftLength + rightLength) * stride);
+    try {
+      // Исключительное C++ исполнение разрезания клипа в WASM-куче с наложением микро-фейдов
+      const { left: leftBuffer, right: rightBuffer } = globalNativeDAWBridge.splitClipNative(
+        clip.buffer,
+        leftLength,
+        channels
+      );
 
-    const leftClip: ClipConfig = {
-      ...clip,
-      lengthSamples: leftLength,
-      buffer: leftBuffer,
-      originalBuffer: leftBuffer,
-      originalLengthSamples: leftLength,
-      fadeOutSamples: Math.min(clip.fadeOutSamples, Math.floor(leftLength / 2))
-    };
+      const leftClip: ClipConfig = {
+        ...clip,
+        lengthSamples: leftLength,
+        buffer: leftBuffer,
+        originalBuffer: leftBuffer,
+        originalLengthSamples: leftLength,
+        fadeOutSamples: Math.min(clip.fadeOutSamples, Math.floor(leftLength / 2))
+      };
 
-    const rightClip: ClipConfig = {
-      ...clip,
-      id: Date.now() + Math.floor(Math.random() * 1000),
-      name: `${clip.name} (Part 2)`,
-      offsetSamples: splitSample,
-      lengthSamples: rightLength,
-      buffer: rightBuffer,
-      originalBuffer: rightBuffer,
-      originalLengthSamples: rightLength,
-      fadeInSamples: Math.min(clip.fadeInSamples, Math.floor(rightLength / 2))
-    };
+      const rightClip: ClipConfig = {
+        ...clip,
+        id: Date.now() + Math.floor(Math.random() * 1000),
+        name: `${clip.name} (Part 2)`,
+        offsetSamples: splitSample,
+        lengthSamples: clip.lengthSamples - leftLength,
+        buffer: rightBuffer,
+        originalBuffer: rightBuffer,
+        originalLengthSamples: clip.lengthSamples - leftLength,
+        fadeInSamples: Math.min(clip.fadeInSamples, Math.floor((clip.lengthSamples - leftLength) / 2))
+      };
 
-    const newClips = track.clips.flatMap((c) => (c.id === clipId ? [leftClip, rightClip] : [c]));
-    onUpdateTrack({ ...track, clips: newClips });
-    setSelectedClipId(rightClip.id);
-    showNotice(`Клип разрезан по таймкоду ${formatCompactTime(splitTimeSec)}`, 'info');
+      const newClips = track.clips.flatMap((c) => (c.id === clipId ? [leftClip, rightClip] : [c]));
+      const updatedTrack = { ...track, clips: newClips };
+      const newTracks = tracksRef.current.map((t) => (t.id === trackId ? updatedTrack : t));
+
+      onUpdateTrack(updatedTrack);
+      handleSyncTrackClips(trackId, newClips);
+      handleSyncAllTracks(newTracks);
+
+      setSelectedClipId(rightClip.id);
+      showNotice(`✓ C++ Split: клип разрезан по таймкоду ${formatCompactTime(splitTimeSec)}`, 'info');
+    } catch (err) {
+      handleNativeError(err, 'разрезания клипа (splitClipNative)');
+    }
   };
 
   // Разрезать клип под плейхедом (кнопка "Сплит" или 'S')
@@ -454,89 +501,211 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   // ==========================================================================
   // C++ STRIP SILENCE (УДАЛЕНИЕ ТИШИНЫ И АВТОМАТИЧЕСКАЯ НАРЕЗКА НА ФРАЗЫ)
   // ==========================================================================
-  const handleExecuteStripSilence = () => {
-    const targetTrack = tracks.find((t) => t.id === stripTargetTrackId) || tracks[0];
-    if (!targetTrack || !onUpdateTrack) {
-      showNotice('Целевая дорожка не найдена', 'warn');
-      return;
-    }
+  const handleExecuteStripSilence = (applyToAllTracks = false) => {
+    if (!onUpdateTrack) return;
 
-    // Если есть выделенный клип на этой дорожке, обрабатываем его, иначе первый клип с буфером
-    let sourceClip = targetTrack.clips.find((c) => c.id === selectedClipId);
-    if (!sourceClip && targetTrack.clips.length > 0) {
-      sourceClip = targetTrack.clips[0];
-    }
+    try {
+      if (applyToAllTracks) {
+        const currentTracks = tracksRef.current;
+        let totalCreatedPhrases = 0;
+        let totalSavedSec = 0;
+        let processedTracksCount = 0;
+        const updatedTracks: TrackState[] = [];
 
-    if (!sourceClip || !sourceClip.buffer || sourceClip.buffer.length === 0) {
-      showNotice(`На дорожке [${targetTrack.name}] нет аудиоклипов для анализа`, 'warn');
-      return;
-    }
+        for (const track of currentTracks) {
+          if (!track.clips || track.clips.length === 0) {
+            updatedTracks.push(track);
+            continue;
+          }
 
-    const isStereo = sourceClip.buffer.length >= sourceClip.lengthSamples * 2;
-    const channels = isStereo ? 2 : 1;
+          let trackModified = false;
+          const newTrackClips: ClipConfig[] = [];
 
-    // Вызываем нативный C++ VAD стриппер
-    const segments = globalNativeDAWBridge.stripSilenceNative(
-      sourceClip.buffer,
-      stripThresholdDb,
-      stripMinSilenceMs,
-      stripPaddingMs,
-      isStereo,
-      sampleRate
-    );
+          for (const clip of track.clips) {
+            if (!clip.buffer || clip.buffer.length === 0 || clip.lengthSamples <= 0) {
+              newTrackClips.push(clip);
+              continue;
+            }
 
-    if (segments.length === 0) {
-      showNotice('Звуковых сегментов выше порога не обнаружено.', 'warn');
-      setStripSilenceModalOpen(false);
-      return;
-    }
+            const isStereo = clip.buffer.length >= clip.lengthSamples * 2;
+            const channels = isStereo ? 2 : 1;
 
-    // Создаем массив нарезанных фраз без пауз тишины
-    const newClips: ClipConfig[] = segments.map((seg, idx) => {
-      const segOffsetInClip = seg.offsetSamples;
-      const segLength = seg.lengthSamples;
+            const segments = globalNativeDAWBridge.stripSilenceNative(
+              clip.buffer,
+              stripThresholdDb,
+              stripMinSilenceMs,
+              stripPaddingMs,
+              isStereo,
+              sampleRate
+            );
 
-      const segBuffer = sourceClip!.buffer.slice(
-        segOffsetInClip * channels,
-        (segOffsetInClip + segLength) * channels
+            if (segments.length === 0) {
+              newTrackClips.push(clip);
+              continue;
+            }
+
+            trackModified = true;
+            totalCreatedPhrases += segments.length;
+
+            const originalSec = clip.lengthSamples / sampleRate;
+            const speechSec = segments.reduce((acc, s) => acc + s.lengthSamples / sampleRate, 0);
+            totalSavedSec += Math.max(0, originalSec - speechSec);
+
+            const generatedClips: ClipConfig[] = segments.map((seg, idx) => {
+              const segOffsetInClip = seg.offsetSamples;
+              const segLength = seg.lengthSamples;
+
+              // Исключительное C++ копирование подбуфера без JS slice
+              const segBuffer = globalNativeDAWBridge.extractSubBufferNative(
+                clip.buffer,
+                segOffsetInClip,
+                segLength,
+                channels
+              );
+              const phraseOffsetGlobal = clip.offsetSamples + segOffsetInClip;
+              const fadeLen = Math.min(Math.round(sampleRate * 0.01), Math.floor(segLength / 4));
+
+              return {
+                id: Date.now() + Math.floor(Math.random() * 100000) + idx * 10,
+                name: `${clip.name} [Фраза ${idx + 1}]`,
+                offsetSamples: phraseOffsetGlobal,
+                lengthSamples: segLength,
+                gain: clip.gain,
+                pan: clip.pan,
+                fadeInSamples: fadeLen,
+                fadeOutSamples: fadeLen,
+                buffer: segBuffer,
+                originalBuffer: segBuffer,
+                originalLengthSamples: segLength,
+                color: clip.color || track.color || '#10b981'
+              };
+            });
+
+            newTrackClips.push(...generatedClips);
+          }
+
+          if (trackModified) {
+            processedTracksCount++;
+            const updated = { ...track, clips: newTrackClips };
+            updatedTracks.push(updated);
+            onUpdateTrack(updated);
+            handleSyncTrackClips(track.id, newTrackClips);
+          } else {
+            updatedTracks.push(track);
+          }
+        }
+
+        if (processedTracksCount === 0 || totalCreatedPhrases === 0) {
+          showNotice('На дорожках не обнаружено аудиофрагментов для удаления тишины.', 'warn');
+          setStripSilenceModalOpen(false);
+          return;
+        }
+
+        handleSyncAllTracks(updatedTracks);
+        setStripSilenceModalOpen(false);
+
+        showNotice(
+          `✓ C++ Strip Silence: обработано ${processedTracksCount} дорожек, создано ${totalCreatedPhrases} фраз! Вырезано ${totalSavedSec.toFixed(1)}с пауз.`,
+          'success'
+        );
+        return;
+      }
+
+      // Обработка выбранной целевой дорожки
+      const targetTrack = tracks.find((t) => t.id === stripTargetTrackId) || tracks[0];
+      if (!targetTrack) {
+        showNotice('Целевая дорожка не найдена', 'warn');
+        return;
+      }
+
+      // Если есть выделенный клип на этой дорожке, обрабатываем его, иначе первый клип с буфером
+      let sourceClip = targetTrack.clips.find((c) => c.id === selectedClipId);
+      if (!sourceClip && targetTrack.clips.length > 0) {
+        sourceClip = targetTrack.clips[0];
+      }
+
+      if (!sourceClip || !sourceClip.buffer || sourceClip.buffer.length === 0) {
+        showNotice(`На дорожке [${targetTrack.name}] нет аудиоклипов для анализа`, 'warn');
+        return;
+      }
+
+      const isStereo = sourceClip.buffer.length >= sourceClip.lengthSamples * 2;
+      const channels = isStereo ? 2 : 1;
+
+      // Вызываем нативный C++ VAD стриппер
+      const segments = globalNativeDAWBridge.stripSilenceNative(
+        sourceClip.buffer,
+        stripThresholdDb,
+        stripMinSilenceMs,
+        stripPaddingMs,
+        isStereo,
+        sampleRate
       );
 
-      const phraseOffsetGlobal = sourceClip!.offsetSamples + segOffsetInClip;
-      const fadeLen = Math.min(Math.round(sampleRate * 0.01), Math.floor(segLength / 4)); // 10ms кроссфейд
+      if (segments.length === 0) {
+        showNotice('Звуковых сегментов выше порога не обнаружено.', 'warn');
+        setStripSilenceModalOpen(false);
+        return;
+      }
 
-      return {
-        id: Date.now() + idx * 10 + Math.floor(Math.random() * 10),
-        name: `${sourceClip!.name} [Фраза ${idx + 1}]`,
-        offsetSamples: phraseOffsetGlobal,
-        lengthSamples: segLength,
-        gain: sourceClip!.gain,
-        pan: sourceClip!.pan,
-        fadeInSamples: fadeLen,
-        fadeOutSamples: fadeLen,
-        buffer: segBuffer,
-        originalBuffer: segBuffer,
-        originalLengthSamples: segLength,
-        color: sourceClip!.color || targetTrack.color || '#10b981'
-      };
-    });
+      // Создаем массив нарезанных фраз без пауз тишины
+      const newClips: ClipConfig[] = segments.map((seg, idx) => {
+        const segOffsetInClip = seg.offsetSamples;
+        const segLength = seg.lengthSamples;
 
-    // Заменяем исходный длинный клип диктора на нарезанные фразы
-    const updatedClips = targetTrack.clips.flatMap((c) =>
-      c.id === sourceClip!.id ? newClips : [c]
-    );
+        // Исключительное C++ копирование подбуфера без JS slice
+        const segBuffer = globalNativeDAWBridge.extractSubBufferNative(
+          sourceClip!.buffer,
+          segOffsetInClip,
+          segLength,
+          channels
+        );
 
-    onUpdateTrack({ ...targetTrack, clips: updatedClips });
-    setSelectedClipId(newClips[0]?.id || null);
-    setStripSilenceModalOpen(false);
+        const phraseOffsetGlobal = sourceClip!.offsetSamples + segOffsetInClip;
+        const fadeLen = Math.min(Math.round(sampleRate * 0.01), Math.floor(segLength / 4)); // 10ms кроссфейд
 
-    const totalSpeechSec = segments.reduce((acc, s) => acc + s.lengthSamples / sampleRate, 0);
-    const originalSec = sourceClip.lengthSamples / sampleRate;
-    const savedSec = Math.max(0, originalSec - totalSpeechSec);
+        return {
+          id: Date.now() + idx * 10 + Math.floor(Math.random() * 10),
+          name: `${sourceClip!.name} [Фраза ${idx + 1}]`,
+          offsetSamples: phraseOffsetGlobal,
+          lengthSamples: segLength,
+          gain: sourceClip!.gain,
+          pan: sourceClip!.pan,
+          fadeInSamples: fadeLen,
+          fadeOutSamples: fadeLen,
+          buffer: segBuffer,
+          originalBuffer: segBuffer,
+          originalLengthSamples: segLength,
+          color: sourceClip!.color || targetTrack.color || '#10b981'
+        };
+      });
 
-    showNotice(
-      `✓ C++ Strip Silence: создано ${segments.length} фраз! Вырезано ${savedSec.toFixed(1)}с пауз.`,
-      'success'
-    );
+      // Заменяем исходный длинный клип диктора на нарезанные фразы
+      const updatedClips = targetTrack.clips.flatMap((c) =>
+        c.id === sourceClip!.id ? newClips : [c]
+      );
+
+      const updatedTrack = { ...targetTrack, clips: updatedClips };
+      const newTracks = tracksRef.current.map((t) => (t.id === targetTrack.id ? updatedTrack : t));
+
+      onUpdateTrack(updatedTrack);
+      handleSyncTrackClips(targetTrack.id, updatedClips);
+      handleSyncAllTracks(newTracks);
+
+      setSelectedClipId(newClips[0]?.id || null);
+      setStripSilenceModalOpen(false);
+
+      const totalSpeechSec = segments.reduce((acc, s) => acc + s.lengthSamples / sampleRate, 0);
+      const originalSec = sourceClip.lengthSamples / sampleRate;
+      const savedSec = Math.max(0, originalSec - totalSpeechSec);
+
+      showNotice(
+        `✓ C++ Strip Silence: создано ${segments.length} фраз! Вырезано ${savedSec.toFixed(1)}с пауз.`,
+        'success'
+      );
+    } catch (err) {
+      handleNativeError(err, 'удаления тишины (stripSilenceNative)');
+    }
   };
 
   // ==========================================================================
@@ -555,21 +724,31 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     const isStereo = clip.buffer.length >= clip.lengthSamples * 2;
     const newRatio = targetLengthSamples / baseLength;
 
-    // Выполняем нативный WSOLA алгоритм прямо через C++ модуль NativeDAWBridge
-    const stretchedBuffer = globalNativeDAWBridge.processWSOLA(baseBuffer, newRatio, isStereo);
+    try {
+      // Выполняем нативный WSOLA алгоритм прямо через C++ модуль NativeDAWBridge
+      const stretchedBuffer = globalNativeDAWBridge.processWSOLA(baseBuffer, newRatio, isStereo);
 
-    const updatedClip: ClipConfig = {
-      ...clip,
-      lengthSamples: targetLengthSamples,
-      buffer: stretchedBuffer,
-      originalBuffer: baseBuffer,
-      originalLengthSamples: baseLength,
-      timeStretchRatio: Math.round(newRatio * 100) / 100
-    };
+      const updatedClip: ClipConfig = {
+        ...clip,
+        lengthSamples: targetLengthSamples,
+        buffer: stretchedBuffer,
+        originalBuffer: baseBuffer,
+        originalLengthSamples: baseLength,
+        timeStretchRatio: Math.round(newRatio * 100) / 100
+      };
 
-    const newClips = track.clips.map((c) => (c.id === clipId ? updatedClip : c));
-    onUpdateTrack({ ...track, clips: newClips });
-    showNotice(`WSOLA Time Stretch: x${(Math.round(newRatio * 100) / 100).toFixed(2)}`, 'info');
+      const newClips = track.clips.map((c) => (c.id === clipId ? updatedClip : c));
+      const updatedTrack = { ...track, clips: newClips };
+      const newTracks = tracksRef.current.map((t) => (t.id === trackId ? updatedTrack : t));
+
+      onUpdateTrack(updatedTrack);
+      handleSyncTrackClips(trackId, newClips);
+      handleSyncAllTracks(newTracks);
+
+      showNotice(`✓ C++ WSOLA: x${(Math.round(newRatio * 100) / 100).toFixed(2)}`, 'info');
+    } catch (err) {
+      handleNativeError(err, 'растяжения времени WSOLA (processWSOLA)');
+    }
   };
 
   // Подгонка длины выбранного клипа под текущую позицию плейхеда
@@ -635,7 +814,13 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
         };
 
         const newClips = track.clips.map((c) => (c.id === clip.id ? updatedClip : c));
-        onUpdateTrack({ ...track, clips: newClips });
+        const updatedTrack = { ...track, clips: newClips };
+        const newTracks = tracksRef.current.map((t) => (t.id === track.id ? updatedTrack : t));
+
+        onUpdateTrack(updatedTrack);
+        handleSyncTrackClips(track.id, newClips);
+        handleSyncAllTracks(newTracks);
+
         showNotice(
           `Фраза «${clip.name}» синхронизирована с субтитром #${targetCue.index} [${targetCue.startSec.toFixed(1)}s - ${targetCue.endSec.toFixed(1)}s]`,
           'success'
@@ -708,10 +893,17 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     if (selectedClipId === null || !onUpdateTrack) return;
     for (const track of tracks) {
       if (track.clips.some((c) => c.id === selectedClipId)) {
-        onUpdateTrack({
+        const remainingClips = track.clips.filter((c) => c.id !== selectedClipId);
+        const updatedTrack = {
           ...track,
-          clips: track.clips.filter((c) => c.id !== selectedClipId)
-        });
+          clips: remainingClips
+        };
+        const newTracks = tracksRef.current.map((t) => (t.id === track.id ? updatedTrack : t));
+
+        onUpdateTrack(updatedTrack);
+        handleSyncTrackClips(track.id, remainingClips);
+        handleSyncAllTracks(newTracks);
+
         setSelectedClipId(null);
         showNotice('Клип удален с таймлайна', 'info');
         break;
@@ -939,6 +1131,14 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
             activeDrag.clipId,
             activeDrag.currentLengthSamples
           );
+        } else if (activeDrag.trackId !== undefined) {
+          // После перемещения, обрезки (Trim) или фейдинга мгновенно синхронизируем данные с AudioWorklet
+          const currentTracks = tracksRef.current;
+          handleSyncAllTracks(currentTracks);
+          const targetTrack = currentTracks.find((t) => t.id === activeDrag.trackId);
+          if (targetTrack) {
+            handleSyncTrackClips(targetTrack.id, targetTrack.clips);
+          }
         }
         setActiveDrag(null);
       }
@@ -1704,19 +1904,33 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
               </div>
             </div>
 
-            <div className="flex items-center justify-end gap-2.5 pt-2">
+            <div className="flex flex-wrap items-center justify-end gap-2.5 pt-2">
               <button
+                id="btn-strip-silence-cancel"
                 onClick={() => setStripSilenceModalOpen(false)}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs cursor-pointer"
+                className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs cursor-pointer transition-all"
               >
                 Отмена
               </button>
+
               <button
-                onClick={handleExecuteStripSilence}
-                className="px-5 py-2 bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 text-white font-bold rounded-xl text-xs flex items-center gap-2 cursor-pointer shadow-lg shadow-emerald-950/50"
+                id="btn-strip-silence-all-tracks"
+                onClick={() => handleExecuteStripSilence(true)}
+                className="px-4 py-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 cursor-pointer shadow-lg shadow-cyan-950/50 transition-all"
+                title="Автоматически удалить тишину и нарезать фразы на всех дорожках проекта"
+              >
+                <Layers size={14} className="text-cyan-200" />
+                Применить ко всем дорожкам
+              </button>
+
+              <button
+                id="btn-strip-silence-single-track"
+                onClick={() => handleExecuteStripSilence(false)}
+                className="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 cursor-pointer shadow-lg shadow-emerald-950/50 transition-all"
+                title="Нарезать фразы только на выбранной дорожке"
               >
                 <Zap size={14} className="text-amber-300" />
-                Нарезать на фразы (C++)
+                Нарезать выбранную дорожку
               </button>
             </div>
           </div>
@@ -1888,6 +2102,44 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
               >
                 <Check size={14} />
                 Применить WSOLA
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          MODAL: КРИТИЧЕСКАЯ ОШИБКА C++ WebAssembly ЯДРА
+          ===================================================================== */}
+      {nativeError && (
+        <div className="fixed inset-0 z-[100] bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-[#1c0d12] border border-red-900/50 p-6 rounded-2xl max-w-lg w-full shadow-2xl space-y-4">
+            <div className="flex items-center gap-3 text-red-500 border-b border-red-950 pb-3">
+              <div className="p-2 bg-red-950/50 rounded-xl text-red-400">
+                <span className="text-xl font-bold">⚠</span>
+              </div>
+              <div>
+                <h3 className="font-bold text-sm text-red-400">Критический сбой C++ ядра (WASM Exception)</h3>
+                <p className="text-[10px] text-red-500/70 font-mono">Контекст: {nativeError.context}</p>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-xs text-red-200/90 leading-relaxed">
+                Во время выполнения DSP/редактирования в WebAssembly модуле произошло исключение. 
+                Программные JavaScript-заглушки отключены согласно архитектурным стандартам VOMIXStudio.
+              </p>
+              <pre className="p-3 bg-black/60 rounded-xl text-[11px] text-red-400 font-mono overflow-x-auto border border-red-950/40 max-h-[180px] whitespace-pre-wrap leading-normal">
+                {nativeError.message}
+              </pre>
+            </div>
+
+            <div className="pt-2 flex items-center justify-end">
+              <button
+                onClick={() => setNativeError(null)}
+                className="px-4 py-2 bg-red-950/60 hover:bg-red-900/40 text-red-200 border border-red-900/40 hover:border-red-800/60 font-bold rounded-xl text-xs cursor-pointer shadow-md transition-colors"
+              >
+                Закрыть и продолжить
               </button>
             </div>
           </div>

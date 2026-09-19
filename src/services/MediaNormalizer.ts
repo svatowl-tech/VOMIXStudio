@@ -6,13 +6,12 @@
  * дорожек из видеофайлов и автоматического выравнивания громкости (Auto-Match Loudness).
  *
  * Архитектурный принцип:
- * 1. JavaScript / Web API выполняет ТОЛЬКО системное декодирование сжатых кодеков
- *    (MP3, AAC, OGG, WAV, MP4) в сырой PCM поток через браузерный AudioContext.decodeAudioData.
- * 2. ВСЯ математическая обработка (кубический ресэмплинг Catmull-Rom в 48 000 Гц,
- *    стерео-интерливинг, расчет True Peak, RMS и пакетирование поправок громкости)
- *    выполняется исключительно на C++ в WebAssembly с поддержкой SIMD (NativeDAWBridge).
- * 3. Гарантированный уход от утечек памяти через блоки try...finally с вызовами
- *    allocateFloats / freeFloats.
+ * 1. JavaScript / Web API выполняет ТОЛЬКО декодирование аудиоданных браузером
+ *    через AudioContext.decodeAudioData в сырой PCM поток (Float32Array).
+ * 2. ВСЯ математическая обработка звука (кубический ресэмплинг Catmull-Rom в 48 000 Гц,
+ *    расчет True Peak, EBU R128 RMS, цифровой гейн и выравнивание уровней громкости)
+ *    выполняется ИСКЛЮЧИТЕЛЬНО на C++ в WebAssembly с аппаратным SIMD128.
+ * 3. При недоступности C++ WebAssembly ядра выбрасывается фатальная ошибка.
  * ============================================================================
  */
 
@@ -68,13 +67,12 @@ export class MediaNormalizer {
 
   /**
    * ==========================================================================
-   * 1. УНИФИКАЦИЯ АУДИОФАЙЛА (C++ WebAssembly Resampler & Interleaver)
+   * 1. УНИФИКАЦИЯ АУДИОФАЙЛА (C++ Catmull-Rom Resampler & Interleaver)
    * ==========================================================================
-   * - Декодирует сырые байты в AudioBuffer с помощью системных кодеков браузера.
-   * - Извлекает сырые каналы Float32Array.
-   * - Передает указатель в C++ функцию AudioResampler::resampleTo48k (через NativeDAWBridge).
-   * - C++ ядро производит векторный кубический ресэмплинг Catmull-Rom в 48 000 Гц
-   *   и возвращает готовый интерливированный стерео буфер [L0, R0, L1, R1, ...].
+   * - Декодирует сырые байты в AudioBuffer через системный Web API кодек.
+   * - Передает сырой Float32Array PCM поток в C++ WebAssembly.
+   * - Векторный ресэмплинг Catmull-Rom в 48 000 Гц выполняется СТРОГО через
+   *   globalNativeDAWBridge.resampleCatmullRom().
    */
   public static async unifyAudioBuffer(
     fileOrBlob: File | Blob,
@@ -84,13 +82,13 @@ export class MediaNormalizer {
       return new Float32Array(0);
     }
 
-    // 1. Чтение бинарного массива из файла
+    // Чтение бинарного массива из файла
     const arrayBuffer = await fileOrBlob.arrayBuffer();
     if (arrayBuffer.byteLength === 0) {
       return new Float32Array(0);
     }
 
-    // 2. Декодирование системным кодеком ОС через AudioContext
+    // Декодирование системным кодеком браузера через AudioContext
     const tempAudioCtx = new (window.AudioContext ||
       (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
 
@@ -100,7 +98,7 @@ export class MediaNormalizer {
     } catch (err: any) {
       systemLogger.error(
         'MediaNormalizer',
-        `Ошибка декодирования аудиоданных браузером: ${err?.message || 'Неподдерживаемый аудиокодек или поврежденный файл'}`,
+        `Ошибка декодирования аудиоданных: ${err?.message || 'Неподдерживаемый аудиокодек'}`,
         { byteLength: arrayBuffer.byteLength },
         err instanceof Error ? err.stack : undefined
       );
@@ -119,12 +117,11 @@ export class MediaNormalizer {
     const numChannels = decodedBuffer.numberOfChannels;
     const inSampleRate = decodedBuffer.sampleRate;
 
-    // Подготовка плоского массива сэмплов исходного файла
+    // Подготовка плоского массива сэмплов для C++ кучи
     let rawInputPcm: Float32Array;
     if (numChannels === 1) {
       rawInputPcm = decodedBuffer.getChannelData(0);
     } else {
-      // Подготовка интерливированного массива для передачи в WASM
       const leftData = decodedBuffer.getChannelData(0);
       const rightData = decodedBuffer.getChannelData(1);
       rawInputPcm = new Float32Array(numFrames * 2);
@@ -134,10 +131,8 @@ export class MediaNormalizer {
       }
     }
 
-    // 3. Вызов нативного C++ ресэмплера в WASM
-    // Если частота не совпадает со стандартом 48000 Гц или канал моно — C++ производит
-    // кубический Catmull-Rom ресэмплинг и приводит к стерео 48000 Гц.
-    return globalNativeDAWBridge.resampleBufferTo48k(
+    // Ресэмплинг выполняется ИСКЛЮЧИТЕЛЬНО на C++ через globalNativeDAWBridge.resampleCatmullRom()
+    return globalNativeDAWBridge.resampleCatmullRom(
       rawInputPcm,
       inSampleRate,
       numChannels === 1 ? 1 : 2
@@ -148,33 +143,29 @@ export class MediaNormalizer {
    * ==========================================================================
    * 2. ИЗВЛЕЧЕНИЕ ЗВУКА ИЗ ВИДЕОФАЙЛА (Original Video Audio Track)
    * ==========================================================================
-   * Чтение аудиодорожки из видеофайла (MP4, WebM, MOV, MKV) с мгновенной
-   * передачей в C++ ядро для создания референсной стерео-дорожки оригинального видео.
    */
   public static async extractAudioFromVideo(
     videoFile: File,
     targetSr: number = MediaNormalizer.TARGET_SAMPLE_RATE
   ): Promise<Float32Array> {
     if (!videoFile || videoFile.size === 0) {
-      throw new Error('Видеофайл пуст или не выбран.');
+      throw new Error('[MediaNormalizer] Видеофайл пуст или не выбран.');
     }
 
     try {
-      // Прямое системное декодирование медиа-контейнера через AudioContext + C++ WASM
       const pcm = await MediaNormalizer.unifyAudioBuffer(videoFile, targetSr);
       if (pcm.length > 0) {
         return pcm;
       }
     } catch (directErr) {
-      console.warn('[MediaNormalizer] Прямой декодинг видео через decodeAudioData переключен на fallback:', directErr);
+      console.warn('[MediaNormalizer] Прямое декодирование контейнера переключено на HTML5 Video поток:', directErr);
     }
 
-    // Fallback извлечение через HTML5 Video Element
     return await MediaNormalizer.extractAudioViaVideoElement(videoFile, targetSr);
   }
 
   /**
-   * Fallback извлечение аудио через HTML5 Video Element
+   * Извлечение аудио через HTML5 Video Element
    */
   private static async extractAudioViaVideoElement(
     videoFile: File,
@@ -201,13 +192,13 @@ export class MediaNormalizer {
           resolve(pcm);
         } catch (err) {
           URL.revokeObjectURL(url);
-          reject(new Error(`Не удалось извлечь аудиодорожку из видеофайла: ${err}`));
+          reject(new Error(`[MediaNormalizer] Не удалось извлечь аудиодорожку из видеофайла: ${err}`));
         }
       };
 
       video.onerror = (e) => {
         URL.revokeObjectURL(url);
-        reject(new Error(`Ошибка загрузки видеофайла: ${e}`));
+        reject(new Error(`[MediaNormalizer] Ошибка загрузки видеофайла: ${e}`));
       };
     });
   }
@@ -216,7 +207,7 @@ export class MediaNormalizer {
    * ==========================================================================
    * 3. ВЫЧИСЛЕНИЕ МЕТРИК ГРОМКОСТИ (True Peak & RMS в C++ WebAssembly)
    * ==========================================================================
-   * Передает PCM буфер в C++ LoudnessAnalyzer через выделенную память WASM кучи.
+   * Выполняется СТРОГО через вызов C++ функции globalNativeDAWBridge.calculateLoudnessStats().
    */
   public static calculateRMSandPeak(
     buffer: Float32Array,
@@ -234,64 +225,36 @@ export class MediaNormalizer {
       };
     }
 
-    const bridge = globalNativeDAWBridge;
     const channels = isInterleaved ? 2 : 1;
     const numFrames = Math.floor(buffer.length / channels);
 
-    // Прямая запись Float32Array в WASM кучу без промежуточных JS массивов
-    const ptr = bridge.writeFloat32Direct(buffer);
+    // Вызов C++ аналитики через WebAssembly мост
+    const stats = globalNativeDAWBridge.calculateLoudnessStats(
+      buffer,
+      channels,
+      -18.0,
+      -1.0
+    );
 
-    try {
-      const mod = bridge.getModule();
-      let stats = {
-        peakLinear: 0,
-        peakDb: MediaNormalizer.MIN_DB_FLOOR,
-        rmsLinear: 0,
-        rmsDb: MediaNormalizer.MIN_DB_FLOOR,
-        isClipping: false,
-        numSamples: numFrames
-      };
+    const durationSec = numFrames / MediaNormalizer.TARGET_SAMPLE_RATE;
 
-      if (mod.analyzeLoudness) {
-        // Вызов нативного C++ AutoGainStager::analyzeLoudness
-        const nativeStats = mod.analyzeLoudness(ptr, 0, numFrames, -18.0, -1.0);
-        stats = {
-          peakLinear: nativeStats.truePeakLinear,
-          peakDb: nativeStats.truePeakDb,
-          rmsLinear: nativeStats.integratedRmsLinear,
-          rmsDb: nativeStats.integratedRmsDb,
-          isClipping: nativeStats.truePeakDb > 0.0,
-          numSamples: numFrames
-        };
-      } else if (mod.calculateLoudnessStats) {
-        stats = mod.calculateLoudnessStats(ptr, numFrames, channels, -18.0, -1.0);
-      }
-
-      const durationSec = numFrames / MediaNormalizer.TARGET_SAMPLE_RATE;
-
-      return {
-        peakLinear: stats.peakLinear,
-        peakDb: stats.peakDb,
-        rmsLinear: stats.rmsLinear,
-        rmsDb: stats.rmsDb,
-        isClipping: stats.isClipping,
-        sampleCount: buffer.length,
-        durationSec: Math.round(durationSec * 100) / 100
-      };
-    } finally {
-      // Освобождение памяти в C++ куче (Zero Memory Leaks)
-      bridge.freeFloats(ptr);
-    }
+    return {
+      peakLinear: stats.peakLinear,
+      peakDb: stats.peakDb,
+      rmsLinear: stats.rmsLinear,
+      rmsDb: stats.rmsDb,
+      isClipping: stats.isClipping,
+      sampleCount: buffer.length,
+      durationSec: Math.round(durationSec * 100) / 100
+    };
   }
 
   /**
    * ==========================================================================
-   * 4. ПАКЕТНОЕ СВЕДЕНИЕ ПО ГРОМКОСТИ (Auto-Match Loudness via Mixer::autoMatchAllTracks)
+   * 4. АВТОМАТИЧЕСКОЕ ВЫРАВНИВАНИЕ ГРОМКОСТИ ДОРОЖЕК (Auto-Match Loudness)
    * ==========================================================================
-   * - Передает аудиоклипы дорожек в C++ векторный LoudnessAnalyzer.
-   * - C++ ядро вычисляет RMS/True Peak и рассчитывает точную поправку громкости volumeDb
-   *   по стандарту EBU R128 с Peak Guard защитой.
-   * - JS получает готовый массив обновленных значений volumeDb для отображения в UI.
+   * Анализ громкости и выравнивание по стандарту EBU R128 с Peak Guard защитой
+   * выполняется ИСКЛЮЧИТЕЛЬНО на C++ в WebAssembly ядре.
    */
   public static autoMatchTrackVolumes(
     tracks: TrackState[],
@@ -302,7 +265,9 @@ export class MediaNormalizer {
   }
 
   /**
-   * Векторное умножение сигнала на цифровой гейн в C++ WASM
+   * ==========================================================================
+   * 5. ВЕКТОРНОЕ ПРИМЕНЕНИЕ ЦИФРОВОГО ГЕЙНА (C++ SIMD128)
+   * ==========================================================================
    */
   public static applyGain(buffer: Float32Array, gainDb: number, inPlace: boolean = false): Float32Array {
     if (!buffer || buffer.length === 0 || Math.abs(gainDb) < 0.001) {
@@ -312,27 +277,21 @@ export class MediaNormalizer {
     const bridge = globalNativeDAWBridge;
     const mod = bridge.getModule();
 
-    if (mod.applyGain) {
-      const ptr = bridge.writeFloat32Direct(buffer);
-      try {
-        mod.applyGain(ptr, buffer.length, gainDb);
-        const result = bridge.readFloat32Direct(ptr, buffer.length);
-        if (inPlace) {
-          buffer.set(result);
-          return buffer;
-        }
-        return result;
-      } finally {
-        bridge.freeFloats(ptr);
-      }
+    if (!mod.applyGain) {
+      throw new Error('[MediaNormalizer] Нативная C++ функция applyGain отсутствует в WASM модуле');
     }
 
-    // Fallback
-    const target = inPlace ? buffer : new Float32Array(buffer.length);
-    const linearGain = MediaNormalizer.dbToLinear(gainDb);
-    for (let i = 0; i < buffer.length; i++) {
-      target[i] = buffer[i] * linearGain;
+    const ptr = bridge.writeFloat32Direct(buffer);
+    try {
+      mod.applyGain(ptr, buffer.length, gainDb);
+      const result = bridge.readFloat32Direct(ptr, buffer.length);
+      if (inPlace) {
+        buffer.set(result);
+        return buffer;
+      }
+      return result;
+    } finally {
+      bridge.freeFloats(ptr);
     }
-    return target;
   }
 }

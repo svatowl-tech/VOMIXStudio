@@ -226,6 +226,32 @@ static void JS_SetActiveMixer(Mixer& mixer) {
 // Обертки для модуля SilenceStripper (SIMD128 VAD & Pause Stripping)
 // ============================================================================
 
+static int JS_StripSilenceNative(
+    uintptr_t inPcmPtr,
+    size_t totalSamples,
+    float thresholdDb,
+    float minSilenceMs,
+    float paddingMs,
+    bool isStereo,
+    int sampleRate,
+    uintptr_t outSegmentsPtr,
+    int maxSegments
+) {
+    const float* inBuffer = reinterpret_cast<const float*>(inPcmPtr);
+    AudioSegment* outSegments = reinterpret_cast<AudioSegment*>(outSegmentsPtr);
+    return SilenceStripper::stripSilence(
+        inBuffer,
+        totalSamples,
+        thresholdDb,
+        minSilenceMs,
+        paddingMs,
+        isStereo,
+        sampleRate,
+        outSegments,
+        maxSegments
+    );
+}
+
 static int JS_StripSilenceFromClip(
     uintptr_t inPcmPtr,
     size_t totalSamples,
@@ -641,6 +667,7 @@ EMSCRIPTEN_BINDINGS(daw_core_module) {
 
     register_vector<AudioSegment>("VectorAudioSegment");
 
+    function("stripSilenceNative", &JS_StripSilenceNative);
     function("stripSilenceFromClip", &JS_StripSilenceFromClip);
     function("allocateSegmentBuffer", &JS_AllocateSegmentBuffer);
     function("freeSegmentBuffer", &JS_FreeSegmentBuffer);

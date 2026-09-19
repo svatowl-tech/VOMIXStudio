@@ -1,7 +1,19 @@
 import React, { useState, useEffect } from 'react';
 import { TrackState, MasterState } from '../audio/dawEngine';
 import { globalRenderManager, RenderProgressInfo } from '../services/RenderManager';
-import { triggerFileDownload, WavBitDepth } from '../utils/wavEncoder';
+import { WavBitDepth } from '../services/NativeDAWBridge';
+
+// Функция триггера скачивания файла без использования JS wavEncoder
+function triggerFileDownload(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 import {
   Download,
   Film,

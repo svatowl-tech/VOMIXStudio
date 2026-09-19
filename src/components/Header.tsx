@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Sliders, Cpu, Terminal, Sparkles, Volume2, FolderKanban, PlaySquare, AlertCircle } from 'lucide-react';
+import { Sliders, Cpu, Terminal, Sparkles, Volume2, FolderKanban, PlaySquare, AlertCircle, Upload, Plus } from 'lucide-react';
 import { systemLogger } from '../services/SystemLogger';
 
 export type NavigationTab = 'minimal' | 'studio' | 'project' | 'video' | 'ai-dubbing' | 'export' | 'cpp' | 'emcc' | 'console';
@@ -7,9 +7,10 @@ export type NavigationTab = 'minimal' | 'studio' | 'project' | 'video' | 'ai-dub
 interface HeaderProps {
   activeTab: NavigationTab;
   onSelectTab: (tab: NavigationTab) => void;
+  onOpenImportModal?: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({ activeTab, onSelectTab }) => {
+export const Header: React.FC<HeaderProps> = ({ activeTab, onSelectTab, onOpenImportModal }) => {
   const [errorCount, setErrorCount] = useState<number>(() => systemLogger.getErrorsCount());
 
   useEffect(() => {
@@ -39,8 +40,22 @@ export const Header: React.FC<HeaderProps> = ({ activeTab, onSelectTab }) => {
           </div>
         </div>
 
-        {/* Tab Navigation */}
-        <nav className="flex flex-wrap items-center gap-1.5 bg-slate-900 p-1 rounded-xl border border-slate-800">
+        {/* Action Controls & Navigation */}
+        <div className="flex flex-wrap items-center gap-2.5">
+          {onOpenImportModal && (
+            <button
+              id="btn-header-media-import"
+              onClick={onOpenImportModal}
+              className="px-3 py-1.5 bg-gradient-to-r from-cyan-900/70 to-emerald-900/70 hover:from-cyan-800 hover:to-emerald-800 text-cyan-300 border border-cyan-700/80 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer shadow-md shadow-cyan-950/40"
+              title="Открыть универсальный хаб импорта файлов (видео, аудио, субтитры)"
+            >
+              <Upload size={14} className="text-cyan-400" />
+              <span>Импорт медиа</span>
+            </button>
+          )}
+
+          {/* Tab Navigation */}
+          <nav className="flex flex-wrap items-center gap-1.5 bg-slate-900 p-1 rounded-xl border border-slate-800">
           <button
             onClick={() => onSelectTab('minimal')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
@@ -156,6 +171,7 @@ export const Header: React.FC<HeaderProps> = ({ activeTab, onSelectTab }) => {
             )}
           </button>
         </nav>
+        </div>
       </div>
     </header>
   );

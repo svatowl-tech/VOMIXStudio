@@ -50,6 +50,7 @@ export interface UseAudioEngineReturn {
   ) => void;
 
   syncTrackClips: (trackId: number, clips: ClipConfig[]) => void;
+  syncAllTracks: (tracks: TrackState[]) => void;
 
   setTrackVolume: (trackId: number, volumeDb: number) => void;
   setTrackPan: (trackId: number, pan: number) => void;
@@ -94,14 +95,32 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
 
   /**
-   * Инициализация AudioContext и AudioWorklet
+   * Инициализация AudioContext, загрузка C++ WebAssembly ядра (/wasm/daw_core.wasm) и запуск AudioWorklet
    */
   const initAudioEngine = useCallback(async () => {
     try {
       setError(null);
-      systemLogger.info('AudioWorklet', 'Инициализация Web AudioContext...');
+      systemLogger.info('AudioWorklet', 'Инициализация Web AudioContext и загрузка C++ WASM ядра...');
 
-      // 1. Проверка поддержки Web Audio API
+      // 1. Обязательная загрузка бинарника /wasm/daw_core.wasm с жесткой ошибкой
+      let wasmBytes: ArrayBuffer;
+      try {
+        const response = await fetch('/wasm/daw_core.wasm');
+        if (!response.ok || response.status !== 200) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        wasmBytes = await response.arrayBuffer();
+        if (!wasmBytes || wasmBytes.byteLength === 0) {
+          throw new Error('Пустой бинарник daw_core.wasm');
+        }
+      } catch (fetchErr) {
+        const errMessage = 'Критическая ошибка: C++ ядро не скомпилировано! Скомпилируйте public/wasm/daw_core.wasm через build_wasm.sh.';
+        setError(errMessage);
+        systemLogger.error('AudioWorklet', errMessage, fetchErr);
+        throw new Error(errMessage);
+      }
+
+      // 2. Проверка поддержки Web Audio API
       const AudioCtxClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       if (!AudioCtxClass) {
         throw new Error('Ваш браузер не поддерживает Web Audio API.');
@@ -119,7 +138,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
         systemLogger.debug('AudioWorklet', 'AudioContext возобновлен (resume after suspend).');
       }
 
-      // 2. Подключение AudioWorklet модуля
+      // 3. Подключение AudioWorklet модуля
       if (!workletNodeRef.current) {
         try {
           await ctx.audioWorklet.addModule('/audio-engine-processor.js');
@@ -129,7 +148,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             outputChannelCount: [2]
           });
 
-          // Слушаем сообщения телеметрии из AudioWorklet
+          // Слушаем сообщения телеметрии и статуса из AudioWorklet
           workletNode.port.onmessage = (e) => {
             const data = e.data;
             if (!data) return;
@@ -150,20 +169,26 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
               if (data.master) {
                 setMasterMeter(data.master);
               }
-            } else if (data.type === 'WASM_INIT_SUCCESS' || data.type === 'WASM_INIT_HYBRID_SUCCESS') {
+            } else if (data.type === 'WASM_INIT_SUCCESS') {
               setIsAudioWorkletActive(true);
-              systemLogger.info('C++ WASM', 'C++ DSP аудиомикшер инициализирован в AudioWorklet (48000 Hz).');
+              systemLogger.info('C++ WASM', 'C++ DSP аудиомикшер успешно инициализирован в AudioWorklet (48000 Hz).');
+            } else if (data.type === 'WASM_CORE_MISSING') {
+              const errMessage = 'Критическая ошибка: C++ ядро не скомпилировано! Скомпилируйте public/wasm/daw_core.wasm через build_wasm.sh.';
+              setError(errMessage);
+              setIsAudioWorkletActive(false);
+              systemLogger.error('AudioWorklet', errMessage, data.error);
             }
           };
 
           workletNode.connect(ctx.destination);
           workletNodeRef.current = workletNode;
 
-          // Инициализируем WASM движок и получаем байты для AudioWorklet
-          await globalNativeDAWBridge.initWasmEngine();
-          const wasmBytes = await globalNativeDAWBridge.getWasmBinary();
+          // Инициализируем C++ мост в основном потоке
+          await globalNativeDAWBridge.initWasmEngine().catch((bridgeErr) => {
+            console.warn('[useAudioEngine] Предупреждение инициализации NativeDAWBridge:', bridgeErr);
+          });
 
-          // Посылаем команду инициализации с бинарником WASM в Worklet
+          // Передаем байты WASM модуля в AudioWorklet процессор
           workletNode.port.postMessage({
             type: 'INIT_WASM',
             wasmBytes,
@@ -173,19 +198,18 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
           setIsAudioWorkletActive(true);
           systemLogger.info('AudioWorklet', 'AudioWorklet-процессор успешно смонтирован и запущен.');
         } catch (workletErr) {
-          systemLogger.warn(
-            'AudioWorklet',
-            'Предупреждение регистрации AudioWorklet: ' + String(workletErr),
-            workletErr
-          );
+          const errMessage = 'Критическая ошибка: C++ ядро не скомпилировано! Скомпилируйте public/wasm/daw_core.wasm через build_wasm.sh.';
+          setError(errMessage);
           setIsAudioWorkletActive(false);
+          systemLogger.error('AudioWorklet', `Сбой загрузки AudioWorklet: ${errMessage}`, workletErr);
+          throw workletErr;
         }
       }
 
       setIsInitialized(true);
-      systemLogger.info('System', 'Аудиосистема готова к воспроизведению и микшированию.');
+      systemLogger.info('System', 'Аудиосистема C++ готова к воспроизведению и микшированию.');
     } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : 'Неизвестная ошибка инициализации аудиосистемы';
+      const errMsg = err instanceof Error ? err.message : 'Критическая ошибка: C++ ядро не скомпилировано! Скомпилируйте public/wasm/daw_core.wasm через build_wasm.sh.';
       setError(errMsg);
       systemLogger.error('AudioWorklet', `Сбой инициализации аудиосистемы: ${errMsg}`, err, err instanceof Error ? err.stack : undefined);
     }
@@ -230,7 +254,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
   }, []);
 
   /**
-   * Декодирование аудиофайла (WAV, MP3, FLAC, OGG, AAC) с ресемплингом до 48 000 Гц и передача в AudioWorklet / C++
+   * Декодирование аудиофайла с ресемплингом в C++ до 48 000 Гц и передача в AudioWorklet
    */
   const uploadAudioFileToTrack = useCallback(
     async (
@@ -243,8 +267,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
         await initAudioEngine();
       }
 
-      // Используем MediaNormalizer для унификации Sample Rate до 48 кГц и формирования стерео-интерливированного буфера
-      systemLogger.info('MediaNormalizer', `Декодирование и ресэмплинг файла для дорожки #${trackId}...`, {
+      systemLogger.info('MediaNormalizer', `Декодирование и C++ ресэмплинг файла для дорожки #${trackId}...`, {
         trackId,
         clipId,
         sizeBytes: file.size
@@ -259,7 +282,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
         { trackId, clipId, durationSec, totalFrames }
       );
 
-      // Отправляем стерео-интерливированные Float32Array PCM аудиоданные в AudioWorklet
+      // Отправляем интерливированные Float32Array PCM аудиоданные в AudioWorklet C++ Mixer
       if (workletNodeRef.current) {
         workletNodeRef.current.port.postMessage({
           type: 'LOAD_TRACK_CLIP',
@@ -313,13 +336,52 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
       workletNodeRef.current.port.postMessage({
         type: 'SET_TRACK_CLIPS',
         trackId,
-        clips
+        clips: clips.map((c) => ({
+          id: c.id,
+          name: c.name,
+          offsetSamples: c.offsetSamples,
+          lengthSamples: c.lengthSamples,
+          gain: typeof c.gain === 'number' ? c.gain : 1.0,
+          pan: typeof c.pan === 'number' ? c.pan : 0.0,
+          fadeInSamples: c.fadeInSamples || 0,
+          fadeOutSamples: c.fadeOutSamples || 0,
+          buffer: c.buffer,
+          isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true
+        }))
+      });
+    }
+  }, []);
+
+  const syncAllTracks = useCallback((tracks: TrackState[]) => {
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({
+        type: 'SET_ALL_TRACKS',
+        tracks: tracks.map((t) => ({
+          id: t.id,
+          name: t.name,
+          volumeDb: t.volumeDb,
+          pan: t.pan,
+          solo: t.solo,
+          mute: t.mute,
+          clips: t.clips.map((c) => ({
+            id: c.id,
+            name: c.name,
+            offsetSamples: c.offsetSamples,
+            lengthSamples: c.lengthSamples,
+            gain: typeof c.gain === 'number' ? c.gain : 1.0,
+            pan: typeof c.pan === 'number' ? c.pan : 0.0,
+            fadeInSamples: c.fadeInSamples || 0,
+            fadeOutSamples: c.fadeOutSamples || 0,
+            buffer: c.buffer,
+            isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true
+          }))
+        }))
       });
     }
   }, []);
 
   /**
-   * Пакетный расчет и отправка выровненных уровней громкости (Loudness Matching) в аудиоядро
+   * Пакетный расчет и отправка выровненных уровней громкости (Loudness Matching) в C++ аудиоядро
    */
   const performLoudnessMatching = useCallback(
     (
@@ -348,7 +410,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
   );
 
   /**
-   * Метод передачи команд управления в AudioWorklet
+   * Команды управления параметрами C++ дорожек
    */
   const setTrackVolume = useCallback((trackId: number, volumeDb: number) => {
     if (workletNodeRef.current) {
@@ -434,6 +496,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     uploadAudioFileToTrack,
     uploadRawPCMToTrack,
     syncTrackClips,
+    syncAllTracks,
 
     setTrackVolume,
     setTrackPan,

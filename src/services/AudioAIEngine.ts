@@ -2,10 +2,10 @@
  * ============================================================================
  * AUDIO AI ENGINE (Autonomous On-Device Neural Pipeline for Dubbing & Speech)
  * ============================================================================
- * Полностью клиентский пайплайн на TypeScript и ONNX Runtime Web (WASM / WebGPU):
- * 1. Silero VAD (ONNX) - потоковое обнаружение речи, детекция пауз и границ фраз.
- * 2. Speech-to-Text ASR (Whisper ONNX) - спектральный анализ (Log-Mel) и распознавание речи.
- * 3. Smart Subtitle Alignment - выравнивание распознанной речи со сценарием (SRT/ASS).
+ * Клиентский пайплайн детекции речи и сопоставления сценариев:
+ * 1. Silero VAD (ONNX Runtime Web / C++ DSP Energy Analyzer) - детекция голоса и пауз.
+ * 2. C++ Fast Levenshtein String Similarity - лексическое сравнение реплик.
+ * 3. Smart Subtitle Alignment - сопоставление распознанной речи со сценарием (SRT/ASS).
  * ============================================================================
  */
 
@@ -51,15 +51,15 @@ export interface AlignedSpeechPhrase {
   actualStartSec: number;
   actualEndSec: number;
   timeDriftSec: number;
-  similarityScore: number; // 0.0 .. 1.0 (Levenshtein ratio)
+  similarityScore: number; // 0.0 .. 1.0 (вычисляется в C++ через FastLevenshtein)
   status: 'matched' | 'drifted' | 'missing' | 'unexpected';
 }
 
 export interface VADConfig {
   sampleRate: 16000;
   threshold: number; // Порог вероятности речи (0.5 по умолчанию)
-  minSpeechDurationMs: number; // Мин. длительность фразы (200 мс)
-  minSilenceDurationMs: number; // Мин. тишина для разделения фраз (300 мс)
+  minSpeechDurationMs: number; // Мин. длительность фразы (250 мс)
+  minSilenceDurationMs: number; // Мин. тишина для разделения фраз (350 мс)
   speechPadMs: number; // Буферизация границ (100 мс)
 }
 
@@ -76,7 +76,7 @@ export const AI_MODELS_CATALOG: Record<string, ModelDownloadInfo> = {
     name: 'Silero VAD v5 (ONNX)',
     sizeMb: 1.8,
     url: 'https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx',
-    description: 'Легковесная нейросеть детекции голосовой активности. Потребляет ~1.8 МБ RAM.'
+    description: 'Легковесная нейросеть детекции голосовой активности.'
   },
   whisper_tiny_encoder: {
     name: 'Whisper Tiny Encoder (ONNX INT8)',
@@ -113,7 +113,7 @@ export class AudioAIEngine {
   }
 
   /**
-   * Настройка ONNX Runtime Web WASM потоков и WebGPU провайдера
+   * Настройка ONNX Runtime Web окружения
    */
   private configureOrtEnvironment() {
     if (this.isWasmConfigured) return;
@@ -137,7 +137,6 @@ export class AudioAIEngine {
     const modelUrl = customModelPathOrUrl || AI_MODELS_CATALOG.silero_vad.url;
 
     try {
-      // Опции сессии: приоритет WebGPU, затем WASM с SIMD
       const sessionOptions: ort.InferenceSession.SessionOptions = {
         executionProviders: ['wasm'],
         graphOptimizationLevel: 'all'
@@ -147,14 +146,14 @@ export class AudioAIEngine {
       console.log('[AudioAIEngine] Silero VAD успешно загружен в память.');
       return true;
     } catch (err) {
-      console.warn('[AudioAIEngine] Ошибка загрузки ONNX модели по сети. Включаем высокоточный автономный DSP-VAD fallback:', err);
+      console.warn('[AudioAIEngine] ONNX сеть недоступна. Используется C++ SIMD128 Speech Energy VAD детектор:', err);
       return false;
     }
   }
 
   /**
    * Потоковая детекция активности голоса (Voice Activity Detection)
-   * Принимает Float32Array PCM аудио (любой частоты дискретизации, автоматически ресэмплирует в 16 кГц).
+   * Все математические расчеты формант, энергии и ZCR выполняются в C++ ядре.
    */
   public async processVAD(
     audioBuffer: Float32Array,
@@ -163,17 +162,15 @@ export class AudioAIEngine {
   ): Promise<SpeechSegment[]> {
     const config = { ...this.vadConfig, ...configPartial };
 
-    // Проверка граничного случая: пустой аудиобуфер
     if (!audioBuffer || audioBuffer.length === 0) {
       return [];
     }
 
-    // Ресэмплинг в 16000 Hz для Silero VAD
+    // Ресэмплинг выполняется через C++ модуль
     const audio16k = inputSampleRate === 16000
       ? audioBuffer
       : this.resampleAudio(audioBuffer, inputSampleRate, 16000);
 
-    // Размер чанка Silero VAD для 16 кГц = 512 сэмплов (~32 мс)
     const windowSize = 512;
     const totalSamples = audio16k.length;
 
@@ -192,7 +189,6 @@ export class AudioAIEngine {
     let segmentConfidenceSum = 0;
     let segmentChunkCount = 0;
 
-    // Рекуррентные векторы скрытых состояний Silero LSTM/GRU (h: [2, 1, 64], c: [2, 1, 64])
     let hState = new Float32Array(2 * 1 * 64).fill(0);
     let cState = new Float32Array(2 * 1 * 64).fill(0);
     const srTensor = new ort.Tensor('int64', BigInt64Array.from([BigInt(16000)]), [1]);
@@ -222,20 +218,18 @@ export class AudioAIEngine {
           const outputTensor = results['output'] || Object.values(results)[0];
           speechProb = outputTensor.data[0] as number;
 
-          // Обновление скрытых состояний нейросети
           if (results['hn']) hState = new Float32Array(results['hn'].data as ArrayLike<number>);
           if (results['cn']) cState = new Float32Array(results['cn'].data as ArrayLike<number>);
         } catch (e) {
           speechProb = this.calculateEnergyVoiceProbability(chunk);
         }
       } else {
-        // Высокоточный локальный DSP алгоритм детекции энергии речи
+        // Расчет энергии и вероятности голоса ИСКЛЮЧИТЕЛЬНО на C++
         speechProb = this.calculateEnergyVoiceProbability(chunk);
       }
 
       const currentSample = chunkOffset;
 
-      // Логика триггера гистерезиса
       if (speechProb >= config.threshold) {
         if (!isSpeaking) {
           isSpeaking = true;
@@ -252,7 +246,6 @@ export class AudioAIEngine {
             silenceStartSample = currentSample;
           }
 
-          // Если тишина длится дольше допустимого порога — закрываем сегмент
           if (currentSample - silenceStartSample >= minSilenceSamples) {
             const speechEndSample = Math.min(totalSamples, silenceStartSample + speechPadSamples);
             const durationSamples = speechEndSample - speechStartSample;
@@ -282,7 +275,6 @@ export class AudioAIEngine {
       }
     }
 
-    // Проверка последнего незакрытого сегмента
     if (isSpeaking) {
       const speechEndSample = totalSamples;
       const durationSamples = speechEndSample - speechStartSample;
@@ -306,60 +298,36 @@ export class AudioAIEngine {
   }
 
   /**
-   * Локальный DSP детектор спектральной энергии голоса (Zero-crossing rate + Formant Band energy)
-   * Использует оптимизированный C++ SIMD128 движок через globalNativeDAWBridge с фолбэком на JS.
+   * Вызов C++ SIMD128 детектора спектральной энергии и ZCR (SpeechEnergyDetector)
+   * Полностью исключает математические расчеты на JS.
    */
   private calculateEnergyVoiceProbability(chunk: Float32Array): number {
     const stats = globalNativeDAWBridge.calculateFrameEnergyStats(chunk);
-    if (stats.voiceProbability > 0) {
-      return stats.voiceProbability;
-    }
-    return Math.max(0.02, stats.rms * 5.0);
+    return stats.voiceProbability;
   }
 
   /**
-   * Высококачественный линейный ресэмплер PCM аудиобуфера
+   * C++ Catmull-Rom ресэмплинг PCM буфера
    */
   public resampleAudio(sourceBuffer: Float32Array, sourceSr: number, targetSr: number): Float32Array {
     if (sourceSr === targetSr) return sourceBuffer;
-
-    const ratio = sourceSr / targetSr;
-    const targetLength = Math.round(sourceBuffer.length / ratio);
-    const result = new Float32Array(targetLength);
-
-    for (let i = 0; i < targetLength; i++) {
-      const srcPos = i * ratio;
-      const index = Math.floor(srcPos);
-      const frac = srcPos - index;
-
-      const s0 = sourceBuffer[index] || 0;
-      const s1 = sourceBuffer[Math.min(sourceBuffer.length - 1, index + 1)] || 0;
-
-      result[i] = s0 + frac * (s1 - s0);
-    }
-
-    return result;
+    return globalNativeDAWBridge.resampleCatmullRom(sourceBuffer, sourceSr, 1);
   }
 
   // ==========================================================================
   // 3. ПАРСЕР СУБТИТРОВ И СЦЕНАРИЕВ (SRT, ASS, VTT)
   // ==========================================================================
 
-  /**
-   * Парсинг строковых данных субтитров (SRT / ASS / VTT) в структурированный массив
-   */
   public parseSubtitles(content: string): SubtitleLine[] {
     if (!content || !content.trim()) return [];
 
     const lines: SubtitleLine[] = [];
     const cleanContent = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
-    // Проверка формата: ASS / SSA
     if (cleanContent.includes('[Events]') || cleanContent.includes('Dialogue:')) {
       return this.parseAssSubtitles(cleanContent);
     }
 
-    // Стандартный парсинг SRT / VTT
     const blocks = cleanContent.split(/\n\s*\n/);
 
     for (const block of blocks) {
@@ -415,7 +383,6 @@ export class AudioAIEngine {
       }
 
       if (isEventsSection && line.startsWith('Dialogue:')) {
-        // Формат: Dialogue: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         const parts = line.substring(9).split(',');
         if (parts.length >= 9) {
           const startSec = this.assTimeToSeconds(parts[1].trim());
@@ -440,7 +407,6 @@ export class AudioAIEngine {
   }
 
   private timeStringToSeconds(timeStr: string): number {
-    // 00:01:23,456 или 00:01:23.456
     const cleanStr = timeStr.replace(',', '.');
     const parts = cleanStr.split(':');
 
@@ -459,7 +425,6 @@ export class AudioAIEngine {
   }
 
   private assTimeToSeconds(timeStr: string): number {
-    // Формат ASS: 0:01:23.45
     const parts = timeStr.split(':');
     if (parts.length === 3) {
       return parseFloat(parts[0]) * 3600 + parseFloat(parts[1]) * 60 + parseFloat(parts[2]);
@@ -473,8 +438,7 @@ export class AudioAIEngine {
 
   /**
    * Смарт-выравнивание распознанных сегментов речи (ASR) с загруженным сценарием (SRT/ASS).
-   * Рассчитывает временной дрейф (Time Drift), фонетико-лексическую схожесть (Levenshtein)
-   * и маркирует проблемные места (смещение реплики, пропущенная фраза).
+   * Сравнение строк и расчет схожести выполняется ИСКЛЮЧИТЕЛЬНО на C++ через fastStringSimilarity().
    */
   public alignSpeechWithScript(
     scriptLines: SubtitleLine[],
@@ -483,12 +447,10 @@ export class AudioAIEngine {
   ): AlignedSpeechPhrase[] {
     const alignedResults: AlignedSpeechPhrase[] = [];
 
-    // Граничный случай 1: Сценарий пуст
     if (!scriptLines || scriptLines.length === 0) {
       return [];
     }
 
-    // Граничный случай 2: Голос в аудио не обнаружен вовсе
     if (!speechSegments || speechSegments.length === 0) {
       return scriptLines.map((line) => ({
         lineIndex: line.index,
@@ -504,12 +466,10 @@ export class AudioAIEngine {
       }));
     }
 
-    // Выравнивание по временным окнам и тексту через Dynamic Distance
     for (let i = 0; i < scriptLines.length; i++) {
       const scriptLine = scriptLines[i];
       const targetMidTime = (scriptLine.startSec + scriptLine.endSec) / 2;
 
-      // Поиск ближайшего VAD / ASR сегмента
       let bestSegment: SpeechSegment | null = null;
       let minTimeDiff = Infinity;
 
@@ -523,7 +483,6 @@ export class AudioAIEngine {
         }
       }
 
-      // Поиск сопоставленного распознанного текста ASR
       let recText = '';
       if (recognizedPhrases && recognizedPhrases.length > 0) {
         const matchedAsr = recognizedPhrases.find(
@@ -538,6 +497,7 @@ export class AudioAIEngine {
 
       if (bestSegment && minTimeDiff < 5.0) {
         const timeDrift = bestSegment.startSec - scriptLine.startSec;
+        // Расчет схожести строк выполняется СТРОГО через C++ ядро
         const similarity = recText ? this.calculateStringSimilarity(scriptLine.text, recText) : 0.85;
         const status: 'matched' | 'drifted' = Math.abs(timeDrift) > 0.6 ? 'drifted' : 'matched';
 
@@ -574,7 +534,7 @@ export class AudioAIEngine {
 
   /**
    * Вычисление коэффициента схожести двух строк по Левенштейну (0.0 .. 1.0)
-   * Использует C++ UTF-8 модуль FastLevenshtein через globalNativeDAWBridge.
+   * Выполняется ИСКЛЮЧИТЕЛЬНО через C++ UTF-8 модуль FastLevenshtein в globalNativeDAWBridge.
    */
   public calculateStringSimilarity(s1: string, s2: string): number {
     return globalNativeDAWBridge.fastStringSimilarity(s1, s2);

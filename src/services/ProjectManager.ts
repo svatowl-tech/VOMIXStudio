@@ -20,9 +20,9 @@
 
 import {
   globalNativeDAWBridge,
-  NativeDAWBridge
+  NativeDAWBridge,
+  WavBitDepth
 } from './NativeDAWBridge';
-import { WavBitDepth } from '../utils/wavEncoder';
 
 /**
  * Метаданные дорожки в файле конфигурации project.json

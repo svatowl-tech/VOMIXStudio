@@ -12,15 +12,18 @@ import { ProjectWorkspace } from './components/ProjectWorkspace';
 import { MinimalStudio } from './components/MinimalStudio';
 import { LogConsole } from './components/LogConsole';
 import { ConsoleStatusBar } from './components/ConsoleStatusBar';
+import { MediaImportModal } from './components/MediaImportModal';
 import { useAudioEngine } from './hooks/useAudioEngine';
-import { TrackState, MasterState, LiveDAWEngine } from './audio/dawEngine';
+import { TrackState, MasterState, LiveDAWEngine, createNewTrack } from './audio/dawEngine';
 import { SubtitleLine } from './services/AudioAIEngine';
+import { SubtitleCue } from './services/ProjectManager';
 import { MediaNormalizer } from './services/MediaNormalizer';
 import { FULL_CPP_CODE, BUILD_WASM_SCRIPT } from './data/cppCode';
 import { Sparkles, Cpu, Layers, Terminal, Zap, ShieldCheck, Upload, Film, Video, Wand2, Volume2, CheckCircle2 } from 'lucide-react';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavigationTab>('studio');
+  const [showGlobalImportModal, setShowGlobalImportModal] = useState<boolean>(false);
 
   const {
     isInitialized,
@@ -34,6 +37,9 @@ export default function App() {
     togglePlay,
     seek,
     uploadAudioFileToTrack,
+    uploadRawPCMToTrack,
+    syncAllTracks,
+    syncTrackClips,
     setTrackVolume,
     setTrackPan,
     setTrackSolo,
@@ -205,6 +211,139 @@ export default function App() {
   };
 
   /**
+   * Сброс дорожек при создании нового проекта
+   */
+  const handleResetProjectState = () => {
+    setTracks([createNewTrack(1, 'Дублер 1 (Диалоги)', '#10b981')]);
+    setSourceVideoFile(null);
+    setSubtitles([]);
+  };
+
+  /**
+   * Импорт видео через модальный хаб
+   */
+  const handleModalImportVideo = async (videoFile: File, audioPcm?: Float32Array) => {
+    setSourceVideoFile(videoFile);
+    if (audioPcm && audioPcm.length > 0) {
+      const totalFrames = audioPcm.length / 2;
+      const targetTrackId = tracks[0]?.id || 1;
+      const clipId = Date.now();
+
+      setTracks((prev) => {
+        const videoClip = {
+          id: clipId,
+          name: `Audio_${videoFile.name}`,
+          offsetSamples: 0,
+          lengthSamples: totalFrames,
+          gain: 1.0,
+          pan: 0,
+          fadeInSamples: 0,
+          fadeOutSamples: 0,
+          buffer: audioPcm,
+          color: '#06b6d4'
+        };
+
+        const exists = prev.some((t) => t.id === targetTrackId);
+        if (exists) {
+          return prev.map((t) =>
+            t.id === targetTrackId
+              ? {
+                  ...t,
+                  name: `Звук видео [${videoFile.name}]`,
+                  clips: [videoClip]
+                }
+              : t
+          );
+        } else {
+          const newTr = createNewTrack(targetTrackId, `Звук видео [${videoFile.name}]`, '#06b6d4');
+          newTr.clips = [videoClip];
+          return [...prev, newTr];
+        }
+      });
+
+      uploadRawPCMToTrack(audioPcm, targetTrackId, clipId, 0, 1.0, 0.0, true);
+    }
+  };
+
+  /**
+   * Импорт аудиодорожки через модальный хаб
+   */
+  const handleModalImportAudioTrack = async (
+    file: File,
+    pcmBuffer: Float32Array,
+    config: { name: string; trackId?: number; color?: string; replaceExisting?: boolean }
+  ) => {
+    const totalFrames = pcmBuffer.length / 2;
+    const clipId = Date.now();
+    let effectiveTrackId = config.trackId;
+
+    setTracks((prev) => {
+      if (!effectiveTrackId || !config.replaceExisting) {
+        const nextId = effectiveTrackId || (prev.length > 0 ? Math.max(...prev.map((t) => t.id)) + 1 : 1);
+        effectiveTrackId = nextId;
+        const newTrack = createNewTrack(nextId, config.name, config.color);
+        newTrack.clips = [
+          {
+            id: clipId,
+            name: file.name,
+            offsetSamples: 0,
+            lengthSamples: totalFrames,
+            gain: 1.0,
+            pan: 0,
+            fadeInSamples: 0,
+            fadeOutSamples: 0,
+            buffer: pcmBuffer,
+            color: config.color || newTrack.color
+          }
+        ];
+        return [...prev, newTrack];
+      } else {
+        return prev.map((t) =>
+          t.id === effectiveTrackId
+            ? {
+                ...t,
+                name: config.name || t.name,
+                color: config.color || t.color,
+                clips: [
+                  {
+                    id: clipId,
+                    name: file.name,
+                    offsetSamples: 0,
+                    lengthSamples: totalFrames,
+                    gain: 1.0,
+                    pan: 0,
+                    fadeInSamples: 0,
+                    fadeOutSamples: 0,
+                    buffer: pcmBuffer,
+                    color: config.color || t.color
+                  }
+                ]
+              }
+            : t
+        );
+      }
+    });
+
+    if (effectiveTrackId) {
+      uploadRawPCMToTrack(pcmBuffer, effectiveTrackId, clipId, 0, 1.0, 0.0, true);
+    }
+  };
+
+  /**
+   * Импорт субтитров через модальный хаб
+   */
+  const handleModalImportSubtitles = async (cues: SubtitleCue[]) => {
+    const lines: SubtitleLine[] = cues.map((c) => ({
+      index: c.index,
+      startSec: c.startSec,
+      endSec: c.endSec,
+      text: c.text,
+      speaker: c.speaker || 'Голос'
+    }));
+    setSubtitles(lines);
+  };
+
+  /**
    * Запуск автоматического выравнивания громкости дорожек (Loudness Matching)
    */
   const handleAutoMatchLoudness = (targetRmsDb = -18.0) => {
@@ -227,7 +366,11 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-emerald-500 selection:text-slate-950">
       {/* Top Navigation */}
-      <Header activeTab={activeTab} onSelectTab={setActiveTab} />
+      <Header
+        activeTab={activeTab}
+        onSelectTab={setActiveTab}
+        onOpenImportModal={() => setShowGlobalImportModal(true)}
+      />
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
@@ -362,6 +505,8 @@ export default function App() {
               isPlaying={isPlaying}
               onSeek={seek}
               onUpdateTrack={handleUpdateTrack}
+              syncAllTracks={syncAllTracks}
+              syncTrackClips={syncTrackClips}
             />
 
             {/* Multitrack Mixer Channel Strips */}
@@ -532,6 +677,18 @@ export default function App() {
       <footer className="border-t border-slate-800 bg-slate-950 py-3 px-6 text-center text-xs text-slate-500 font-mono">
         FFmpeg WASM Video Muxing • C++17 DSP Audio Core • AudioWorklet Bridge • Silero VAD ONNX Web
       </footer>
+
+      {/* Единый модальный хаб импорта медиаматериалов */}
+      <MediaImportModal
+        isOpen={showGlobalImportModal}
+        onClose={() => setShowGlobalImportModal(false)}
+        existingTracks={tracks}
+        currentVideoFile={sourceVideoFile}
+        onResetProjectState={handleResetProjectState}
+        onImportVideo={handleModalImportVideo}
+        onImportAudioTrack={handleModalImportAudioTrack}
+        onImportSubtitles={handleModalImportSubtitles}
+      />
     </div>
   );
 }

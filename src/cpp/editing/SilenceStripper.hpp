@@ -2,21 +2,21 @@
 
 /**
  * ============================================================================
- * SilenceStripper.hpp - Модуль детекции пауз и стриппинга тишины в C++ / WASM
+ * SilenceStripper.hpp - Модуль детекции пауз и нарезки фраз в C++ / WebAssembly
  * ============================================================================
  * Высокопроизводительный C++ модуль для мгновенного анализа энергии сэмплов,
- * детекции пауз и стриппинга участков тишины с сохранением голосовых сегментов.
+ * детекции пауз и вырезания тишины из голосовых дорожек и начиток.
  * 
- * Архитектурные требования:
- * - Выполняется в WebAssembly с аппаратной векторизацией SIMD128.
- * - Без динамических аллокаций памяти в циклах анализа.
- * - Потоковая обработка PCM Float32 буферов.
+ * Архитектурные принципы:
+ * 1. Браузер — только GUI. Вся математика выполняется на нативном C++.
+ * 2. Аппаратное ускорение WebAssembly SIMD128 (v128_t, 4 float за такт).
+ * 3. Нулевые динамические аллокации (Zero Malloc) внутри циклов сканирования.
+ * 4. Защитные буферы paddingMs (40-60 мс) для исключения срезания согласных звуков.
  * ============================================================================
  */
 
 #include <cstdint>
 #include <cstddef>
-#include <vector>
 #include "../dsp/AudioMath.hpp"
 
 namespace DAWCore {
@@ -32,19 +32,19 @@ struct AudioSegment {
 };
 
 /**
- * Конфигурация детекции тишины
+ * Конфигурация детекции тишины и пауз
  */
 struct SilenceStripperConfig {
     float sampleRate = 48000.0f;
-    float thresholdDb = -40.0f;       // Порог тишины в dB (например, -40 dB)
+    float thresholdDb = -40.0f;       // Порог тишины в dBFS (например, -40 dBFS)
     float minSilenceMs = 300.0f;      // Минимальная длительность тишины для разреза (мс)
-    float paddingMs = 50.0f;          // Удержание краев речи до и после сегмента (мс)
-    float frameSizeMs = 10.0f;        // Размер блока анализа энергии (10-20 мс)
+    float paddingMs = 50.0f;          // Защитный запас краев речи до и после сегмента (мс)
+    float frameSizeMs = 10.0f;        // Размер блока анализа энергии (10 мс)
     bool isStereo = false;            // Флаг interleaved стерео (true) или моно (false)
 };
 
 /**
- * Статистика блока энергии
+ * Статистика блока энергии кадра (10 мс)
  */
 struct EnergyFrame {
     float rms;
@@ -52,12 +52,12 @@ struct EnergyFrame {
 };
 
 /**
- * Класс SilenceStripper - C++ DSP алгоритм стриппинга тишины
+ * Класс SilenceStripper - C++ SIMD128 DSP алгоритм мгновенного стриппинга тишины
  */
 class SilenceStripper {
 public:
     /**
-     * Вычисление энергии одного кадра с SIMD128 векторизацией
+     * Высокоскоростной расчет RMS энергии и пика кадра с SIMD128 векторизацией
      * @param samples Указатель на PCM Float32 данные
      * @param numSamples Количество сэмплов в кадре
      * @return EnergyFrame { rms, peak }
@@ -65,13 +65,32 @@ public:
     static EnergyFrame calculateFrameEnergySIMD(const float* samples, size_t numSamples) noexcept;
 
     /**
-     * Анализ PCM буфера и расчет границ звуковых сегментов (без участков тишины)
-     * @param inPcm Входной буфер PCM Float32
+     * Основной нативный метод удаления тишины и нарезки длинной начитки на отдельные фразы
+     * @param inBuffer Входной непрерывный PCM Float32 буфер
      * @param totalSamples Общее количество сэмплов в буфере
-     * @param config Параметры детекции тишины
-     * @param outSegments Предварительно выделенный буфер для сегментов
-     * @param maxSegments Максимальная вместимость outSegments
-     * @return Фактическое количество найденных сегментов
+     * @param thresholdDb Порог тишины в dBFS (например, -40.0f)
+     * @param minSilenceMs Минимальная длительность паузы в мс для разделения фраз (например, 300.0f)
+     * @param paddingMs Защитные буферы по краям в мс для сохранения согласных звуков (например, 50.0f)
+     * @param isStereo Флаг стерео (true/false)
+     * @param sampleRate Частота дискретизации (например, 48000)
+     * @param outSegments Предварительно выделенный массив структур AudioSegment
+     * @param maxSegments Максимальная вместимость массива outSegments
+     * @return Фактическое количество найденных голосовых сегментов
+     */
+    static int stripSilence(
+        const float* inBuffer,
+        size_t totalSamples,
+        float thresholdDb,
+        float minSilenceMs,
+        float paddingMs,
+        bool isStereo,
+        int sampleRate,
+        AudioSegment* outSegments,
+        int maxSegments
+    ) noexcept;
+
+    /**
+     * Потоковый анализ с передачей структуры конфигурации
      */
     static size_t detectSegments(
         const float* inPcm,
@@ -82,17 +101,7 @@ public:
     ) noexcept;
 
     /**
-     * C-Style Embind метод для вызова из JavaScript / WebAssembly
-     * @param inPcmPtr Указатель на Float32Array буфер клипа в куче WASM
-     * @param totalSamples Длина буфера в сэмплах
-     * @param thresholdDb Порог тишины (например, -40.0f)
-     * @param minSilenceMs Минимальная тишина (например, 300.0f мс)
-     * @param paddingMs Запас краев речи (например, 50.0f мс)
-     * @param outSegmentsPtr Указатель на буфер AudioSegment структур
-     * @param maxSegments Максимальное количество сегментов
-     * @param isStereo Флаг стерео (true/false)
-     * @param sampleRate Частота дискретизации (по умолчанию 48000.0f)
-     * @return Количество найденных сегментов
+     * C-Style Embind метод для вызова из JavaScript / WebAssembly по указателям кучи
      */
     static int stripSilenceFromClip(
         uintptr_t inPcmPtr,
@@ -107,7 +116,7 @@ public:
     ) noexcept;
 
     /**
-     * Вспомогательный метод для прямого выделения буфера AudioSegment в WASM памяти
+     * Выделение выровненного буфера AudioSegment в WASM памяти
      */
     static uintptr_t allocateSegmentBuffer(size_t maxSegments) noexcept;
 

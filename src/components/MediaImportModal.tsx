@@ -4,27 +4,25 @@
  * ============================================================================
  * Единый интерактивный хаб импорта медиаматериалов для проекта дубляжа:
  * 
- * 1. Загрузка пачкой и Drag & Drop любых файлов:
- *    - Видео: MP4, MKV, MOV, WebM, AVI, M4V, OGV
- *    - Аудио: WAV, MP3, FLAC, AAC, OGG, M4A, AIFF, WMA
- *    - Субтитры: SRT, ASS, SSA, VTT, JSON
+ * 1. Поддержка двух ключевых сценариев работы:
+ *    - «Открыть проект из файлов»: пакетная загрузка (видео + дубли + субтитры),
+ *      создание новой структуры проекта с нуля.
+ *    - «Догрузить файлы в текущий проект»: добавление недостающих дорожек дублеров,
+ *      замена видеоряда или импорт новой редакции субтитров без сброса уже
+ *      расставленных на таймлайне клипов и настроек DSP.
  * 
- * 2. Сценарий «Догрузить недостающий файл»:
- *    - Добавление отдельных дублей или новых версий аудио/видео/субтитров
- *      без сброса уже настроенных параметров проекта и таймлайна.
+ * 2. Автоматическое распознавание и C++ WASM маршрутизация:
+ *    - Видео (MP4, MKV, MOV, WebM, AVI): передача в видеомонитор + нативное извлечение
+ *      оригинального звука через MediaNormalizer (C++ Catmull-Rom ресэмплинг 48 кГц).
+ *    - Аудиофайлы (WAV, MP3, FLAC, OGG, AAC, M4A, AIFF): векторный ресэмплинг до 48 кГц
+ *      в куче WASM и распределение по новым или свободным дорожкам микшера.
+ *    - Субтитры (SRT, ASS, SSA, VTT, JSON): мгновенный парсинг таймкодов и привязка к таймлайну.
  * 
- * 3. Автоматическая C++ WebAssembly маршрутизация:
- *    - Видео -> отправка в монитор + автоматическое извлечение оригинального звука
- *      через MediaNormalizer (C++ Catmull-Rom ресэмплинг в 48 кГц стерео).
- *    - Аудиодорожки -> векторный ресэмплинг до 48 кГц в куче WASM и создание
- *      клипов с waveform-дескрипторами.
- *    - Субтитры -> парсинг таймкодов реплик и привязка к таймлайну.
- * 
- * 4. Прямое сохранение и регистрация в `project/project.json` через ProjectManager.
+ * 3. Прямая регистрация и сохранение в project/project.json через ProjectManager.
  * ============================================================================
  */
 
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Upload,
   Film,
@@ -42,12 +40,21 @@ import {
   RefreshCw,
   FolderOpen,
   ArrowRight,
-  HardDrive
+  HardDrive,
+  FolderPlus,
+  Sliders,
+  Check,
+  FileUp
 } from 'lucide-react';
-import { TrackState, DEFAULT_TRACK_COLORS, createNewTrack } from '../audio/dawEngine';
+import { TrackState, DEFAULT_TRACK_COLORS } from '../audio/dawEngine';
 import { MediaNormalizer } from '../services/MediaNormalizer';
 import { globalProjectManager, SubtitleCue, TrackMetadata, VideoMetadata } from '../services/ProjectManager';
 import { systemLogger } from '../services/SystemLogger';
+
+/**
+ * Режимы импорта
+ */
+export type ImportMode = 'append' | 'new_project';
 
 /**
  * Структура элемента очереди импорта
@@ -75,6 +82,11 @@ export interface MediaImportModalProps {
   onClose: () => void;
   existingTracks?: TrackState[];
   currentVideoFile?: File | null;
+  defaultMode?: ImportMode;
+  /**
+   * Сброс текущего состояния таймлайна перед импортом нового проекта
+   */
+  onResetProjectState?: () => void;
   /**
    * Колбэк импорта видеофайла
    */
@@ -99,7 +111,12 @@ export interface MediaImportModalProps {
   /**
    * Финальный колбэк после завершения импорта всех элементов
    */
-  onImportComplete?: (summary: { videoCount: number; audioCount: number; subtitleCount: number }) => void;
+  onImportComplete?: (summary: {
+    mode: ImportMode;
+    videoCount: number;
+    audioCount: number;
+    subtitleCount: number;
+  }) => void;
 }
 
 export const MediaImportModal: React.FC<MediaImportModalProps> = ({
@@ -107,11 +124,14 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
   onClose,
   existingTracks = [],
   currentVideoFile = null,
+  defaultMode = 'append',
+  onResetProjectState,
   onImportVideo,
   onImportAudioTrack,
   onImportSubtitles,
   onImportComplete
 }) => {
+  const [importMode, setImportMode] = useState<ImportMode>(defaultMode);
   const [items, setItems] = useState<ImportItem[]>([]);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
@@ -126,8 +146,9 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
       setItems([]);
       setIsProcessing(false);
       setStatusMessage(null);
+      setImportMode(defaultMode);
     }
-  }, [isOpen]);
+  }, [isOpen, defaultMode]);
 
   if (!isOpen) return null;
 
@@ -149,7 +170,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
   };
 
   /**
-   * Добавление списка файлов в очередь импорта с умными дефолтами
+   * Добавление списка файлов в очередь импорта с интеллектуальной авто-маршрутизацией
    */
   const addFilesToQueue = (files: FileList | File[]) => {
     const newItems: ImportItem[] = [];
@@ -163,7 +184,8 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
 
       const fileType = detectFileType(file);
       const cleanName = file.name.replace(/\.[^/.]+$/, '');
-      const defaultColor = DEFAULT_TRACK_COLORS[(existingTracks.length + items.length + index) % DEFAULT_TRACK_COLORS.length];
+      const colorIndex = (existingTracks.length + items.length + index) % DEFAULT_TRACK_COLORS.length;
+      const defaultColor = DEFAULT_TRACK_COLORS[colorIndex];
 
       newItems.push({
         id: `import_${Date.now()}_${index}_${Math.random().toString(36).substring(2, 6)}`,
@@ -173,7 +195,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
         sizeBytes: file.size,
         status: 'pending',
         progressPercent: 0,
-        targetTrackId: undefined, // По умолчанию создаем новую дорожку
+        targetTrackId: undefined, // По умолчанию создается новая дорожка
         targetTrackName: cleanName,
         trackColor: defaultColor,
         replaceExistingTrack: false,
@@ -183,7 +205,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
 
     if (newItems.length > 0) {
       setItems((prev) => [...prev, ...newItems]);
-      systemLogger.info('Project', `В очередь импорта добавлено файлов: ${newItems.length}`);
+      systemLogger.info('Project', `В очередь импорта добавлено файлов: ${newItems.length} (Режим: ${importMode === 'new_project' ? 'Новый проект' : 'Догрузка'})`);
     }
   };
 
@@ -242,11 +264,17 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
     setIsProcessing(true);
     setStatusMessage('Запуск C++ конвейера унификации и регистрации файлов...');
 
+    // Если выбран режим "Открыть новый проект" — сбрасываем существующие дорожки
+    if (importMode === 'new_project' && onResetProjectState) {
+      onResetProjectState();
+    }
+
     let videoCount = 0;
     let audioCount = 0;
     let subtitleCount = 0;
 
-    const activeProjectTracks: TrackMetadata[] = existingTracks.map((t) => ({
+    const baseTracks = importMode === 'new_project' ? [] : existingTracks;
+    const activeProjectTracks: TrackMetadata[] = baseTracks.map((t) => ({
       id: t.id,
       name: t.name,
       fileName: t.clips[0]?.name || '',
@@ -281,7 +309,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
 
           // --- А. ВИДЕОФАЙЛ ---
           if (item.type === 'video') {
-            updateItem(item.id, { progressPercent: 50 });
+            updateItem(item.id, { progressPercent: 40 });
             setStatusMessage(`Обработка видеопотока [${item.file.name}]...`);
 
             let extractedPcm: Float32Array | undefined = undefined;
@@ -289,7 +317,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
             // Автоматическое извлечение оригинального звука через C++ Catmull-Rom ресэмплинг
             if (item.extractOriginalAudio) {
               try {
-                setStatusMessage(`Извлечение звука из [${item.file.name}] через C++ Catmull-Rom ресэмплинг...`);
+                setStatusMessage(`Извлечение аудио из [${item.file.name}] через C++ Catmull-Rom ресэмплинг...`);
                 extractedPcm = await MediaNormalizer.extractAudioFromVideo(item.file, 48000);
                 systemLogger.info('MediaNormalizer', `Звуковая дорожка видео извлечена: ${Math.round(extractedPcm.length / 2)} сэмплов 48 кГц.`);
               } catch (audioExtErr) {
@@ -395,13 +423,13 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
       setStatusMessage(`Импорт завершен: Видео: ${videoCount}, Аудио: ${audioCount}, Субтитры: ${subtitleCount}`);
 
       if (onImportComplete) {
-        onImportComplete({ videoCount, audioCount, subtitleCount });
+        onImportComplete({ mode: importMode, videoCount, audioCount, subtitleCount });
       }
 
-      // Небольшая задержка перед закрытием модального окна для отображения успеха
+      // Задержка перед закрытием модального окна для отображения успешного завершения
       setTimeout(() => {
         onClose();
-      }, 800);
+      }, 700);
     } catch (globalErr: any) {
       console.error('Сбой сквозного импорта:', globalErr);
       setStatusMessage(`Ошибка импорта: ${globalErr?.message || globalErr}`);
@@ -416,15 +444,19 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
   const totalSizeBytes = items.reduce((acc, it) => acc + it.sizeBytes, 0);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-in fade-in duration-200">
+    <div
+      id="media-import-modal-overlay"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-in fade-in duration-200"
+    >
       <div
-        className="bg-zinc-900 border border-zinc-700/80 rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden"
+        id="media-import-modal-container"
+        className="bg-zinc-900 border border-zinc-700/80 rounded-2xl w-full max-w-4xl max-h-[92vh] flex flex-col shadow-2xl overflow-hidden"
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
         {/* Шапка модального окна */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800 bg-zinc-950/60">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800 bg-zinc-950/70">
           <div className="flex items-center gap-3">
             <div className="p-2.5 bg-gradient-to-br from-cyan-500/20 to-emerald-500/20 border border-cyan-500/40 rounded-xl text-cyan-400">
               <Upload className="w-5 h-5" />
@@ -433,30 +465,73 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
               <h2 className="text-lg font-bold text-zinc-100 flex items-center gap-2">
                 Хаб импорта медиаматериалов
                 <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-950/60 text-cyan-400 border border-cyan-800/60 font-mono font-normal">
-                  C++ SIMD128 48kHz
+                  C++ Catmull-Rom 48kHz
                 </span>
               </h2>
               <p className="text-xs text-zinc-400">
-                Загрузка видео, дублей, стемов и субтитров без сброса настроек проекта
+                Загрузка видеоряда, дублей, стемов и субтитров с автоматической нормализацией
               </p>
             </div>
           </div>
           <button
+            id="btn-close-import-modal"
             onClick={onClose}
             disabled={isProcessing}
-            className="p-2 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded-lg transition-colors disabled:opacity-50"
+            className="p-2 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded-lg transition-colors disabled:opacity-50 cursor-pointer"
             title="Закрыть"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
+        {/* Переключатель режимов: "Открыть проект из файлов" vs "Догрузить в проект" */}
+        <div className="px-6 pt-4 pb-2 border-b border-zinc-800/60 bg-zinc-950/40 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center p-1 bg-zinc-950 rounded-xl border border-zinc-800">
+            <button
+              type="button"
+              id="tab-mode-append"
+              onClick={() => setImportMode('append')}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 cursor-pointer ${
+                importMode === 'append'
+                  ? 'bg-cyan-600 text-white shadow-md shadow-cyan-950/40'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              <FileUp className="w-3.5 h-3.5" />
+              Догрузить файлы в текущий проект
+            </button>
+
+            <button
+              type="button"
+              id="tab-mode-new-project"
+              onClick={() => setImportMode('new_project')}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 cursor-pointer ${
+                importMode === 'new_project'
+                  ? 'bg-emerald-600 text-white shadow-md shadow-emerald-950/40'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              <FolderPlus className="w-3.5 h-3.5" />
+              Открыть новый проект из файлов
+            </button>
+          </div>
+
+          <div className="text-[11px] text-zinc-400 font-mono">
+            {importMode === 'append' ? (
+              <span className="text-cyan-400">✓ Сохраняет существующие дорожки и клипы таймлайна</span>
+            ) : (
+              <span className="text-emerald-400">✓ Формирует чистый таймлайн под загружаемую пачку</span>
+            )}
+          </div>
+        </div>
+
         {/* Тело модального окна */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        <div className="flex-1 overflow-y-auto p-6 space-y-5">
           {/* Зона Drag & Drop и выбора файлов */}
           <div
+            id="dropzone-media-import"
             onClick={() => fileInputRef.current?.click()}
-            className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all duration-200 flex flex-col items-center justify-center gap-3 ${
+            className={`border-2 border-dashed rounded-xl p-7 text-center cursor-pointer transition-all duration-200 flex flex-col items-center justify-center gap-3 ${
               isDragging
                 ? 'border-cyan-400 bg-cyan-950/30 scale-[0.99]'
                 : 'border-zinc-700/80 hover:border-zinc-500 bg-zinc-950/40 hover:bg-zinc-950/70'
@@ -470,12 +545,12 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
               className="hidden"
               onChange={handleFileInputChange}
             />
-            <div className="w-14 h-14 rounded-full bg-zinc-800/80 border border-zinc-700 flex items-center justify-center text-cyan-400 shadow-inner">
-              <Upload className="w-7 h-7 animate-bounce" />
+            <div className="w-12 h-12 rounded-full bg-zinc-800/90 border border-zinc-700 flex items-center justify-center text-cyan-400 shadow-inner">
+              <Upload className="w-6 h-6 animate-pulse" />
             </div>
             <div>
               <p className="text-sm font-semibold text-zinc-200">
-                Перетащите сюда любые файлы проекта или нажмите для выбора
+                Перетащите сюда файлы проекта или нажмите для выбора
               </p>
               <p className="text-xs text-zinc-400 mt-1">
                 Видео (MP4, MKV, MOV, WebM), Аудио (WAV, MP3, FLAC, AAC, OGG), Субтитры (SRT, ASS, VTT, JSON)
@@ -483,11 +558,11 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
             </div>
             <div className="flex items-center gap-2 mt-1 text-[11px] text-zinc-400 bg-zinc-900/90 px-3 py-1.5 rounded-lg border border-zinc-800 font-mono">
               <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-              <span>Авто-ресэмплинг C++ до 48 кГц • Извлечение аудио из видео • Парсер таймкодов</span>
+              <span>Авто-ресэмплинг C++ 48 кГц • Извлечение аудио из видео • Парсер таймкодов</span>
             </div>
           </div>
 
-          {/* Список добавленных элементов */}
+          {/* Список добавленных элементов в очереди */}
           {items.length > 0 && (
             <div className="space-y-3">
               <div className="flex items-center justify-between">
@@ -515,7 +590,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
                 </div>
               </div>
 
-              <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+              <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
                 {items.map((item) => {
                   const isAudio = item.type === 'audio';
                   const isVideo = item.type === 'video';
@@ -528,7 +603,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
                     >
                       <div className="flex items-center justify-between gap-3">
                         <div className="flex items-center gap-3 min-w-0">
-                          {/* Иконка типа */}
+                          {/* Иконка типа файла */}
                           <div
                             className={`p-2 rounded-lg border flex-shrink-0 ${
                               isVideo
@@ -555,7 +630,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
                               <span className="uppercase text-zinc-400">{item.type}</span>
                               {item.status === 'processing' && (
                                 <span className="text-cyan-400 flex items-center gap-1">
-                                  <RefreshCw className="w-3 h-3 animate-spin" /> Обработка...
+                                  <RefreshCw className="w-3 h-3 animate-spin" /> Обработка C++...
                                 </span>
                               )}
                               {item.status === 'success' && (
@@ -575,8 +650,9 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
                         {/* Кнопка удаления из очереди */}
                         {!isProcessing && (
                           <button
+                            type="button"
                             onClick={() => removeItem(item.id)}
-                            className="p-1.5 text-zinc-400 hover:text-rose-400 hover:bg-rose-950/40 rounded-lg transition-colors"
+                            className="p-1.5 text-zinc-400 hover:text-rose-400 hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer"
                             title="Удалить из очереди"
                           >
                             <Trash2 className="w-4 h-4" />
@@ -606,7 +682,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
                                   });
                                 }
                               }}
-                              className="bg-zinc-900 border border-zinc-700 text-zinc-200 rounded px-2 py-1 text-xs focus:border-cyan-500 outline-none"
+                              className="bg-zinc-900 border border-zinc-700 text-zinc-200 rounded px-2 py-1 text-xs focus:border-cyan-500 outline-none cursor-pointer"
                             >
                               <option value="new">+ Создать новую дорожку</option>
                               {existingTracks.map((t) => (
@@ -638,7 +714,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
                                   key={color}
                                   type="button"
                                   onClick={() => updateItem(item.id, { trackColor: color })}
-                                  className={`w-4 h-4 rounded-full border transition-transform ${
+                                  className={`w-4 h-4 rounded-full border transition-transform cursor-pointer ${
                                     item.trackColor === color
                                       ? 'scale-125 border-white shadow-sm'
                                       : 'border-transparent hover:scale-110'
@@ -659,7 +735,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
                               type="checkbox"
                               checked={item.extractOriginalAudio !== false}
                               onChange={(e) => updateItem(item.id, { extractOriginalAudio: e.target.checked })}
-                              className="accent-cyan-500 rounded"
+                              className="accent-cyan-500 rounded cursor-pointer"
                             />
                             <span>Автоматически извлечь оригинальный звук в дорожку референса (C++ 48kHz)</span>
                           </label>
@@ -689,7 +765,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
               <div>
                 <p className="font-medium text-zinc-200">Прямая регистрация в файловой системе</p>
                 <p className="text-zinc-400 text-[11px]">
-                  Автоматическая запись в project/project.json и локальную папку
+                  Автоматическая запись в project/project.json и локальную директорию
                 </p>
               </div>
             </div>
@@ -698,7 +774,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
                 type="checkbox"
                 checked={saveToDiskDirectly}
                 onChange={(e) => setSaveToDiskDirectly(e.target.checked)}
-                className="accent-cyan-500 rounded"
+                className="accent-cyan-500 rounded cursor-pointer"
               />
               <span className="text-zinc-300 font-mono">Сохранять на диск</span>
             </label>
@@ -716,9 +792,10 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
         {/* Футер с кнопками управления */}
         <div className="flex items-center justify-between px-6 py-4 border-t border-zinc-800 bg-zinc-950/80">
           <button
+            type="button"
             onClick={() => fileInputRef.current?.click()}
             disabled={isProcessing}
-            className="flex items-center gap-2 px-3.5 py-2 text-xs font-medium text-zinc-300 hover:text-zinc-100 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-xl transition-colors disabled:opacity-50"
+            className="flex items-center gap-2 px-3.5 py-2 text-xs font-medium text-zinc-300 hover:text-zinc-100 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-xl transition-colors disabled:opacity-50 cursor-pointer"
           >
             <Plus className="w-4 h-4" />
             Добавить еще файлы
@@ -726,16 +803,19 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
 
           <div className="flex items-center gap-3">
             <button
+              type="button"
               onClick={onClose}
               disabled={isProcessing}
-              className="px-4 py-2 text-xs font-medium text-zinc-400 hover:text-zinc-200 transition-colors disabled:opacity-50"
+              className="px-4 py-2 text-xs font-medium text-zinc-400 hover:text-zinc-200 transition-colors disabled:opacity-50 cursor-pointer"
             >
               Отмена
             </button>
             <button
+              type="button"
+              id="btn-confirm-media-import"
               onClick={handleStartImport}
               disabled={items.length === 0 || isProcessing}
-              className="flex items-center gap-2 px-5 py-2.5 text-xs font-bold text-black bg-gradient-to-r from-cyan-400 to-emerald-400 hover:from-cyan-300 hover:to-emerald-300 rounded-xl shadow-lg shadow-cyan-500/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              className="flex items-center gap-2 px-5 py-2.5 text-xs font-bold text-black bg-gradient-to-r from-cyan-400 to-emerald-400 hover:from-cyan-300 hover:to-emerald-300 rounded-xl shadow-lg shadow-cyan-500/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
             >
               {isProcessing ? (
                 <>
@@ -745,7 +825,9 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
               ) : (
                 <>
                   <ArrowRight className="w-4 h-4" />
-                  Импортировать в проект ({items.length})
+                  {importMode === 'new_project'
+                    ? `Создать проект из файлов (${items.length})`
+                    : `Импортировать в проект (${items.length})`}
                 </>
               )}
             </button>

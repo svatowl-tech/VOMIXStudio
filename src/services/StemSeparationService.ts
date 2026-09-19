@@ -19,7 +19,6 @@
  */
 
 import * as ort from 'onnxruntime-web';
-import { encodeWAV } from '../utils/wavEncoder';
 import { globalNativeDAWBridge } from './NativeDAWBridge';
 
 /**
@@ -276,18 +275,9 @@ export class StemSeparationService {
 
     report('encoding_wav', 85, 'Энкодинг мастер WAV файлов (24-bit RIFF)...');
 
-    // Формирование итоговых WAV Blobs
-    const vocalsWavBlob = encodeWAV(vocalsL, vocalsR, {
-      sampleRate,
-      bitDepth: 24,
-      numChannels: 2,
-    });
-
-    const karaokeWavBlob = encodeWAV(karaokeL, karaokeR, {
-      sampleRate,
-      bitDepth: 24,
-      numChannels: 2,
-    });
+    // Формирование итоговых WAV Blobs через нативное C++ ядро
+    const vocalsWavBlob = globalNativeDAWBridge.packWavNative(vocalsL, vocalsR, sampleRate, 24);
+    const karaokeWavBlob = globalNativeDAWBridge.packWavNative(karaokeL, karaokeR, sampleRate, 24);
 
     const processingTimeMs = performance.now() - startTime;
     report('complete', 100, `Разделение дорожек завершено на C++ за ${(processingTimeMs / 1000).toFixed(2)} сек.`);
