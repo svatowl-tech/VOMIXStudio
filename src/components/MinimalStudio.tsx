@@ -96,7 +96,8 @@ export const MinimalStudio: React.FC = () => {
       syncAllTracks(tracks);
     }
   }, [isInitialized, tracks, syncAllTracks]);
-  const [activeDspTrack, setActiveDspTrack] = useState<TrackState | null>(null);
+  const [activeDspTrackId, setActiveDspTrackId] = useState<number | null>(null);
+  const activeDspTrack = tracks.find((t) => t.id === activeDspTrackId) || null;
   const [dbStats, setDbStats] = useState<DatabaseStats | null>(null);
   const [showDbModal, setShowDbModal] = useState<boolean>(false);
   const [master, setMaster] = useState<MasterState>({
@@ -1562,7 +1563,7 @@ export const MinimalStudio: React.FC = () => {
 
                   {/* Кнопка открытия C++ DSP рэка */}
                   <button
-                    onClick={() => setActiveDspTrack(track)}
+                    onClick={() => setActiveDspTrackId(activeDspTrackId === track.id ? null : track.id)}
                     className="w-full mb-3 px-2.5 py-1.5 bg-[#0f1422] hover:bg-slate-800 border border-slate-700/80 rounded-lg text-xs font-semibold text-slate-200 flex items-center justify-between transition-all cursor-pointer shadow-sm"
                   >
                     <div className="flex items-center gap-1.5">
@@ -1713,13 +1714,13 @@ export const MinimalStudio: React.FC = () => {
         </div>
       </div>
 
-      {/* Модальное окно C++ DSP Vocal Rack для выбранного трека */}
+      {/* Встроенный C++ DSP Vocal Rack рэк для выбранного трека */}
       {activeDspTrack && (
         <TrackDSPPanel
           track={activeDspTrack}
           allTracks={tracks}
           onUpdateTrack={handleUpdateDspTrack}
-          onClose={() => setActiveDspTrack(null)}
+          onClose={() => setActiveDspTrackId(null)}
         />
       )}
 

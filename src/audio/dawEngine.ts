@@ -62,6 +62,42 @@ export interface AutoDuckerParams {
   currentDuckingGainDb: number;
 }
 
+export interface DeClickerParams {
+  threshold: number;
+  repairWindow: number;
+  enabled: boolean;
+  clicksDetected?: number;
+}
+
+export interface DePlosiveParams {
+  thresholdDb: number;
+  frequency: number;
+  attackMs: number;
+  releaseMs: number;
+  enabled: boolean;
+  currentReduction?: number;
+}
+
+export interface NoiseGateParams {
+  thresholdDb: number;
+  attackMs: number;
+  holdMs: number;
+  releaseMs: number;
+  floorDb: number;
+  enabled: boolean;
+  currentGain?: number;
+}
+
+export interface DeEsserParams {
+  thresholdDb: number;
+  frequency: number;
+  ratio: number;
+  attackMs: number;
+  releaseMs: number;
+  enabled: boolean;
+  currentGainReductionDb?: number;
+}
+
 export interface TrackState {
   id: number;
   name: string;
@@ -79,6 +115,10 @@ export interface TrackState {
   };
   compressor: CompressorParams;
   autoDucker: AutoDuckerParams;
+  deClicker: DeClickerParams;
+  dePlosive: DePlosiveParams;
+  noiseGate: NoiseGateParams;
+  deEsser: DeEsserParams;
   peakL: number;
   peakR: number;
 }
@@ -137,9 +177,56 @@ export function createNewTrack(id: number, name?: string, color?: string): Track
       sourceTrackId: 1,
       currentDuckingGainDb: 0
     },
+    deClicker: {
+      threshold: 0.08,
+      repairWindow: 4,
+      enabled: false,
+      clicksDetected: 0
+    },
+    dePlosive: {
+      thresholdDb: -24.0,
+      frequency: 80.0,
+      attackMs: 2.0,
+      releaseMs: 50.0,
+      enabled: false,
+      currentReduction: 0
+    },
+    noiseGate: {
+      thresholdDb: -45.0,
+      attackMs: 2.0,
+      holdMs: 30.0,
+      releaseMs: 100.0,
+      floorDb: -60.0,
+      enabled: false,
+      currentGain: 0
+    },
+    deEsser: {
+      thresholdDb: -22.0,
+      frequency: 6000.0,
+      ratio: 4.0,
+      attackMs: 1.0,
+      releaseMs: 40.0,
+      enabled: false,
+      currentGainReductionDb: 0
+    },
     peakL: 0,
     peakR: 0
   };
+}
+
+export function populateTrackDSPDefaults(track: Partial<TrackState> & { id: number; name: string }): TrackState {
+  const d = createNewTrack(track.id, track.name, track.color);
+  return {
+    ...d,
+    ...track,
+    eq: { ...d.eq, ...track.eq },
+    compressor: { ...d.compressor, ...track.compressor },
+    autoDucker: { ...d.autoDucker, ...track.autoDucker },
+    deClicker: track.deClicker || d.deClicker,
+    dePlosive: track.dePlosive || d.dePlosive,
+    noiseGate: track.noiseGate || d.noiseGate,
+    deEsser: track.deEsser || d.deEsser,
+  } as TrackState;
 }
 
 /**
@@ -384,7 +471,7 @@ export class LiveDAWEngine {
         peakL: 0,
         peakR: 0
       }
-    ];
+    ].map(t => populateTrackDSPDefaults(t as any));
   }
 
   // --- Генераторы демонстрационных аудио сигналов ---

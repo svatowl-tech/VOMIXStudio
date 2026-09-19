@@ -395,6 +395,14 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   // ФУНКЦИОНАЛ СПЛИТА (РАЗРЕЗАНИЕ ДОРОЖЕК / КЛИПОВ)
   // ==========================================================================
   const handleSplitClip = (trackId: number, clipId: number, splitTimeSec: number) => {
+    if (!globalNativeDAWBridge.isReady) {
+      handleNativeError(
+        new Error('C++ WebAssembly ядро не инициализировано. Операции разрезания клипа заблокированы.'),
+        'разрезания клипа (splitClipNative)'
+      );
+      return;
+    }
+
     const track = tracks.find((t) => t.id === trackId);
     if (!track || !onUpdateTrack) return;
 
@@ -502,6 +510,14 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   // C++ STRIP SILENCE (УДАЛЕНИЕ ТИШИНЫ И АВТОМАТИЧЕСКАЯ НАРЕЗКА НА ФРАЗЫ)
   // ==========================================================================
   const handleExecuteStripSilence = (applyToAllTracks = false) => {
+    if (!globalNativeDAWBridge.isReady) {
+      handleNativeError(
+        new Error('C++ WebAssembly ядро не инициализировано. Удаление тишины (Strip Silence) заблокировано.'),
+        'удаления тишины (stripSilenceNative)'
+      );
+      return;
+    }
+
     if (!onUpdateTrack) return;
 
     try {
@@ -712,6 +728,14 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   // WSOLA TIME STRETCH (СЖАТИЕ / РАСТЯЖЕНИЕ ФРАЗ БЕЗ ИЗМЕНЕНИЯ ВЫСОТЫ ТОНА)
   // ==========================================================================
   const handleTimeStretch = (trackId: number, clipId: number, targetLengthSamples: number) => {
+    if (!globalNativeDAWBridge.isReady) {
+      handleNativeError(
+        new Error('C++ WebAssembly ядро не инициализировано. Изменение темпа WSOLA заблокировано.'),
+        'растяжения времени WSOLA (processWSOLA)'
+      );
+      return;
+    }
+
     const track = tracks.find((t) => t.id === trackId);
     if (!track || !onUpdateTrack) return;
 
@@ -774,6 +798,14 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
 
   // Подгонка выбранного клипа точно под выбранный субтитр
   const handleFitSelectedToSelectedSubtitle = () => {
+    if (!globalNativeDAWBridge.isReady) {
+      handleNativeError(
+        new Error('C++ WebAssembly ядро не инициализировано. Подгонка клипа под субтитр заблокирована.'),
+        'подгонки клипа под субтитр (processWSOLA)'
+      );
+      return;
+    }
+
     if (selectedClipId === null) {
       showNotice('Выберите аудиоклип для подгонки под субтитр', 'warn');
       return;

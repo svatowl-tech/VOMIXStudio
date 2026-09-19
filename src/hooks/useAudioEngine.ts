@@ -3,6 +3,7 @@ import { MediaNormalizer, LoudnessMatchingResult } from '../services/MediaNormal
 import { TrackState, ClipConfig } from '../audio/dawEngine';
 import { systemLogger } from '../services/SystemLogger';
 import { globalNativeDAWBridge } from '../services/NativeDAWBridge';
+import { EMBEDDED_WASM_CORE_BASE64 } from '../data/embeddedWasmCore';
 
 export interface TrackMeterData {
   trackId: number;
@@ -102,7 +103,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
       setError(null);
       systemLogger.info('AudioWorklet', 'Инициализация Web AudioContext и загрузка C++ WASM ядра...');
 
-      // 1. Обязательная загрузка бинарника /wasm/daw_core.wasm с жесткой ошибкой
+      // 1. Загрузка бинарника /wasm/daw_core.wasm с резервным запуском из Base64 константы
       let wasmBytes: ArrayBuffer;
       try {
         const response = await fetch('/wasm/daw_core.wasm');
@@ -113,11 +114,23 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
         if (!wasmBytes || wasmBytes.byteLength === 0) {
           throw new Error('Пустой бинарник daw_core.wasm');
         }
+        systemLogger.info('AudioWorklet', 'Высокопроизводительное C++ ядро успешно загружено с диска.');
       } catch (fetchErr) {
-        const errMessage = 'Критическая ошибка: C++ ядро не скомпилировано! Скомпилируйте public/wasm/daw_core.wasm через build_wasm.sh.';
-        setError(errMessage);
-        systemLogger.error('AudioWorklet', errMessage, fetchErr);
-        throw new Error(errMessage);
+        systemLogger.warn('AudioWorklet', 'Локальный файл /wasm/daw_core.wasm не найден. Выполняется автономная загрузка встроенного ядра C++...', fetchErr);
+        try {
+          const binaryString = window.atob(EMBEDDED_WASM_CORE_BASE64);
+          const len = binaryString.length;
+          const bytes = new Uint8Array(len);
+          for (let i = 0; i < len; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+          wasmBytes = bytes.buffer;
+        } catch (base64Err) {
+          const errMessage = 'Фатальная ошибка: Не удалось декодировать встроенное Base64 C++ ядро.';
+          setError(errMessage);
+          systemLogger.error('AudioWorklet', errMessage, base64Err);
+          throw new Error(errMessage);
+        }
       }
 
       // 2. Проверка поддержки Web Audio API

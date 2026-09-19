@@ -102,34 +102,10 @@ jobs:
       # =========================================================================
       # 5. КОМПИЛЯЦИЯ C++ DSP ЯДРА В WEBASSEMBLY SIMD
       # =========================================================================
-      - name: ⚡ Compile C++ Core to WASM SIMD (Windows)
-        if: runner.os == 'Windows'
-        shell: powershell
+      - name: ⚡ Compile Modular C++ DSP Core to WASM SIMD
+        shell: bash
         run: |
-          New-Item -ItemType Directory -Force -Path public/wasm
-          if (Test-Path "c_src/daw_core.cpp") {
-            ..\emsdk_toolchain\upstream\emscripten\emcc.bat -O3 -msimd128 -s WASM=1 -s ALLOW_MEMORY_GROWTH=1 `
-              -s INITIAL_MEMORY=67108864 `
-              -s EXPORTED_FUNCTIONS="['_malloc','_free','_daw_init','_daw_process']" `
-              -s EXPORTED_RUNTIME_METHODS="['cwrap','ccall','setValue','getValue']" `
-              -o public/wasm/daw_core.js c_src/daw_core.cpp
-          } else {
-            echo "// Auto-generated WASM fallback module" | Out-File -Encoding utf8 public/wasm/daw_core.js
-          }
-
-      - name: ⚡ Compile C++ Core to WASM SIMD (Linux & macOS)
-        if: runner.os != 'Windows'
-        run: |
-          mkdir -p public/wasm
-          if [ -f "c_src/daw_core.cpp" ]; then
-            ../emsdk_toolchain/upstream/emscripten/emcc -O3 -msimd128 -s WASM=1 -s ALLOW_MEMORY_GROWTH=1 \
-              -s INITIAL_MEMORY=67108864 \
-              -s EXPORTED_FUNCTIONS="['_malloc','_free','_daw_init','_daw_process']" \
-              -s EXPORTED_RUNTIME_METHODS="['cwrap','ccall','setValue','getValue']" \
-              -o public/wasm/daw_core.js c_src/daw_core.cpp
-          else
-            echo "// Auto-generated WASM fallback module" > public/wasm/daw_core.js
-          fi
+          bash src/cpp/build_wasm.sh
 
       # =========================================================================
       # 6. ПРОВЕРКА ВЕРСИИ, ЛИНТИНГ И ИКОНКИ

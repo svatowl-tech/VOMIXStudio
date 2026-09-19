@@ -78,6 +78,10 @@ export class MediaNormalizer {
     fileOrBlob: File | Blob,
     targetSr: number = MediaNormalizer.TARGET_SAMPLE_RATE
   ): Promise<Float32Array> {
+    if (!globalNativeDAWBridge.isReady) {
+      throw new Error('[C++ MediaNormalizer] Ошибка обработки аудио: нативное C++ ядро WebAssembly не загружено или не инициализировано.');
+    }
+
     if (!fileOrBlob || fileOrBlob.size === 0) {
       return new Float32Array(0);
     }
@@ -102,7 +106,7 @@ export class MediaNormalizer {
         { byteLength: arrayBuffer.byteLength },
         err instanceof Error ? err.stack : undefined
       );
-      throw err;
+      throw new Error(`[C++ MediaNormalizer] Ошибка обработки аудио при декодировании: ${err?.message || err}`);
     } finally {
       if (tempAudioCtx.state !== 'closed') {
         await tempAudioCtx.close().catch(() => {});
@@ -131,12 +135,18 @@ export class MediaNormalizer {
       }
     }
 
-    // Ресэмплинг выполняется ИСКЛЮЧИТЕЛЬНО на C++ через globalNativeDAWBridge.resampleCatmullRom()
-    return globalNativeDAWBridge.resampleCatmullRom(
-      rawInputPcm,
-      inSampleRate,
-      numChannels === 1 ? 1 : 2
-    );
+    try {
+      // Ресэмплинг выполняется ИСКЛЮЧИТЕЛЬНО на C++ через globalNativeDAWBridge.resampleCatmullRom()
+      return globalNativeDAWBridge.resampleCatmullRom(
+        rawInputPcm,
+        inSampleRate,
+        numChannels === 1 ? 1 : 2
+      );
+    } catch (err: any) {
+      const msg = `[C++ MediaNormalizer] Ошибка обработки аудио при ресэмплинге в C++ ядре: ${err?.message || err}`;
+      systemLogger.error('MediaNormalizer', msg);
+      throw new Error(msg);
+    }
   }
 
   /**
@@ -148,8 +158,12 @@ export class MediaNormalizer {
     videoFile: File,
     targetSr: number = MediaNormalizer.TARGET_SAMPLE_RATE
   ): Promise<Float32Array> {
+    if (!globalNativeDAWBridge.isReady) {
+      throw new Error('[C++ MediaNormalizer] Ошибка извлечения аудио: C++ ядро WebAssembly не готово.');
+    }
+
     if (!videoFile || videoFile.size === 0) {
-      throw new Error('[MediaNormalizer] Видеофайл пуст или не выбран.');
+      throw new Error('[C++ MediaNormalizer] Ошибка извлечения аудио: видеофайл пуст или не выбран.');
     }
 
     try {
@@ -192,13 +206,13 @@ export class MediaNormalizer {
           resolve(pcm);
         } catch (err) {
           URL.revokeObjectURL(url);
-          reject(new Error(`[MediaNormalizer] Не удалось извлечь аудиодорожку из видеофайла: ${err}`));
+          reject(new Error(`[C++ MediaNormalizer] Не удалось извлечь аудиодорожку из видеофайла через HTML5-видео: ${err}`));
         }
       };
 
       video.onerror = (e) => {
         URL.revokeObjectURL(url);
-        reject(new Error(`[MediaNormalizer] Ошибка загрузки видеофайла: ${e}`));
+        reject(new Error(`[C++ MediaNormalizer] Ошибка загрузки HTML5 видеофайла: ${e}`));
       };
     });
   }
@@ -213,6 +227,10 @@ export class MediaNormalizer {
     buffer: Float32Array,
     isInterleaved: boolean = true
   ): LoudnessMetrics {
+    if (!globalNativeDAWBridge.isReady) {
+      throw new Error('[C++ MediaNormalizer] Ошибка анализа громкости: C++ ядро WebAssembly не инициализировано.');
+    }
+
     if (!buffer || buffer.length === 0) {
       return {
         peakLinear: 0,
@@ -228,25 +246,31 @@ export class MediaNormalizer {
     const channels = isInterleaved ? 2 : 1;
     const numFrames = Math.floor(buffer.length / channels);
 
-    // Вызов C++ аналитики через WebAssembly мост
-    const stats = globalNativeDAWBridge.calculateLoudnessStats(
-      buffer,
-      channels,
-      -18.0,
-      -1.0
-    );
+    try {
+      // Вызов C++ аналитики через WebAssembly мост
+      const stats = globalNativeDAWBridge.calculateLoudnessStats(
+        buffer,
+        channels,
+        -18.0,
+        -1.0
+      );
 
-    const durationSec = numFrames / MediaNormalizer.TARGET_SAMPLE_RATE;
+      const durationSec = numFrames / MediaNormalizer.TARGET_SAMPLE_RATE;
 
-    return {
-      peakLinear: stats.peakLinear,
-      peakDb: stats.peakDb,
-      rmsLinear: stats.rmsLinear,
-      rmsDb: stats.rmsDb,
-      isClipping: stats.isClipping,
-      sampleCount: buffer.length,
-      durationSec: Math.round(durationSec * 100) / 100
-    };
+      return {
+        peakLinear: stats.peakLinear,
+        peakDb: stats.peakDb,
+        rmsLinear: stats.rmsLinear,
+        rmsDb: stats.rmsDb,
+        isClipping: stats.isClipping,
+        sampleCount: buffer.length,
+        durationSec: Math.round(durationSec * 100) / 100
+      };
+    } catch (err: any) {
+      const msg = `[C++ MediaNormalizer] Ошибка анализа громкости в C++ ядре: ${err?.message || err}`;
+      systemLogger.error('MediaNormalizer', msg);
+      throw new Error(msg);
+    }
   }
 
   /**
@@ -261,7 +285,15 @@ export class MediaNormalizer {
     targetRmsDb: number = -18.0,
     maxPeakDb: number = -1.0
   ): LoudnessMatchingResult {
-    return globalNativeDAWBridge.normalizeAndAlignTracks(tracks, targetRmsDb, maxPeakDb);
+    if (!globalNativeDAWBridge.isReady) {
+      throw new Error('[C++ MediaNormalizer] Ошибка автовыравнивания громкости: C++ ядро WebAssembly не готово.');
+    }
+
+    try {
+      return globalNativeDAWBridge.normalizeAndAlignTracks(tracks, targetRmsDb, maxPeakDb);
+    } catch (err: any) {
+      throw new Error(`[C++ MediaNormalizer] Ошибка нормализации дорожек в C++ ядре: ${err?.message || err}`);
+    }
   }
 
   /**
@@ -270,6 +302,10 @@ export class MediaNormalizer {
    * ==========================================================================
    */
   public static applyGain(buffer: Float32Array, gainDb: number, inPlace: boolean = false): Float32Array {
+    if (!globalNativeDAWBridge.isReady) {
+      throw new Error('[C++ MediaNormalizer] Ошибка изменения усиления: C++ ядро WebAssembly не готово.');
+    }
+
     if (!buffer || buffer.length === 0 || Math.abs(gainDb) < 0.001) {
       return inPlace ? buffer : new Float32Array(buffer);
     }
@@ -278,7 +314,7 @@ export class MediaNormalizer {
     const mod = bridge.getModule();
 
     if (!mod.applyGain) {
-      throw new Error('[MediaNormalizer] Нативная C++ функция applyGain отсутствует в WASM модуле');
+      throw new Error('[C++ MediaNormalizer] Нативная C++ функция applyGain отсутствует в WASM модуле');
     }
 
     const ptr = bridge.writeFloat32Direct(buffer);
@@ -290,6 +326,8 @@ export class MediaNormalizer {
         return buffer;
       }
       return result;
+    } catch (err: any) {
+      throw new Error(`[C++ MediaNormalizer] Ошибка применения гейна в C++ ядре: ${err?.message || err}`);
     } finally {
       bridge.freeFloats(ptr);
     }

@@ -4,10 +4,12 @@
  * ============================================================================
  * Модуль финального рендеринга и видео-муксинга:
  * 1. Офлайн-рендеринг C++ DSP микса в стерео-буфер (Faster-than-realtime C++ BatchOfflineRenderer).
- * 2. Прямая генерация RIFF WAV заголовков в памяти WebAssembly (NativeWavPacker).
+ * 2. Прямая генерация RIFF WAV заголовков в памяти WebAssembly (NativeWavPacker) посредством
+ *    вызова globalNativeDAWBridge.packWavNative(left, right, sampleRate, bitDepth).
  * 3. Экспорт мультитрековых стемов (Dialogues.wav, Music.wav, SFX.wav, Bass.wav).
  * 4. Видео-муксинг и вшивание аудиодорожки через @ffmpeg/ffmpeg WebAssembly.
  * 5. Защита от переполнения памяти и поддержка SharedArrayBuffer / Single-Thread fallback.
+ * 6. Локальный вспомогательный метод скачивания Blob (чистый DOM URL.createObjectURL).
  * ============================================================================
  */
 
@@ -63,6 +65,24 @@ export class RenderManager {
     const formatted = `[${timestamp}] ${msg}`;
     this.logs.push(formatted);
     systemLogger.info('RenderManager', msg);
+  }
+
+  /**
+   * Вспомогательный локальный метод для скачивания Blob в браузере (чистый DOM URL.createObjectURL без генерации аудио)
+   */
+  public downloadBlob(blob: Blob, filename: string): void {
+    try {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(url), 8000);
+    } catch (err) {
+      systemLogger.error('RenderManager', `Ошибка скачивания файла ${filename}:`, err);
+    }
   }
 
   /**
