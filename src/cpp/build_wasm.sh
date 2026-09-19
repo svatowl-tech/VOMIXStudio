@@ -39,7 +39,7 @@ SOURCES=(
     "bindings/EmscriptenBindings.cpp"
 )
 
-emcc -O3 \
+em++ -O3 \
     -std=c++17 \
     -msimd128 \
     -flto \
