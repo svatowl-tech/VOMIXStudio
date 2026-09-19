@@ -49,6 +49,14 @@ public:
     SoftKneeCompressor& compressor;
     AutoDucker& autoDucker;
 
+    DeClicker* getDeClicker() noexcept { return &deClicker; }
+    DePlosive* getDePlosive() noexcept { return &dePlosive; }
+    NoiseGate* getNoiseGate() noexcept { return &noiseGate; }
+    ParametricEQ3Band* getEQ() noexcept { return &eq; }
+    DeEsser* getDeEsser() noexcept { return &deEsser; }
+    SoftKneeCompressor* getCompressor() noexcept { return &compressor; }
+    AutoDucker* getAutoDucker() noexcept { return &autoDucker; }
+
     // Предварительно выделенный RT-буфер дорожки (стерео сэмплы) - Zero Malloc
     alignas(16) float trackBuffer[MAX_BUFFER_SIZE * 2]{};
 
