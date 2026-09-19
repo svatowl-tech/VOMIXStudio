@@ -1826,7 +1826,7 @@ if(EMSCRIPTEN)
     set_target_properties(daw_core PROPERTIES
         OUTPUT_NAME "daw_core"
         SUFFIX ".js"
-        LINK_FLAGS "-O3 -msimd128 -flto --bind -s WASM=1 -s INITIAL_MEMORY=67108864 -s ALLOW_MEMORY_GROWTH=1 -s ENVIRONMENT=web,worker -s MODULARIZE=1 -s EXPORT_NAME='CreateDAWCoreModule' -s EXPORTED_FUNCTIONS='[\"_malloc\", \"_free\"]' -s EXPORTED_RUNTIME_METHODS='[\"cwrap\", \"setValue\", \"getValue\", \"HEAPF32\"]' -s SINGLE_FILE=0"
+        LINK_FLAGS "-O3 -msimd128 -flto --bind -s WASM=1 -s INITIAL_MEMORY=67108864 -s ALLOW_MEMORY_GROWTH=1 -s ENVIRONMENT=web,worker -s MODULARIZE=1 -s EXPORT_NAME='CreateDAWCoreModule' -s EXPORTED_FUNCTIONS='[\"_malloc\", \"_free\", \"_createMixerInstance\", \"_freeMixerInstance\", \"_processMixer\", \"_setTimelinePosition\", \"_addClipToTrack\", \"_setTrackVolume\", \"_setTrackPan\", \"_setTrackSolo\", \"_setTrackMute\", \"_removeAllTracks\", \"_setMasterVolume\", \"_setMasterLimiter\"]' -s EXPORTED_RUNTIME_METHODS='[\"cwrap\", \"setValue\", \"getValue\", \"HEAPF32\"]' -s SINGLE_FILE=0"
     )
 endif()
 `,
@@ -1845,7 +1845,7 @@ emcc -O3 \\
     -s ENVIRONMENT=web,worker \\
     -s MODULARIZE=1 \\
     -s EXPORT_NAME="CreateDAWCoreModule" \\
-    -s EXPORTED_FUNCTIONS='["_malloc", "_free"]' \\
+    -s EXPORTED_FUNCTIONS='["_malloc", "_free", "_createMixerInstance", "_freeMixerInstance", "_processMixer", "_setTimelinePosition", "_addClipToTrack", "_setTrackVolume", "_setTrackPan", "_setTrackSolo", "_setTrackMute", "_removeAllTracks", "_setMasterVolume", "_setMasterLimiter"]' \\
     -s EXPORTED_RUNTIME_METHODS='["cwrap", "setValue", "getValue", "HEAPF32"]' \\
     -s SINGLE_FILE=0 \\
     dsp/BiquadFilter.cpp \\

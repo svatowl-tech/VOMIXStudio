@@ -751,3 +751,144 @@ EMSCRIPTEN_BINDINGS(daw_core_module) {
 }
 
 #endif // __EMSCRIPTEN__
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#else
+#define EMSCRIPTEN_KEEPALIVE
+#endif
+
+extern "C" {
+
+EMSCRIPTEN_KEEPALIVE
+uintptr_t createMixerInstance(float sampleRate) {
+    auto* mixer = new DAWCore::Mixer(sampleRate);
+    return reinterpret_cast<uintptr_t>(mixer);
+}
+
+EMSCRIPTEN_KEEPALIVE
+void freeMixerInstance(uintptr_t mixerPtr) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    delete mixer;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void processMixer(uintptr_t mixerPtr, uintptr_t outputPtr, int numSamples) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    float* outBuf = reinterpret_cast<float*>(outputPtr);
+    if (mixer && outBuf) {
+        mixer->processBlock(outBuf, static_cast<size_t>(numSamples));
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE
+void setTimelinePosition(uintptr_t mixerPtr, int64_t samplePosition) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (mixer) {
+        mixer->setTimelinePosition(static_cast<size_t>(samplePosition));
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool addClipToTrack(
+    uintptr_t mixerPtr,
+    uint32_t trackId,
+    uint32_t clipId,
+    uintptr_t bufferPtr,
+    size_t bufferSizeSamples,
+    size_t offsetSamples,
+    size_t lengthSamples,
+    float gain,
+    float pan,
+    size_t fadeIn,
+    size_t fadeOut,
+    bool isStereo
+) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    DAWCore::Track* track = mixer->getTrack(trackId);
+    if (!track) return false;
+
+    DAWCore::Clip clip;
+    clip.id = clipId;
+    clip.sampleBuffer = reinterpret_cast<const float*>(bufferPtr);
+    clip.bufferSizeSamples = bufferSizeSamples;
+    clip.offsetSamples = offsetSamples;
+    clip.lengthSamples = lengthSamples;
+    clip.gain = gain;
+    clip.pan = pan;
+    clip.fadeInSamples = fadeIn;
+    clip.fadeOutSamples = fadeOut;
+    clip.isStereo = isStereo;
+    clip.active = true;
+
+    track->addClip(clip);
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool setTrackVolume(uintptr_t mixerPtr, uint32_t trackId, float volumeDb) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    DAWCore::Track* track = mixer->getTrack(trackId);
+    if (!track) return false;
+    track->volumeDb = volumeDb;
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool setTrackPan(uintptr_t mixerPtr, uint32_t trackId, float pan) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    DAWCore::Track* track = mixer->getTrack(trackId);
+    if (!track) return false;
+    track->pan = pan;
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool setTrackSolo(uintptr_t mixerPtr, uint32_t trackId, bool solo) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    DAWCore::Track* track = mixer->getTrack(trackId);
+    if (!track) return false;
+    track->solo = solo;
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool setTrackMute(uintptr_t mixerPtr, uint32_t trackId, bool mute) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    DAWCore::Track* track = mixer->getTrack(trackId);
+    if (!track) return false;
+    track->mute = mute;
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool removeAllTracks(uintptr_t mixerPtr) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    mixer->removeAllTracks();
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool setMasterVolume(uintptr_t mixerPtr, float volumeDb) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    mixer->masterVolumeDb = volumeDb;
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool setMasterLimiter(uintptr_t mixerPtr, bool enabled, float ceilingDb) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    mixer->masterLimiter.enabled = enabled;
+    mixer->masterLimiter.ceilingDb = ceilingDb;
+    return true;
+}
+
+} // extern "C"

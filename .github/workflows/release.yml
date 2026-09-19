@@ -16,9 +16,38 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  compile-wasm:
+    name: 📦 Compile C++ WebAssembly to SIMD
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🛠️ Install Emscripten SDK
+        run: |
+          git clone https://github.com/emscripten-core/emsdk.git ../emsdk_toolchain
+          cd ../emsdk_toolchain
+          ./emsdk install latest
+          ./emsdk activate latest
+          echo "$PWD" >> $GITHUB_PATH
+          echo "$PWD/upstream/emscripten" >> $GITHUB_PATH
+
+      - name: ⚡ Compile Modular C++ DSP Core to WASM SIMD
+        shell: bash
+        run: |
+          bash src/cpp/build_wasm.sh
+
+      - name: 📤 Upload WASM Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-assets
+          path: public/wasm/
+          retention-days: 1
+
   build-and-release:
     name: 🚀 Build ${{ matrix.platform.name }} Release Assets
     runs-on: ${{ matrix.platform.os }}
+    needs: compile-wasm
     strategy:
       fail-fast: false
       matrix:
@@ -66,36 +95,13 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf build-essential curl wget file libssl-dev libasound2-dev
 
       # =========================================================================
-      # 4. УСТАНОВКА EMSCRIPTEN SDK DЛЯ WEBASSEMBLY SIMD (Вне рабочей директории)
+      # 4. ЗАГРУЗКА СКОМПИЛИРОВАННОГО C++ WEBASSEMBLY ЯДРА
       # =========================================================================
-      - name: 🛠️ Install Emscripten SDK (Windows)
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          git clone https://github.com/emscripten-core/emsdk.git ..\emsdk_toolchain
-          cd ..\emsdk_toolchain
-          .\emsdk.bat install latest
-          .\emsdk.bat activate latest
-          echo "$PWD" >> $env:GITHUB_PATH
-          echo "$PWD/upstream/emscripten" >> $env:GITHUB_PATH
-
-      - name: 🛠️ Install Emscripten SDK (Linux & macOS)
-        if: runner.os != 'Windows'
-        run: |
-          git clone https://github.com/emscripten-core/emsdk.git ../emsdk_toolchain
-          cd ../emsdk_toolchain
-          ./emsdk install latest
-          ./emsdk activate latest
-          echo "$PWD" >> $GITHUB_PATH
-          echo "$PWD/upstream/emscripten" >> $GITHUB_PATH
-
-      # =========================================================================
-      # 5. КОМПИЛЯЦИЯ C++ DSP ЯДРА В WEBASSEMBLY SIMD
-      # =========================================================================
-      - name: ⚡ Compile Modular C++ DSP Core to WASM SIMD
-        shell: bash
-        run: |
-          bash src/cpp/build_wasm.sh
+      - name: 📥 Download WASM Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-assets
+          path: public/wasm
 
       # =========================================================================
       # 6. ВАЛИДАЦИЯ ВЕРСИЙ, ЛИНТИНГ И ИКОНКИ

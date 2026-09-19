@@ -361,6 +361,30 @@ export class NativeDAWBridge {
     this.initPromise = (async () => {
       const globalScope = typeof window !== 'undefined' ? (window as any) : (globalThis as any);
 
+      // 0. Динамически загружаем /wasm/daw_core.js, если он существует на сервере и еще не загружен в DOM
+      if (typeof window !== 'undefined' && !globalScope.CreateDAWCoreModule && !globalScope.DAWCoreModule) {
+        try {
+          const checkRes = await fetch('/wasm/daw_core.js', { method: 'HEAD' });
+          if (checkRes.ok) {
+            await new Promise<void>((resolve) => {
+              const script = document.createElement('script');
+              script.src = '/wasm/daw_core.js';
+              script.onload = () => {
+                console.log('[NativeDAWBridge] Скрипт daw_core.js успешно загружен в DOM.');
+                resolve();
+              };
+              script.onerror = (err) => {
+                console.warn('[NativeDAWBridge] Ошибка загрузки скрипта daw_core.js:', err);
+                resolve();
+              };
+              document.body.appendChild(script);
+            });
+          }
+        } catch (scriptErr) {
+          console.warn('[NativeDAWBridge] Сбой проверки/загрузки daw_core.js:', scriptErr);
+        }
+      }
+
       try {
         // 1. Проверяем готовый глобальный модуль Emscripten (например, загруженный через <script src="/wasm/daw_core.js">)
         if (globalScope.Module && globalScope.Module.HEAPF32 && globalScope.Module._malloc) {
@@ -409,28 +433,40 @@ export class NativeDAWBridge {
 
         this.wasmBinary = buffer;
 
-        const wasmMemory = new WebAssembly.Memory({ initial: 512, maximum: 4096 });
-        const importObject = {
-          env: {
-            memory: wasmMemory,
-            abort: (msg: any) => console.error('[WASM Abort]', msg),
-            emscripten_notify_memory_growth: () => {},
-            _emscripten_notify_memory_growth: () => {}
-          },
-          wasi_snapshot_preview1: {
-            proc_exit: () => {},
-            fd_write: () => 0,
-            fd_close: () => 0,
-            fd_seek: () => 0
-          }
-        };
+        let exports: any = {};
+        let mallocFn: any = null;
+        let freeFn: any = null;
+        let memoryBuffer: ArrayBuffer | null = null;
 
-        const instantiated = await WebAssembly.instantiate(buffer, importObject);
-        const exports: any = instantiated.instance.exports;
+        try {
+          const wasmMemory = new WebAssembly.Memory({ initial: 512, maximum: 4096 });
+          const importObject = {
+            env: {
+              memory: wasmMemory,
+              abort: (msg: any) => console.error('[WASM Abort]', msg),
+              emscripten_notify_memory_growth: () => {},
+              _emscripten_notify_memory_growth: () => {}
+            },
+            wasi_snapshot_preview1: {
+              proc_exit: () => {},
+              fd_write: () => 0,
+              fd_close: () => 0,
+              fd_seek: () => 0
+            }
+          };
 
-        let mallocFn = exports._malloc || exports.malloc || exports.allocateAudioBuffer;
-        let freeFn = exports._free || exports.free || exports.freeAudioBuffer;
-        let memoryBuffer = exports.memory ? exports.memory.buffer : null;
+          const instantiated = await WebAssembly.instantiate(buffer, importObject);
+          exports = instantiated.instance.exports;
+          mallocFn = exports._malloc || exports.malloc || exports.allocateAudioBuffer;
+          freeFn = exports._free || exports.free || exports.freeAudioBuffer;
+          memoryBuffer = exports.memory ? exports.memory.buffer : wasmMemory.buffer;
+        } catch (wasmErr) {
+          console.warn(
+            '[NativeDAWBridge] Инициализация нативного WebAssembly заблокирована Content Security Policy (CSP) или не поддерживается браузером. ' +
+            'Активирован безопасный высокопроизводительный JS DSP эмулятор.',
+            wasmErr
+          );
+        }
 
         // Если функции кучи отсутствуют, создаем симулированную кучу и виртуальную память на JS
         if (!mallocFn || !freeFn || !memoryBuffer) {
