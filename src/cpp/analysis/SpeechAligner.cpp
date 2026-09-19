@@ -183,8 +183,8 @@ FrameEnergyStats SpeechEnergyDetector::calculateFrameStats(const float* samples,
         maxVec = wasm_f32x4_max(maxVec, absVec);
     }
 
-    float alignas(16) sumArr[4];
-    float alignas(16) maxArr[4];
+    alignas(16) float sumArr[4];
+    alignas(16) float maxArr[4];
     wasm_v128_store(sumArr, sumVec);
     wasm_v128_store(maxArr, maxVec);
 

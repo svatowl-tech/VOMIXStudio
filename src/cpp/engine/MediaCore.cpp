@@ -120,7 +120,7 @@ float AudioChannelLayout::findPeak(const float* buffer, size_t numSamples) {
         v_max = wasm_f32x4_max(v_max, abs_v);
     }
 
-    float alignas(16) temp[4];
+    alignas(16) float temp[4];
     wasm_v128_store(temp, v_max);
     maxVal = std::max({temp[0], temp[1], temp[2], temp[3]});
 #endif
@@ -410,8 +410,8 @@ AutoGainStager::AudioLoudnessStats AutoGainStager::analyzeLoudness(
         }
     }
 
-    float alignas(16) tempSum[4];
-    float alignas(16) tempPeak[4];
+    alignas(16) float tempSum[4];
+    alignas(16) float tempPeak[4];
     wasm_v128_store(tempSum, v_sum);
     wasm_v128_store(tempPeak, v_peak);
 
