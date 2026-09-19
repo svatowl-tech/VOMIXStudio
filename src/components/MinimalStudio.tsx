@@ -327,41 +327,45 @@ export const MinimalStudio: React.FC = () => {
         for (let i = 0; i < audioFiles.length && i < workingTracks.length; i++) {
           const audioFile = audioFiles[i].fileObj;
           if (audioFile) {
-            const track = workingTracks[i];
-            const uploadRes = await uploadAudioFileToTrack(audioFile, track.id, Date.now() + i, 0);
+            try {
+              const track = workingTracks[i];
+              const uploadRes = await uploadAudioFileToTrack(audioFile, track.id, Date.now() + i, 0);
 
-            // Сохраняем ассет дорожки в SQL базу данных
-            AssetDatabase.getInstance().saveAsset({
-              id: `asset_ch${track.id}_${Date.now()}`,
-              name: audioFile.name,
-              type: 'audio',
-              mimeType: audioFile.type || 'audio/wav',
-              sizeBytes: audioFile.size,
-              durationSec: uploadRes.durationSec,
-              sampleRate: 48000,
-              channels: 1,
-              timestamp: Date.now(),
-              blob: audioFile
-            }).catch(console.error);
+              // Сохраняем ассет дорожки в SQL базу данных
+              AssetDatabase.getInstance().saveAsset({
+                id: `asset_ch${track.id}_${Date.now()}`,
+                name: audioFile.name,
+                type: 'audio',
+                mimeType: audioFile.type || 'audio/wav',
+                sizeBytes: audioFile.size,
+                durationSec: uploadRes.durationSec,
+                sampleRate: 48000,
+                channels: 1,
+                timestamp: Date.now(),
+                blob: audioFile
+              }).catch(console.error);
 
-            workingTracks[i] = {
-              ...track,
-              name: audioFile.name.replace(/\.[^/.]+$/, ''),
-              clips: [
-                {
-                  id: Date.now() + i,
-                  name: audioFile.name,
-                  offsetSamples: 0,
-                  lengthSamples: uploadRes.samplesCount,
-                  gain: 1.0,
-                  pan: 0,
-                  fadeInSamples: 0,
-                  fadeOutSamples: 0,
-                  buffer: uploadRes.pcmData,
-                  color: track.color
-                }
-              ]
-            };
+              workingTracks[i] = {
+                ...track,
+                name: audioFile.name.replace(/\.[^/.]+$/, ''),
+                clips: [
+                  {
+                    id: Date.now() + i,
+                    name: audioFile.name,
+                    offsetSamples: 0,
+                    lengthSamples: uploadRes.samplesCount,
+                    gain: 1.0,
+                    pan: 0,
+                    fadeInSamples: 0,
+                    fadeOutSamples: 0,
+                    buffer: uploadRes.pcmData,
+                    color: track.color
+                  }
+                ]
+              };
+            } catch (trackErr: any) {
+              console.error(`Ошибка загрузки аудиофайла ${audioFiles[i].name}:`, trackErr);
+            }
           }
         }
         setTracks(workingTracks);
