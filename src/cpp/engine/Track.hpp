@@ -49,13 +49,13 @@ public:
     SoftKneeCompressor& compressor;
     AutoDucker& autoDucker;
 
-    DeClicker* getDeClicker() noexcept { return &deClicker; }
-    DePlosive* getDePlosive() noexcept { return &dePlosive; }
-    NoiseGate* getNoiseGate() noexcept { return &noiseGate; }
-    ParametricEQ3Band* getEQ() noexcept { return &eq; }
-    DeEsser* getDeEsser() noexcept { return &deEsser; }
-    SoftKneeCompressor* getCompressor() noexcept { return &compressor; }
-    AutoDucker* getAutoDucker() noexcept { return &autoDucker; }
+    DeClicker* getDeClicker() const { return const_cast<DeClicker*>(&deClicker); }
+    DePlosive* getDePlosive() const { return const_cast<DePlosive*>(&dePlosive); }
+    NoiseGate* getNoiseGate() const { return const_cast<NoiseGate*>(&noiseGate); }
+    ParametricEQ3Band* getEQ() const { return const_cast<ParametricEQ3Band*>(&eq); }
+    DeEsser* getDeEsser() const { return const_cast<DeEsser*>(&deEsser); }
+    SoftKneeCompressor* getCompressor() const { return const_cast<SoftKneeCompressor*>(&compressor); }
+    AutoDucker* getAutoDucker() const { return const_cast<AutoDucker*>(&autoDucker); }
 
     // Предварительно выделенный RT-буфер дорожки (стерео сэмплы) - Zero Malloc
     alignas(16) float trackBuffer[MAX_BUFFER_SIZE * 2]{};
