@@ -58,7 +58,7 @@ jobs:
           cache: 'npm'
 
       - name: 📦 Install NPM dependencies
-        run: npm ci --legacy-peer-deps
+        run: npm ci --legacy-peer-deps || npm install --legacy-peer-deps
 
       # =========================================================================
       # 3. СИСТЕМНЫЕ ЗАВИСИМОСТИ LINUX (WebKit2GTK, AppImage tools)
@@ -144,8 +144,6 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: v__VERSION__
 
       # =========================================================================
       # 8. СОХРАНЕНИЕ АРТЕФАКТОВ СБОРКИ В GITHUB ACTIONS
