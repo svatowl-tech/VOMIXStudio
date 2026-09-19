@@ -289,10 +289,14 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
       const totalFrames = pcmFloat32.length / 2;
       const durationSec = totalFrames / 48000;
 
+      if (pcmFloat32.length === 0) {
+        systemLogger.error('MediaNormalizer', `ВНИМАНИЕ: Декодированный PCM буфер для клипа #${clipId} ПУСТОЙ!`);
+      }
+
       systemLogger.info(
         'AudioWorklet',
-        `Клип #${clipId} успешно декодирован и загружен в дорожку #${trackId}: ${durationSec.toFixed(2)} сек (${totalFrames} фреймов 48 кГц стерео).`,
-        { trackId, clipId, durationSec, totalFrames }
+        `Клип #${clipId} успешно декодирован и загружен в дорожку #${trackId}: ${durationSec.toFixed(2)} сек (${totalFrames} фреймов 48 кГц стерео). Размер буфера: ${pcmFloat32.length} сэмплов.`,
+        { trackId, clipId, durationSec, totalFrames, bufferLength: pcmFloat32.length }
       );
 
       // Отправляем интерливированные Float32Array PCM аудиоданные в AudioWorklet C++ Mixer

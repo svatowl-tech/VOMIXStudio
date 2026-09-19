@@ -144,10 +144,6 @@ export class MediaNormalizer {
       }
     }
 
-    // Подсказка GC: очищаем исходные данные, так как у нас есть rawInputPcm
-    decodedBuffer = null;
-    (arrayBuffer as any) = null;
-
     try {
       if (!rawInputPcm) return new Float32Array(0);
 
@@ -158,8 +154,10 @@ export class MediaNormalizer {
         numChannels === 1 ? 1 : 2
       );
       
-      // Очищаем промежуточный буфер
+      // Подсказка GC: очищаем промежуточные буферы ПОСЛЕ завершения работы C++ ядра
       rawInputPcm = null;
+      decodedBuffer = null;
+      (arrayBuffer as any) = null;
       
       return resampled;
     } catch (err: any) {

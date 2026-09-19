@@ -1059,26 +1059,37 @@ export class NativeDAWBridge {
 
     const totalDurationSec = maxFrames / sampleRate;
 
-    // Создаем экземпляр C++ Mixer в куче WASM
-    const createMixerFn = mod.createMixerInstance || mod._createMixerInstance;
-    const setVolFn = mod.setTrackVolume || mod._setTrackVolume;
-    const setPanFn = mod.setTrackPan || mod._setTrackPan;
-    const setSoloFn = mod.setTrackSolo || mod._setTrackSolo;
-    const setMuteFn = mod.setTrackMute || mod._setTrackMute;
-    const setMstVolFn = mod.setMasterVolume || mod._setMasterVolume;
-    const setLimiterFn = mod.setMasterLimiter || mod._setMasterLimiter;
-    const addClipFn = mod.addClipToTrack || mod._addClipToTrack;
-    const processMixerFn = mod.processMixer || mod._processMixer;
-    const freeFn = mod._free || mod.free;
-
-    if (!createMixerFn || !processMixerFn) {
-      throw new Error('[NativeDAWBridge] Нативный C++ Mixer (createMixerInstance / processMixer) отсутствует в WASM модуле');
+    // Создаем экземпляр C++ Mixer (предпочитаем класс, если он доступен через Embind)
+    let mixerInstance: any = null;
+    if (mod.Mixer) {
+      mixerInstance = new mod.Mixer(sampleRate);
+    } else {
+      const createMixerFn = mod.createMixerInstance || mod._createMixerInstance;
+      if (!createMixerFn) {
+        throw new Error('[NativeDAWBridge] Нативный C++ Mixer (Mixer class or createMixerInstance) отсутствует в WASM модуле');
+      }
+      mixerInstance = createMixerFn(sampleRate);
     }
 
-    const mixerPtr = createMixerFn(sampleRate);
-    if (!mixerPtr) {
+    if (!mixerInstance) {
       throw new Error('[NativeDAWBridge] Не удалось создать C++ экземпляр Mixer в памяти WASM');
     }
+
+    // Вспомогательная функция для вызова методов/функций с правильным контекстом
+    const isObject = typeof mixerInstance === 'object';
+    const callNative = (fnName: string, ...args: any[]) => {
+      if (isObject && typeof mixerInstance[fnName] === 'function') {
+        return mixerInstance[fnName](...args);
+      }
+      if (typeof mod[fnName] === 'function') {
+        return mod[fnName](mixerInstance, ...args);
+      }
+      const rawFnName = '_' + fnName;
+      if (typeof mod[rawFnName] === 'function') {
+        return mod[rawFnName](isObject ? (mixerInstance as any).ptr : mixerInstance, ...args);
+      }
+      return null;
+    };
 
     const allocatedPcmPtrs: number[] = [];
 
@@ -1086,15 +1097,15 @@ export class NativeDAWBridge {
       if (onProgress) onProgress(15, 'Загрузка треков и клипов в C++ микшер...');
 
       // Устанавливаем мастер-параметры в C++
-      if (setMstVolFn) setMstVolFn(mixerPtr, master.volumeDb);
-      if (setLimiterFn) setLimiterFn(mixerPtr, master.limiterEnabled, master.limiterCeilingDb);
+      callNative('setMasterVolume', master.volumeDb);
+      callNative('setMasterLimiter', master.limiterEnabled, master.limiterCeilingDb);
 
       // Загружаем треки и клипы в C++ микшер
       for (const t of tracks) {
-        if (setVolFn) setVolFn(mixerPtr, t.id, t.volumeDb);
-        if (setPanFn) setPanFn(mixerPtr, t.id, t.pan);
-        if (setSoloFn) setSoloFn(mixerPtr, t.id, !!t.solo);
-        if (setMuteFn) setMuteFn(mixerPtr, t.id, !!t.mute);
+        callNative('setTrackVolume', t.id, t.volumeDb);
+        callNative('setTrackPan', t.id, t.pan);
+        callNative('setTrackSolo', t.id, !!t.solo);
+        callNative('setTrackMute', t.id, !!t.mute);
 
         for (const c of t.clips || []) {
           const pcmBuffer = c.buffer || new Float32Array(0);
@@ -1111,22 +1122,20 @@ export class NativeDAWBridge {
           const fadeIn = c.fadeInSamples || 0;
           const fadeOut = c.fadeOutSamples || 0;
 
-          if (addClipFn) {
-            addClipFn(
-              mixerPtr,
-              t.id,
-              c.id,
-              pcmPtr,
-              pcmBuffer.length,
-              offsetSamples,
-              lengthSamples,
-              gain,
-              pan,
-              fadeIn,
-              fadeOut,
-              isStereo
-            );
-          }
+          callNative(
+            'addClipToTrack',
+            t.id,
+            c.id,
+            pcmPtr,
+            pcmBuffer.length,
+            offsetSamples,
+            lengthSamples,
+            gain,
+            pan,
+            fadeIn,
+            fadeOut,
+            isStereo
+          );
         }
       }
 
@@ -1145,7 +1154,7 @@ export class NativeDAWBridge {
         const currentBlockFrames = Math.min(BLOCK_SIZE, maxFrames - frameOffset);
         const blockByteOffset = outPcmPtr + (frameOffset * 2 * 4);
 
-        processMixerFn(mixerPtr, blockByteOffset, currentBlockFrames);
+        callNative('processMixer', blockByteOffset, currentBlockFrames);
 
         if (b % 50 === 0 || b === totalBlocks - 1) {
           const pct = 30 + Math.round((b / totalBlocks) * 50);
@@ -1231,8 +1240,14 @@ export class NativeDAWBridge {
       for (const ptr of allocatedPcmPtrs) {
         this.freeFloats(ptr);
       }
-      if (freeFn && mixerPtr) {
-        freeFn(mixerPtr);
+      
+      if (mixerInstance) {
+        if (isObject && typeof mixerInstance.delete === 'function') {
+          mixerInstance.delete();
+        } else if (mod._freeMixerInstance || mod.freeMixerInstance) {
+          const freeMixFn = mod._freeMixerInstance || mod.freeMixerInstance;
+          freeMixFn(isObject ? (mixerInstance as any).ptr : mixerInstance);
+        }
       }
     }
   }
@@ -1696,8 +1711,15 @@ export class NativeDAWBridge {
         sampleRate
       );
 
-      const heapU32 = new Uint32Array(mod.HEAPU8.buffer, outSegPtr, count * 4);
-      const heapF32 = new Float32Array(mod.HEAPU8.buffer, outSegPtr, count * 4);
+      // Более надежный способ получения доступа к буферу памяти WASM
+      const wasmBuffer = mod.HEAPU8 ? mod.HEAPU8.buffer : (mod.HEAPF32 ? mod.HEAPF32.buffer : (mod.wasmMemory ? mod.wasmMemory.buffer : mod.buffer));
+      
+      if (!wasmBuffer) {
+        throw new Error('[NativeDAWBridge] Не удалось получить доступ к памяти WASM в stripSilenceNative');
+      }
+
+      const heapU32 = new Uint32Array(wasmBuffer, outSegPtr, count * 4);
+      const heapF32 = new Float32Array(wasmBuffer, outSegPtr, count * 4);
 
       for (let i = 0; i < count; i++) {
         const base = i * 4;
