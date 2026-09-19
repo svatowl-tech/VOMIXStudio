@@ -12,10 +12,10 @@
   "app": {
     "windows": [
       {
-        "title": "VOMIXStudio — C++ WASM Native Workstation",
+        "title": "VOMIXStudio - C++ Audio Dubbing Workstation",
         "width": 1280,
         "height": 800,
-        "minWidth": 900,
+        "minWidth": 960,
         "minHeight": 600,
         "resizable": true,
         "fullscreen": false,
@@ -31,22 +31,29 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["msi", "nsis", "appimage", "deb", "dmg"],
+    "targets": ["nsis", "msi"],
     "icon": [
+      "icons/icon.ico",
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
-      "icons/icon.icns",
-      "icons/icon.ico"
+      "icons/icon.icns"
     ],
     "category": "DeveloperTool",
+    "copyright": "Copyright © 2026 VOMIX Studio Technologies Ltd. All rights reserved.",
     "shortDescription": "Standalone C++ WebAssembly Audio Workstation & Video Dubbing Studio",
     "longDescription": "High-performance Desktop Audio Workstation powered by C++ WASM SIMD, React 19, and Native Windows WebView2.",
     "resources": [],
     "windows": {
       "certificateThumbprint": null,
       "digestAlgorithm": "sha256",
-      "timestampUrl": ""
+      "timestampUrl": "",
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "headerImage": null,
+        "sidebarImage": null,
+        "installMode": "currentUser"
+      }
     }
   }
 }

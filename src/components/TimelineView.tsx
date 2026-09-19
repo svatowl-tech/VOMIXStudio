@@ -1,7 +1,9 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { TrackState, ClipConfig } from '../audio/dawEngine';
+import { SubtitleCue } from '../services/ProjectManager';
 import { WaveformCanvas } from './WaveformCanvas';
 import { formatSMPTE, formatCompactTime, getAdaptiveTimeStep } from '../utils/waveformUtils';
+import { globalNativeDAWBridge } from '../services/NativeDAWBridge';
 import {
   ZoomIn,
   ZoomOut,
@@ -9,37 +11,80 @@ import {
   Clock,
   Magnet,
   Volume2,
-  VolumeX,
-  Radio,
-  Disc,
-  Mic,
-  Music,
   Sliders,
   Scissors,
   ChevronsLeftRight,
-  Move
+  Move,
+  Film,
+  Play,
+  Pause,
+  Trash2,
+  Gauge,
+  Sparkles,
+  Check,
+  Zap,
+  FileText,
+  Plus,
+  Edit3,
+  CheckCircle2,
+  AlertCircle,
+  X,
+  Layers,
+  Music,
+  Disc,
+  Mic,
+  Settings2,
+  VolumeX
 } from 'lucide-react';
 
-interface TimelineViewProps {
+export interface TimelineViewProps {
   tracks: TrackState[];
   currentTimeSec: number;
   totalTimeSec?: number;
   isPlaying?: boolean;
   onSeek: (timeSec: number) => void;
   onUpdateTrack?: (updatedTrack: TrackState) => void;
+  // Видеодорожка и синхронизация
+  videoFile?: File | null;
+  videoSrc?: string | null;
+  videoDuration?: number;
+  fps?: number;
+  onTogglePlay?: () => void;
+  // Дорожка субтитров
+  subtitles?: SubtitleCue[];
+  onUpdateSubtitles?: (cues: SubtitleCue[]) => void;
+  onSelectCue?: (cue: SubtitleCue) => void;
 }
 
-type DragMode = 'move' | 'trim-start' | 'trim-end' | 'fade-in' | 'fade-out' | null;
+type DragMode =
+  | 'move'
+  | 'trim-start'
+  | 'trim-end'
+  | 'fade-in'
+  | 'fade-out'
+  | 'time-stretch'
+  | 'cue-move'
+  | 'cue-start'
+  | 'cue-end'
+  | null;
+
+type ActiveTool = 'pointer' | 'razor' | 'stretch' | 'subtitle';
 
 interface ActiveDragState {
-  trackId: number;
-  clipId: number;
+  trackId?: number;
+  clipId?: number;
+  cueIndex?: number;
   mode: DragMode;
   startX: number;
-  initialOffsetSamples: number;
-  initialLengthSamples: number;
-  initialFadeInSamples: number;
-  initialFadeOutSamples: number;
+  initialOffsetSamples?: number;
+  initialLengthSamples?: number;
+  initialFadeInSamples?: number;
+  initialFadeOutSamples?: number;
+  currentLengthSamples?: number;
+  initialCueStartSec?: number;
+  initialCueEndSec?: number;
+  currentCueStartSec?: number;
+  currentCueEndSec?: number;
 }
 
 export const TimelineView: React.FC<TimelineViewProps> = ({
@@ -48,16 +93,89 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   totalTimeSec = 30,
   isPlaying = false,
   onSeek,
-  onUpdateTrack
+  onUpdateTrack,
+  videoFile,
+  videoSrc,
+  videoDuration = 0,
+  fps = 30,
+  onTogglePlay,
+  subtitles: externalSubtitles,
+  onUpdateSubtitles: externalOnUpdateSubtitles,
+  onSelectCue
 }) => {
   const sampleRate = 48000;
+
+  // Локальное состояние субтитров (синхронизировано с external)
+  const [internalSubtitles, setInternalSubtitles] = useState<SubtitleCue[]>(() => {
+    return (
+      externalSubtitles || [
+        {
+          index: 1,
+          startSec: 1.0,
+          endSec: 4.5,
+          speaker: 'Диктор',
+          text: 'Добро пожаловать в профессиональную студию дубляжа Vomix Studio.'
+        },
+        {
+          index: 2,
+          startSec: 5.2,
+          endSec: 9.0,
+          speaker: 'Персонаж 1',
+          text: 'Мы синхронизируем русскую озвучку с оригинальным видеорядом.'
+        }
+      ]
+    );
+  });
+
+  const subtitles = externalSubtitles !== undefined ? externalSubtitles : internalSubtitles;
+  const setSubtitles = useCallback(
+    (newCues: SubtitleCue[] | ((prev: SubtitleCue[]) => SubtitleCue[])) => {
+      if (typeof newCues === 'function') {
+        const updated = newCues(subtitles);
+        if (externalOnUpdateSubtitles) {
+          externalOnUpdateSubtitles(updated);
+        } else {
+          setInternalSubtitles(updated);
+        }
+      } else {
+        if (externalOnUpdateSubtitles) {
+          externalOnUpdateSubtitles(newCues);
+        } else {
+          setInternalSubtitles(newCues);
+        }
+      }
+    },
+    [externalOnUpdateSubtitles, subtitles]
+  );
+
+  // Выбранные сущности
+  const [selectedClipId, setSelectedClipId] = useState<number | null>(null);
+  const [selectedCueIndex, setSelectedCueIndex] = useState<number | null>(null);
+  const [activeTool, setActiveTool] = useState<ActiveTool>('pointer');
 
   // Масштаб отображения (пикселей на секунду времени)
   const [pxPerSec, setPxPerSec] = useState<number>(60);
   const [useSMPTE, setUseSMPTE] = useState<boolean>(true);
   const [snapToGrid, setSnapToGrid] = useState<boolean>(true);
   const [autoScroll, setAutoScroll] = useState<boolean>(true);
-  const [selectedClipId, setSelectedClipId] = useState<number | null>(null);
+
+  // Модальные окна
+  const [stretchDialogOpen, setStretchDialogOpen] = useState<boolean>(false);
+  const [targetStretchRatio, setTargetStretchRatio] = useState<string>('1.00');
+
+  const [stripSilenceModalOpen, setStripSilenceModalOpen] = useState<boolean>(false);
+  const [stripThresholdDb, setStripThresholdDb] = useState<number>(-40);
+  const [stripMinSilenceMs, setStripMinSilenceMs] = useState<number>(300);
+  const [stripPaddingMs, setStripPaddingMs] = useState<number>(60);
+  const [stripTargetTrackId, setStripTargetTrackId] = useState<number>(tracks[0]?.id || 1);
+
+  const [cueEditorOpen, setCueEditorOpen] = useState<boolean>(false);
+  const [editingCue, setEditingCue] = useState<SubtitleCue | null>(null);
+
+  // Уведомления таймлайна
+  const [timelineNotice, setTimelineNotice] = useState<{ text: string; type: 'success' | 'info' | 'warn' } | null>(
+    null
+  );
 
   // Ссылки на контейнеры для синхронизации прокрутки и 60 FPS плейхеда
   const timelineScrollRef = useRef<HTMLDivElement | null>(null);
@@ -66,25 +184,36 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   const currentTimeSecRef = useRef<number>(currentTimeSec);
   currentTimeSecRef.current = currentTimeSec;
 
-  // Состояние активного перетаскивания (Drag / Trim / Fade)
+  // Состояние активного перетаскивания (Drag / Trim / Fade / Time-Stretch / Cue)
   const [activeDrag, setActiveDrag] = useState<ActiveDragState | null>(null);
 
-  // Вычисление максимальной длины проекта с запасом
-  const maxProjectSec = useMemo(() => {
-    let maxSec = totalTimeSec;
+  // Показ уведомлений на 3.5 секунды
+  const showNotice = useCallback((text: string, type: 'success' | 'info' | 'warn' = 'success') => {
+    setTimelineNotice({ text, type });
+    setTimeout(() => {
+      setTimelineNotice((prev) => (prev?.text === text ? null : prev));
+    }, 3500);
+  }, []);
+
+  // Вычисление максимальной длины проекта с учетом видео, всех аудиоклипов и субтитров
+  const effectiveDurationSec = useMemo(() => {
+    let maxSec = Math.max(totalTimeSec, videoDuration);
     tracks.forEach((t) => {
       t.clips.forEach((c) => {
         const endSec = (c.offsetSamples + c.lengthSamples) / sampleRate;
         if (endSec > maxSec) maxSec = endSec;
       });
     });
-    return Math.max(maxSec + 10, 30);
-  }, [tracks, totalTimeSec, sampleRate]);
+    subtitles.forEach((s) => {
+      if (s.endSec > maxSec) maxSec = s.endSec;
+    });
+    return Math.max(maxSec + 5, 20);
+  }, [tracks, subtitles, totalTimeSec, videoDuration, sampleRate]);
 
-  const totalWidthPx = Math.max(800, Math.floor(maxProjectSec * pxPerSec));
+  const totalWidthPx = Math.max(900, Math.floor(effectiveDurationSec * pxPerSec));
 
   // ==========================================================================
-  // 60 FPS REQUEST ANIMATION FRAME PLAYHEAD (Без лишних ре-рендеров React)
+  // 60 FPS REQUEST ANIMATION FRAME PLAYHEAD
   // ==========================================================================
   useEffect(() => {
     let animId: number;
@@ -98,10 +227,10 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
         if (isPlaying && autoScroll && timelineScrollRef.current) {
           const scrollLeft = timelineScrollRef.current.scrollLeft;
           const containerWidth = timelineScrollRef.current.clientWidth;
-          if (x > scrollLeft + containerWidth - 100) {
-            timelineScrollRef.current.scrollLeft = x - 100;
+          if (x > scrollLeft + containerWidth - 120) {
+            timelineScrollRef.current.scrollLeft = x - 120;
           } else if (x < scrollLeft) {
-            timelineScrollRef.current.scrollLeft = Math.max(0, x - 50);
+            timelineScrollRef.current.scrollLeft = Math.max(0, x - 60);
           }
         }
       }
@@ -132,11 +261,11 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, width, height);
 
-    // Фоновая заливка линейки
+    // Фон линейки
     ctx.fillStyle = '#090d16';
     ctx.fillRect(0, 0, width, height);
 
-    // Нижняя разделительная полоса
+    // Разделительная полоса
     ctx.strokeStyle = '#1e293b';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -145,7 +274,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     ctx.stroke();
 
     const { majorStepSec, minorStepSec } = getAdaptiveTimeStep(pxPerSec);
-    const totalSteps = Math.ceil(maxProjectSec / minorStepSec);
+    const totalSteps = Math.ceil(effectiveDurationSec / minorStepSec);
 
     ctx.font = '10px "JetBrains Mono", monospace';
     ctx.textBaseline = 'top';
@@ -153,10 +282,11 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     for (let i = 0; i <= totalSteps; i++) {
       const time = i * minorStepSec;
       const x = time * pxPerSec;
-      const isMajor = Math.abs(time % majorStepSec) < 0.0001 || Math.abs(time % majorStepSec - majorStepSec) < 0.0001;
+      const isMajor =
+        Math.abs(time % majorStepSec) < 0.0001 ||
+        Math.abs((time % majorStepSec) - majorStepSec) < 0.0001;
 
       if (isMajor) {
-        // Главная риска
         ctx.strokeStyle = '#475569';
         ctx.lineWidth = 1.2;
         ctx.beginPath();
@@ -164,12 +294,10 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
         ctx.lineTo(x, height);
         ctx.stroke();
 
-        // Подпись времени
         ctx.fillStyle = '#94a3b8';
         const label = useSMPTE ? formatSMPTE(time) : formatCompactTime(time);
         ctx.fillText(label, x + 4, 4);
       } else {
-        // Второстепенная риска
         ctx.strokeStyle = '#334155';
         ctx.lineWidth = 0.8;
         ctx.beginPath();
@@ -178,14 +306,14 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
         ctx.stroke();
       }
     }
-  }, [totalWidthPx, maxProjectSec, pxPerSec, useSMPTE]);
+  }, [totalWidthPx, effectiveDurationSec, pxPerSec, useSMPTE]);
 
   useEffect(() => {
     renderRuler();
   }, [renderRuler]);
 
   // ==========================================================================
-  // ЗУММИРОВАНИЕ КОЛЕСОМ МЫШИ С ФОКУСОМ НА КУРСОРЕ (ZOOM TO CURSOR)
+  // ЗУММИРОВАНИЕ КОЛЕСОМ МЫШИ
   // ==========================================================================
   const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
     if (e.ctrlKey || e.altKey || e.metaKey) {
@@ -198,11 +326,10 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       const timeAtCursor = mouseX / pxPerSec;
 
       const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85;
-      const newPxPerSec = Math.max(10, Math.min(600, pxPerSec * zoomFactor));
+      const newPxPerSec = Math.max(12, Math.min(500, pxPerSec * zoomFactor));
 
       setPxPerSec(newPxPerSec);
 
-      // Корректировка scrollLeft для сохранения фокуса на курсоре
       requestAnimationFrame(() => {
         if (timelineScrollRef.current) {
           const newMouseX = timeAtCursor * newPxPerSec;
@@ -212,10 +339,13 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     }
   };
 
-  // Клик по линейке для перемещения плейхеда (Seek)
-  const handleRulerClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const clickX = e.clientX - rect.left + (timelineScrollRef.current?.scrollLeft || 0);
+  // Клик по линейке или дорожкам для перемещения плейхеда
+  const handleSeekByCoord = (clientX: number) => {
+    const container = timelineScrollRef.current;
+    if (!container) return;
+
+    const rect = container.getBoundingClientRect();
+    const clickX = clientX - rect.left + container.scrollLeft;
     let seekTime = Math.max(0, clickX / pxPerSec);
 
     if (snapToGrid) {
@@ -227,7 +357,397 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   };
 
   // ==========================================================================
-  // ОБРАБОТКА DRAG / TRIM / FADE ДЛЯ КЛИПОВ
+  // ФУНКЦИОНАЛ СПЛИТА (РАЗРЕЗАНИЕ ДОРОЖЕК / КЛИПОВ)
+  // ==========================================================================
+  const handleSplitClip = (trackId: number, clipId: number, splitTimeSec: number) => {
+    const track = tracks.find((t) => t.id === trackId);
+    if (!track || !onUpdateTrack) return;
+
+    const clip = track.clips.find((c) => c.id === clipId);
+    if (!clip) return;
+
+    const splitSample = Math.round(splitTimeSec * sampleRate);
+    const clipStartSample = clip.offsetSamples;
+    const clipEndSample = clip.offsetSamples + clip.lengthSamples;
+
+    // Минимальная длина отрезка 50 мс
+    const minSamples = Math.round(sampleRate * 0.05);
+
+    if (splitSample <= clipStartSample + minSamples || splitSample >= clipEndSample - minSamples) {
+      return;
+    }
+
+    const leftLength = splitSample - clipStartSample;
+    const rightLength = clip.lengthSamples - leftLength;
+
+    const isStereo = clip.buffer.length >= clip.lengthSamples * 2;
+    const stride = isStereo ? 2 : 1;
+
+    const leftBuffer = clip.buffer.slice(0, leftLength * stride);
+    const rightBuffer = clip.buffer.slice(leftLength * stride, (leftLength + rightLength) * stride);
+
+    const leftClip: ClipConfig = {
+      ...clip,
+      lengthSamples: leftLength,
+      buffer: leftBuffer,
+      originalBuffer: leftBuffer,
+      originalLengthSamples: leftLength,
+      fadeOutSamples: Math.min(clip.fadeOutSamples, Math.floor(leftLength / 2))
+    };
+
+    const rightClip: ClipConfig = {
+      ...clip,
+      id: Date.now() + Math.floor(Math.random() * 1000),
+      name: `${clip.name} (Part 2)`,
+      offsetSamples: splitSample,
+      lengthSamples: rightLength,
+      buffer: rightBuffer,
+      originalBuffer: rightBuffer,
+      originalLengthSamples: rightLength,
+      fadeInSamples: Math.min(clip.fadeInSamples, Math.floor(rightLength / 2))
+    };
+
+    const newClips = track.clips.flatMap((c) => (c.id === clipId ? [leftClip, rightClip] : [c]));
+    onUpdateTrack({ ...track, clips: newClips });
+    setSelectedClipId(rightClip.id);
+    showNotice(`Клип разрезан по таймкоду ${formatCompactTime(splitTimeSec)}`, 'info');
+  };
+
+  // Разрезать клип под плейхедом (кнопка "Сплит" или 'S')
+  const handleSplitAtPlayhead = () => {
+    const currentSample = Math.round(currentTimeSec * sampleRate);
+    let targetTrack: TrackState | null = null;
+    let targetClip: ClipConfig | null = null;
+
+    if (selectedClipId !== null) {
+      for (const t of tracks) {
+        const c = t.clips.find((item) => item.id === selectedClipId);
+        if (c && currentSample > c.offsetSamples && currentSample < c.offsetSamples + c.lengthSamples) {
+          targetTrack = t;
+          targetClip = c;
+          break;
+        }
+      }
+    }
+
+    if (!targetClip) {
+      for (const t of tracks) {
+        const c = t.clips.find(
+          (item) =>
+            currentSample > item.offsetSamples && currentSample < item.offsetSamples + item.lengthSamples
+        );
+        if (c) {
+          targetTrack = t;
+          targetClip = c;
+          break;
+        }
+      }
+    }
+
+    if (targetTrack && targetClip) {
+      handleSplitClip(targetTrack.id, targetClip.id, currentTimeSec);
+    } else {
+      showNotice('Под плейхедом нет аудиоклипа для разрезания', 'warn');
+    }
+  };
+
+  // ==========================================================================
+  // C++ STRIP SILENCE (УДАЛЕНИЕ ТИШИНЫ И АВТОМАТИЧЕСКАЯ НАРЕЗКА НА ФРАЗЫ)
+  // ==========================================================================
+  const handleExecuteStripSilence = () => {
+    const targetTrack = tracks.find((t) => t.id === stripTargetTrackId) || tracks[0];
+    if (!targetTrack || !onUpdateTrack) {
+      showNotice('Целевая дорожка не найдена', 'warn');
+      return;
+    }
+
+    // Если есть выделенный клип на этой дорожке, обрабатываем его, иначе первый клип с буфером
+    let sourceClip = targetTrack.clips.find((c) => c.id === selectedClipId);
+    if (!sourceClip && targetTrack.clips.length > 0) {
+      sourceClip = targetTrack.clips[0];
+    }
+
+    if (!sourceClip || !sourceClip.buffer || sourceClip.buffer.length === 0) {
+      showNotice(`На дорожке [${targetTrack.name}] нет аудиоклипов для анализа`, 'warn');
+      return;
+    }
+
+    const isStereo = sourceClip.buffer.length >= sourceClip.lengthSamples * 2;
+    const channels = isStereo ? 2 : 1;
+
+    // Вызываем нативный C++ VAD стриппер
+    const segments = globalNativeDAWBridge.stripSilenceNative(
+      sourceClip.buffer,
+      stripThresholdDb,
+      stripMinSilenceMs,
+      stripPaddingMs,
+      isStereo,
+      sampleRate
+    );
+
+    if (segments.length === 0) {
+      showNotice('Звуковых сегментов выше порога не обнаружено.', 'warn');
+      setStripSilenceModalOpen(false);
+      return;
+    }
+
+    // Создаем массив нарезанных фраз без пауз тишины
+    const newClips: ClipConfig[] = segments.map((seg, idx) => {
+      const segOffsetInClip = seg.offsetSamples;
+      const segLength = seg.lengthSamples;
+
+      const segBuffer = sourceClip!.buffer.slice(
+        segOffsetInClip * channels,
+        (segOffsetInClip + segLength) * channels
+      );
+
+      const phraseOffsetGlobal = sourceClip!.offsetSamples + segOffsetInClip;
+      const fadeLen = Math.min(Math.round(sampleRate * 0.01), Math.floor(segLength / 4)); // 10ms кроссфейд
+
+      return {
+        id: Date.now() + idx * 10 + Math.floor(Math.random() * 10),
+        name: `${sourceClip!.name} [Фраза ${idx + 1}]`,
+        offsetSamples: phraseOffsetGlobal,
+        lengthSamples: segLength,
+        gain: sourceClip!.gain,
+        pan: sourceClip!.pan,
+        fadeInSamples: fadeLen,
+        fadeOutSamples: fadeLen,
+        buffer: segBuffer,
+        originalBuffer: segBuffer,
+        originalLengthSamples: segLength,
+        color: sourceClip!.color || targetTrack.color || '#10b981'
+      };
+    });
+
+    // Заменяем исходный длинный клип диктора на нарезанные фразы
+    const updatedClips = targetTrack.clips.flatMap((c) =>
+      c.id === sourceClip!.id ? newClips : [c]
+    );
+
+    onUpdateTrack({ ...targetTrack, clips: updatedClips });
+    setSelectedClipId(newClips[0]?.id || null);
+    setStripSilenceModalOpen(false);
+
+    const totalSpeechSec = segments.reduce((acc, s) => acc + s.lengthSamples / sampleRate, 0);
+    const originalSec = sourceClip.lengthSamples / sampleRate;
+    const savedSec = Math.max(0, originalSec - totalSpeechSec);
+
+    showNotice(
+      `✓ C++ Strip Silence: создано ${segments.length} фраз! Вырезано ${savedSec.toFixed(1)}с пауз.`,
+      'success'
+    );
+  };
+
+  // ==========================================================================
+  // WSOLA TIME STRETCH (СЖАТИЕ / РАСТЯЖЕНИЕ ФРАЗ БЕЗ ИЗМЕНЕНИЯ ВЫСОТЫ ТОНА)
+  // ==========================================================================
+  const handleTimeStretch = (trackId: number, clipId: number, targetLengthSamples: number) => {
+    const track = tracks.find((t) => t.id === trackId);
+    if (!track || !onUpdateTrack) return;
+
+    const clip = track.clips.find((c) => c.id === clipId);
+    if (!clip) return;
+
+    const baseBuffer = clip.originalBuffer || clip.buffer;
+    const baseLength = clip.originalLengthSamples || clip.lengthSamples;
+
+    const isStereo = clip.buffer.length >= clip.lengthSamples * 2;
+    const newRatio = targetLengthSamples / baseLength;
+
+    // Выполняем нативный WSOLA алгоритм прямо через C++ модуль NativeDAWBridge
+    const stretchedBuffer = globalNativeDAWBridge.processWSOLA(baseBuffer, newRatio, isStereo);
+
+    const updatedClip: ClipConfig = {
+      ...clip,
+      lengthSamples: targetLengthSamples,
+      buffer: stretchedBuffer,
+      originalBuffer: baseBuffer,
+      originalLengthSamples: baseLength,
+      timeStretchRatio: Math.round(newRatio * 100) / 100
+    };
+
+    const newClips = track.clips.map((c) => (c.id === clipId ? updatedClip : c));
+    onUpdateTrack({ ...track, clips: newClips });
+    showNotice(`WSOLA Time Stretch: x${(Math.round(newRatio * 100) / 100).toFixed(2)}`, 'info');
+  };
+
+  // Подгонка длины выбранного клипа под текущую позицию плейхеда
+  const handleFitSelectedToPlayhead = () => {
+    if (selectedClipId === null) {
+      showNotice('Сначала выберите аудиоклип на таймлайне', 'warn');
+      return;
+    }
+    for (const track of tracks) {
+      const clip = track.clips.find((c) => c.id === selectedClipId);
+      if (clip) {
+        const targetEndSample = Math.round(currentTimeSec * sampleRate);
+        const targetLength = targetEndSample - clip.offsetSamples;
+        if (targetLength >= sampleRate * 0.1) {
+          handleTimeStretch(track.id, clip.id, targetLength);
+        } else {
+          showNotice('Плейхед расположен слишком близко к началу клипа', 'warn');
+        }
+        break;
+      }
+    }
+  };
+
+  // Подгонка выбранного клипа точно под выбранный субтитр
+  const handleFitSelectedToSelectedSubtitle = () => {
+    if (selectedClipId === null) {
+      showNotice('Выберите аудиоклип для подгонки под субтитр', 'warn');
+      return;
+    }
+    const targetCue =
+      selectedCueIndex !== null
+        ? subtitles.find((c) => c.index === selectedCueIndex)
+        : subtitles.find((c) => currentTimeSec >= c.startSec && currentTimeSec <= c.endSec) ||
+          subtitles[0];
+
+    if (!targetCue) {
+      showNotice('Субтитр не найден для подгонки', 'warn');
+      return;
+    }
+
+    for (const track of tracks) {
+      const clip = track.clips.find((c) => c.id === selectedClipId);
+      if (clip && onUpdateTrack) {
+        const cueDurationSec = Math.max(0.2, targetCue.endSec - targetCue.startSec);
+        const targetLengthSamples = Math.round(cueDurationSec * sampleRate);
+        const targetOffsetSamples = Math.round(targetCue.startSec * sampleRate);
+
+        const baseBuffer = clip.originalBuffer || clip.buffer;
+        const baseLength = clip.originalLengthSamples || clip.lengthSamples;
+        const isStereo = clip.buffer.length >= clip.lengthSamples * 2;
+        const newRatio = targetLengthSamples / baseLength;
+
+        const stretchedBuffer = globalNativeDAWBridge.processWSOLA(baseBuffer, newRatio, isStereo);
+
+        const updatedClip: ClipConfig = {
+          ...clip,
+          offsetSamples: targetOffsetSamples,
+          lengthSamples: targetLengthSamples,
+          buffer: stretchedBuffer,
+          originalBuffer: baseBuffer,
+          originalLengthSamples: baseLength,
+          timeStretchRatio: Math.round(newRatio * 100) / 100
+        };
+
+        const newClips = track.clips.map((c) => (c.id === clip.id ? updatedClip : c));
+        onUpdateTrack({ ...track, clips: newClips });
+        showNotice(
+          `Фраза «${clip.name}» синхронизирована с субтитром #${targetCue.index} [${targetCue.startSec.toFixed(1)}s - ${targetCue.endSec.toFixed(1)}s]`,
+          'success'
+        );
+        break;
+      }
+    }
+  };
+
+  // Применение численного коэффициента Time Stretch
+  const handleApplyStretchRatio = (ratio: number) => {
+    if (selectedClipId === null) return;
+    for (const track of tracks) {
+      const clip = track.clips.find((c) => c.id === selectedClipId);
+      if (clip) {
+        const baseLength = clip.originalLengthSamples || clip.lengthSamples;
+        const targetLength = Math.round(baseLength * ratio);
+        handleTimeStretch(track.id, clip.id, targetLength);
+        break;
+      }
+    }
+    setStretchDialogOpen(false);
+  };
+
+  // ==========================================================================
+  // СУБТИТРЫ: ДОБАВЛЕНИЕ, РЕДАКТИРОВАНИЕ, УДАЛЕНИЕ
+  // ==========================================================================
+  const handleAddSubtitleCueAtPlayhead = () => {
+    const startSec = Math.max(0, Math.round(currentTimeSec * 10) / 10);
+    const endSec = Math.round((startSec + 2.5) * 10) / 10;
+    const nextIndex =
+      subtitles.length > 0 ? Math.max(...subtitles.map((s) => s.index)) + 1 : 1;
+
+    const newCue: SubtitleCue = {
+      index: nextIndex,
+      startSec,
+      endSec,
+      speaker: 'Диктор',
+      text: 'Новая реплика дубляжа...'
+    };
+
+    const updated = [...subtitles, newCue].sort((a, b) => a.startSec - b.startSec);
+    setSubtitles(updated);
+    setSelectedCueIndex(nextIndex);
+    setEditingCue(newCue);
+    setCueEditorOpen(true);
+    showNotice(`Добавлен субтитр #${nextIndex} на ${formatCompactTime(startSec)}`, 'success');
+  };
+
+  const handleSaveEditedCue = (cue: SubtitleCue) => {
+    const updated = subtitles
+      .map((c) => (c.index === cue.index ? cue : c))
+      .sort((a, b) => a.startSec - b.startSec);
+    setSubtitles(updated);
+    setCueEditorOpen(false);
+    setEditingCue(null);
+    showNotice(`Субтитр #${cue.index} обновлен`, 'success');
+  };
+
+  const handleDeleteSelectedCue = () => {
+    if (selectedCueIndex === null) return;
+    const updated = subtitles.filter((c) => c.index !== selectedCueIndex);
+    setSubtitles(updated);
+    setSelectedCueIndex(null);
+    showNotice('Субтитр удален', 'info');
+  };
+
+  // Удаление выбранного клипа
+  const handleDeleteSelectedClip = () => {
+    if (selectedClipId === null || !onUpdateTrack) return;
+    for (const track of tracks) {
+      if (track.clips.some((c) => c.id === selectedClipId)) {
+        onUpdateTrack({
+          ...track,
+          clips: track.clips.filter((c) => c.id !== selectedClipId)
+        });
+        setSelectedClipId(null);
+        showNotice('Клип удален с таймлайна', 'info');
+        break;
+      }
+    }
+  };
+
+  // Горячие клавиши ('S' - Split, 'Delete' - Удалить, 'Space' - Play/Pause)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Игнорируем если фокус в инпуте
+      if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) return;
+
+      if (e.key === 's' || e.key === 'S' || e.key === 'ы' || e.key === 'Ы') {
+        e.preventDefault();
+        handleSplitAtPlayhead();
+      } else if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedClipId !== null) {
+          e.preventDefault();
+          handleDeleteSelectedClip();
+        } else if (selectedCueIndex !== null) {
+          e.preventDefault();
+          handleDeleteSelectedCue();
+        }
+      } else if (e.code === 'Space') {
+        e.preventDefault();
+        onTogglePlay?.();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedClipId, selectedCueIndex, currentTimeSec, tracks, subtitles, onTogglePlay]);
+
+  // ==========================================================================
+  // ОБРАБОТКА МЫШИ ДЛЯ КЛИПОВ И СУБТИТРОВ
   // ==========================================================================
   const handleClipMouseDown = (
     e: React.MouseEvent,
@@ -237,35 +757,128 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   ) => {
     e.stopPropagation();
     setSelectedClipId(clip.id);
+    setSelectedCueIndex(null);
+
+    // Если активен инструмент Razor (ножницы) - выполняем мгновенный сплит по клику
+    if (activeTool === 'razor') {
+      const container = timelineScrollRef.current;
+      if (container) {
+        const rect = container.getBoundingClientRect();
+        const clickX = e.clientX - rect.left + container.scrollLeft;
+        const splitTime = clickX / pxPerSec;
+        handleSplitClip(trackId, clip.id, splitTime);
+      }
+      return;
+    }
+
+    // Если активен режим Time Stretch Tool, привязываем правый край к stretch
+    const effectiveMode =
+      activeTool === 'stretch' && (mode === 'move' || mode === 'trim-end') ? 'time-stretch' : mode;
 
     setActiveDrag({
       trackId,
       clipId: clip.id,
-      mode,
+      mode: effectiveMode,
       startX: e.clientX,
       initialOffsetSamples: clip.offsetSamples,
       initialLengthSamples: clip.lengthSamples,
       initialFadeInSamples: clip.fadeInSamples,
-      initialFadeOutSamples: clip.fadeOutSamples
+      initialFadeOutSamples: clip.fadeOutSamples,
+      currentLengthSamples: clip.lengthSamples
+    });
+  };
+
+  const handleCueMouseDown = (e: React.MouseEvent, cue: SubtitleCue, mode: DragMode) => {
+    e.stopPropagation();
+    setSelectedCueIndex(cue.index);
+    setSelectedClipId(null);
+    if (onSelectCue) onSelectCue(cue);
+
+    setActiveDrag({
+      cueIndex: cue.index,
+      mode,
+      startX: e.clientX,
+      initialCueStartSec: cue.startSec,
+      initialCueEndSec: cue.endSec,
+      currentCueStartSec: cue.startSec,
+      currentCueEndSec: cue.endSec
     });
   };
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
-      if (!activeDrag || !onUpdateTrack) return;
+      if (!activeDrag) return;
 
       const deltaPx = e.clientX - activeDrag.startX;
       const deltaSec = deltaPx / pxPerSec;
-      const deltaSamples = Math.round(deltaSec * sampleRate);
 
+      // 1. Перемещение и тримминг субтитров
+      if (activeDrag.cueIndex !== undefined) {
+        const cueIndex = activeDrag.cueIndex;
+        const initStart = activeDrag.initialCueStartSec || 0;
+        const initEnd = activeDrag.initialCueEndSec || 1;
+        const cueDuration = initEnd - initStart;
+
+        if (activeDrag.mode === 'cue-move') {
+          let newStart = Math.max(0, initStart + deltaSec);
+          if (snapToGrid) {
+            const { minorStepSec } = getAdaptiveTimeStep(pxPerSec);
+            newStart = Math.round(newStart / minorStepSec) * minorStepSec;
+          }
+          const newEnd = newStart + cueDuration;
+
+          setSubtitles((prev) =>
+            prev.map((c) => (c.index === cueIndex ? { ...c, startSec: newStart, endSec: newEnd } : c))
+          );
+        } else if (activeDrag.mode === 'cue-start') {
+          let newStart = Math.max(0, Math.min(initEnd - 0.2, initStart + deltaSec));
+          if (snapToGrid) {
+            const { minorStepSec } = getAdaptiveTimeStep(pxPerSec);
+            newStart = Math.round(newStart / minorStepSec) * minorStepSec;
+          }
+          setSubtitles((prev) =>
+            prev.map((c) => (c.index === cueIndex ? { ...c, startSec: newStart } : c))
+          );
+        } else if (activeDrag.mode === 'cue-end') {
+          let newEnd = Math.max(initStart + 0.2, initEnd + deltaSec);
+          if (snapToGrid) {
+            const { minorStepSec } = getAdaptiveTimeStep(pxPerSec);
+            newEnd = Math.round(newEnd / minorStepSec) * minorStepSec;
+          }
+          setSubtitles((prev) =>
+            prev.map((c) => (c.index === cueIndex ? { ...c, endSec: newEnd } : c))
+          );
+        }
+        return;
+      }
+
+      // 2. Аудиоклипы (Move, Trim, Fade, Time-Stretch)
+      if (!onUpdateTrack || activeDrag.trackId === undefined) return;
+
+      const deltaSamples = Math.round(deltaSec * sampleRate);
       const targetTrack = tracks.find((t) => t.id === activeDrag.trackId);
       if (!targetTrack) return;
+
+      if (activeDrag.mode === 'time-stretch') {
+        const newLength = Math.max(
+          sampleRate * 0.1,
+          (activeDrag.initialLengthSamples || 0) + deltaSamples
+        );
+        setActiveDrag((prev) => (prev ? { ...prev, currentLengthSamples: newLength } : null));
+
+        const updatedClips = targetTrack.clips.map((clip) => {
+          if (clip.id !== activeDrag.clipId) return clip;
+          return { ...clip, lengthSamples: newLength };
+        });
+        onUpdateTrack({ ...targetTrack, clips: updatedClips });
+        return;
+      }
 
       const updatedClips = targetTrack.clips.map((clip) => {
         if (clip.id !== activeDrag.clipId) return clip;
 
         if (activeDrag.mode === 'move') {
-          let newOffset = Math.max(0, activeDrag.initialOffsetSamples + deltaSamples);
+          let newOffset = Math.max(0, (activeDrag.initialOffsetSamples || 0) + deltaSamples);
           if (snapToGrid) {
             const { minorStepSec } = getAdaptiveTimeStep(pxPerSec);
             const minorStepSamples = Math.round(minorStepSec * sampleRate);
@@ -275,23 +888,35 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
         }
 
         if (activeDrag.mode === 'trim-start') {
-          const newOffset = Math.max(0, activeDrag.initialOffsetSamples + deltaSamples);
-          const newLength = Math.max(sampleRate * 0.1, activeDrag.initialLengthSamples - deltaSamples);
+          const newOffset = Math.max(0, (activeDrag.initialOffsetSamples || 0) + deltaSamples);
+          const newLength = Math.max(
+            sampleRate * 0.1,
+            (activeDrag.initialLengthSamples || 0) - deltaSamples
+          );
           return { ...clip, offsetSamples: newOffset, lengthSamples: newLength };
         }
 
         if (activeDrag.mode === 'trim-end') {
-          const newLength = Math.max(sampleRate * 0.1, activeDrag.initialLengthSamples + deltaSamples);
+          const newLength = Math.max(
+            sampleRate * 0.1,
+            (activeDrag.initialLengthSamples || 0) + deltaSamples
+          );
           return { ...clip, lengthSamples: newLength };
         }
 
         if (activeDrag.mode === 'fade-in') {
-          const newFadeIn = Math.max(0, Math.min(clip.lengthSamples, activeDrag.initialFadeInSamples + deltaSamples));
+          const newFadeIn = Math.max(
+            0,
+            Math.min(clip.lengthSamples, (activeDrag.initialFadeInSamples || 0) + deltaSamples)
+          );
           return { ...clip, fadeInSamples: newFadeIn };
         }
 
         if (activeDrag.mode === 'fade-out') {
-          const newFadeOut = Math.max(0, Math.min(clip.lengthSamples, activeDrag.initialFadeOutSamples - deltaSamples));
+          const newFadeOut = Math.max(
+            0,
+            Math.min(clip.lengthSamples, (activeDrag.initialFadeOutSamples || 0) - deltaSamples)
+          );
           return { ...clip, fadeOutSamples: newFadeOut };
         }
 
@@ -303,6 +928,18 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
 
     const handleMouseUp = () => {
       if (activeDrag) {
+        if (
+          activeDrag.mode === 'time-stretch' &&
+          activeDrag.currentLengthSamples &&
+          activeDrag.trackId !== undefined &&
+          activeDrag.clipId !== undefined
+        ) {
+          handleTimeStretch(
+            activeDrag.trackId,
+            activeDrag.clipId,
+            activeDrag.currentLengthSamples
+          );
+        }
         setActiveDrag(null);
       }
     };
@@ -316,144 +953,347 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [activeDrag, pxPerSec, sampleRate, snapToGrid, tracks, onUpdateTrack]);
+  }, [activeDrag, pxPerSec, sampleRate, snapToGrid, tracks, onUpdateTrack, setSubtitles]);
 
   const getTrackIcon = (id: number) => {
-    if (id === 1) return <Disc size={13} className="text-rose-400" />;
+    if (id === 1) return <Disc size={13} className="text-cyan-400" />;
     if (id === 2) return <Music size={13} className="text-blue-400" />;
     if (id === 3) return <Mic size={13} className="text-emerald-400" />;
     return <Volume2 size={13} className="text-purple-400" />;
   };
 
+  const selectedClip = useMemo(() => {
+    if (selectedClipId === null) return null;
+    for (const t of tracks) {
+      const c = t.clips.find((item) => item.id === selectedClipId);
+      if (c) return { clip: c, track: t };
+    }
+    return null;
+  }, [selectedClipId, tracks]);
+
+  const selectedCue = useMemo(() => {
+    if (selectedCueIndex === null) return null;
+    return subtitles.find((c) => c.index === selectedCueIndex) || null;
+  }, [selectedCueIndex, subtitles]);
+
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-2xl flex flex-col select-none">
+    <div className="bg-[#0b0f19] border border-[#1e293b] rounded-2xl overflow-hidden shadow-2xl flex flex-col select-none">
       {/* =====================================================================
           TIMELINE CONTROL TOOLBAR
           ===================================================================== */}
-      <div className="bg-slate-950 px-4 py-2.5 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
-        {/* Left: Section Title & Timecode Counter */}
-        <div className="flex items-center gap-4">
+      <div className="bg-[#0f1422] px-4 py-3 border-b border-[#1e293b] flex flex-wrap items-center justify-between gap-3 text-xs">
+        {/* Left: Title, Timecode Counter & Transport */}
+        <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-2 font-bold text-slate-200">
-            <Sliders size={15} className="text-emerald-400" />
-            <span className="uppercase tracking-wider">Multi-Track Timeline & Waveforms</span>
+            <Sliders size={16} className="text-cyan-400" />
+            <span className="tracking-wide">Мультитрек монтаж & Субтитры</span>
           </div>
 
           {/* SMPTE Time Display */}
-          <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 px-3 py-1 rounded-md font-mono text-emerald-400 shadow-inner">
+          <div
+            onClick={() => setUseSMPTE(!useSMPTE)}
+            title="Кликните для переключения формата времени (SMPTE / Секунды)"
+            className="flex items-center gap-2 bg-slate-950 border border-slate-800 px-3 py-1 rounded-xl font-mono text-cyan-400 shadow-inner cursor-pointer hover:border-cyan-500/50 transition-colors"
+          >
             <Clock size={13} />
             <span className="font-bold tracking-wider">
-              {useSMPTE ? formatSMPTE(currentTimeSec) : formatCompactTime(currentTimeSec)}
+              {useSMPTE ? formatSMPTE(currentTimeSec, fps) : formatCompactTime(currentTimeSec)}
             </span>
           </div>
+
+          {/* Play/Pause Button */}
+          {onTogglePlay && (
+            <button
+              onClick={onTogglePlay}
+              className={`p-1.5 rounded-xl border transition-all cursor-pointer ${
+                isPlaying
+                  ? 'bg-amber-500 text-slate-950 border-amber-400 shadow-md shadow-amber-950/40'
+                  : 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500 shadow-md shadow-emerald-950/40'
+              }`}
+              title={isPlaying ? 'Пауза (Space)' : 'Воспроизведение (Space)'}
+            >
+              {isPlaying ? <Pause size={14} /> : <Play size={14} className="ml-0.5" />}
+            </button>
+          )}
         </div>
 
-        {/* Right: Zoom Controls & Toggles */}
-        <div className="flex items-center gap-2">
+        {/* Center: Tools (Pointer / Razor Split / Time Stretch) */}
+        <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800">
+          <button
+            onClick={() => setActiveTool('pointer')}
+            title="Инструмент выделения и перемещения (V)"
+            className={`px-2.5 py-1 rounded-lg flex items-center gap-1.5 transition-all text-xs font-semibold cursor-pointer ${
+              activeTool === 'pointer'
+                ? 'bg-slate-800 text-cyan-400 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            <Move size={13} />
+            <span>Перемещение</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTool('razor')}
+            title="Инструмент нарезки клипов (Ножницы / Split) — кликните по клипу"
+            className={`px-2.5 py-1 rounded-lg flex items-center gap-1.5 transition-all text-xs font-semibold cursor-pointer ${
+              activeTool === 'razor'
+                ? 'bg-rose-950 text-rose-400 border border-rose-800/80 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            <Scissors size={13} />
+            <span>Ножницы [S]</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTool('stretch')}
+            title="Подгонка по времени без изменения высоты тона (WSOLA Time Stretch)"
+            className={`px-2.5 py-1 rounded-lg flex items-center gap-1.5 transition-all text-xs font-semibold cursor-pointer ${
+              activeTool === 'stretch'
+                ? 'bg-amber-950 text-amber-400 border border-amber-800/80 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            <Gauge size={13} />
+            <span>Time Stretch</span>
+          </button>
+        </div>
+
+        {/* Right: Key Pro Dubbing Actions (Strip Silence, Split, Subtitle Sync) */}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* C++ STRIP SILENCE КНОПКА */}
+          <button
+            id="btn-strip-silence"
+            onClick={() => {
+              if (selectedClip) {
+                setStripTargetTrackId(selectedClip.track.id);
+              }
+              setStripSilenceModalOpen(true);
+            }}
+            title="Нативное удаление тишины и авто-нарезка дорожки на фразы через C++ SilenceStripper"
+            className="px-3 py-1 bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-md shadow-emerald-950/40"
+          >
+            <Zap size={13} className="text-amber-300" />
+            <span>Удалить тишину (C++)</span>
+          </button>
+
+          {/* Кнопка добавления субтитра на плейхед */}
+          <button
+            onClick={handleAddSubtitleCueAtPlayhead}
+            title="Добавить блок субтитра в текущую позицию плейхеда"
+            className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-purple-300 border border-purple-800/60 rounded-xl text-xs font-medium transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
+          >
+            <FileText size={13} className="text-purple-400" />
+            <span>+ Субтитр</span>
+          </button>
+
+          {/* Сплит по курсору */}
+          <button
+            onClick={handleSplitAtPlayhead}
+            title="Разрезать аудиоклип точно по плейхеду (Клавиша S)"
+            className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-rose-300 border border-rose-900/60 rounded-xl text-xs font-medium transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
+          >
+            <Scissors size={13} className="text-rose-400" />
+            <span>Сплит [S]</span>
+          </button>
+
+          {/* Подгонка фразы под субтитр */}
+          {selectedClip && (
+            <button
+              onClick={handleFitSelectedToSelectedSubtitle}
+              title="Растянуть/сжать аудиоклип (WSOLA) точно под выделенный субтитр"
+              className="px-2.5 py-1 bg-gradient-to-r from-amber-950 to-purple-950 hover:from-amber-900 hover:to-purple-900 text-amber-200 border border-amber-700/60 rounded-xl text-xs font-medium transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
+            >
+              <ChevronsLeftRight size={13} className="text-amber-400" />
+              <span>Фразу под субтитр</span>
+            </button>
+          )}
+
+          {/* Подгонка под плейхед */}
+          {selectedClip && (
+            <button
+              onClick={handleFitSelectedToPlayhead}
+              title="Растянуть или сжать клип (WSOLA) до текущей позиции плейхеда"
+              className="px-2 py-1 bg-slate-900 hover:bg-slate-800 text-amber-300 border border-amber-900/60 rounded-xl text-xs font-medium transition-all flex items-center gap-1 cursor-pointer"
+            >
+              <span>К плейхеду</span>
+            </button>
+          )}
+
+          {/* Time Stretch Коэффициент */}
+          {selectedClip && (
+            <button
+              onClick={() => setStretchDialogOpen(true)}
+              className="px-2 py-1 bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 rounded-xl text-xs font-mono cursor-pointer"
+              title="Настроить коэффициент Time Stretch вручную"
+            >
+              x{selectedClip.clip.timeStretchRatio || 1.0}
+            </button>
+          )}
+
+          {/* Удаление клипа или субтитра */}
+          {(selectedClip || selectedCue) && (
+            <button
+              onClick={() => {
+                if (selectedClip) handleDeleteSelectedClip();
+                else if (selectedCue) handleDeleteSelectedCue();
+              }}
+              title="Удалить выбранный элемент (Delete / Backspace)"
+              className="p-1 bg-slate-900 hover:bg-rose-950 text-slate-400 hover:text-rose-400 border border-slate-800 hover:border-rose-900 rounded-xl transition-all cursor-pointer"
+            >
+              <Trash2 size={13} />
+            </button>
+          )}
+
           {/* Snap to Grid Toggle */}
           <button
             onClick={() => setSnapToGrid(!snapToGrid)}
             title="Привязка к сетке (Snap to Grid)"
-            className={`px-2.5 py-1 rounded flex items-center gap-1.5 transition-all font-mono text-[11px] ${
+            className={`px-2 py-1 rounded-xl flex items-center gap-1 transition-all font-mono text-[11px] cursor-pointer ${
               snapToGrid
                 ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
-                : 'bg-slate-900 text-slate-400 border border-slate-800 hover:text-slate-200'
+                : 'bg-slate-900 text-slate-400 border border-slate-800'
             }`}
           >
-            <Magnet size={13} />
+            <Magnet size={12} />
             Snap
           </button>
 
-          {/* Timecode Mode Toggle */}
-          <button
-            onClick={() => setUseSMPTE(!useSMPTE)}
-            title="Переключить формат времени (SMPTE / Секунды)"
-            className="px-2.5 py-1 bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-300 rounded font-mono text-[11px]"
-          >
-            {useSMPTE ? 'SMPTE (30fps)' : 'Time (sec)'}
-          </button>
-
-          {/* Auto Scroll Toggle */}
-          <button
-            onClick={() => setAutoScroll(!autoScroll)}
-            className={`px-2.5 py-1 rounded font-mono text-[11px] border ${
-              autoScroll
-                ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30'
-                : 'bg-slate-900 text-slate-400 border-slate-800'
-            }`}
-          >
-            Auto-Scroll
-          </button>
-
-          {/* Horizontal Zoom Buttons */}
-          <div className="flex items-center gap-1 bg-slate-900 border border-slate-800 rounded p-0.5">
+          {/* Zoom Buttons */}
+          <div className="flex items-center gap-1 bg-slate-950 border border-slate-800 rounded-xl p-0.5">
             <button
-              onClick={() => setPxPerSec((prev) => Math.max(10, prev * 0.75))}
-              title="Отдалить (Zoom Out, Ctrl + Колесо)"
-              className="p-1 text-slate-400 hover:text-slate-100 hover:bg-slate-800 rounded transition-colors"
+              onClick={() => setPxPerSec((prev) => Math.max(12, prev * 0.75))}
+              title="Отдалить (Ctrl + Колесо)"
+              className="p-1 text-slate-400 hover:text-slate-100 rounded transition-colors cursor-pointer"
             >
-              <ZoomOut size={14} />
+              <ZoomOut size={13} />
             </button>
-            <span className="text-[10px] font-mono text-slate-400 px-1.5 min-w-[42px] text-center">
-              {Math.round(pxPerSec)} px/s
+            <span className="text-[10px] font-mono text-slate-400 px-1 min-w-[36px] text-center">
+              {Math.round(pxPerSec)}px/s
             </span>
             <button
-              onClick={() => setPxPerSec((prev) => Math.min(600, prev * 1.25))}
-              title="Приблизить (Zoom In, Ctrl + Колесо)"
-              className="p-1 text-slate-400 hover:text-slate-100 hover:bg-slate-800 rounded transition-colors"
+              onClick={() => setPxPerSec((prev) => Math.min(500, prev * 1.25))}
+              title="Приблизить (Ctrl + Колесо)"
+              className="p-1 text-slate-400 hover:text-slate-100 rounded transition-colors cursor-pointer"
             >
-              <ZoomIn size={14} />
+              <ZoomIn size={13} />
             </button>
             <button
               onClick={() => setPxPerSec(60)}
               title="Сброс масштаба"
-              className="p-1 text-slate-400 hover:text-slate-100 hover:bg-slate-800 rounded transition-colors ml-0.5"
+              className="p-1 text-slate-400 hover:text-slate-100 rounded transition-colors cursor-pointer"
             >
-              <Maximize2 size={13} />
+              <Maximize2 size={12} />
             </button>
           </div>
         </div>
       </div>
 
+      {/* Floating Notice Toast */}
+      {timelineNotice && (
+        <div className="bg-gradient-to-r from-slate-900 to-slate-950 border-b border-cyan-500/40 px-4 py-1.5 flex items-center justify-between text-xs text-cyan-300 animate-fadeIn">
+          <div className="flex items-center gap-2">
+            {timelineNotice.type === 'success' && <CheckCircle2 size={14} className="text-emerald-400" />}
+            {timelineNotice.type === 'warn' && <AlertCircle size={14} className="text-amber-400" />}
+            {timelineNotice.type === 'info' && <Sparkles size={14} className="text-cyan-400" />}
+            <span>{timelineNotice.text}</span>
+          </div>
+          <button
+            onClick={() => setTimelineNotice(null)}
+            className="text-slate-500 hover:text-slate-300 cursor-pointer"
+          >
+            <X size={12} />
+          </button>
+        </div>
+      )}
+
       {/* =====================================================================
           MAIN TIMELINE SCROLLABLE CONTAINER
           ===================================================================== */}
-      <div className="flex bg-slate-950 relative overflow-hidden" onWheel={handleWheel}>
+      <div className="flex bg-[#070a12] relative overflow-hidden" onWheel={handleWheel}>
         {/* LEFT COLUMN: Fixed Track Headers Panel */}
-        <div className="w-56 shrink-0 bg-slate-900 border-r border-slate-800 flex flex-col z-20 shadow-xl">
+        <div className="w-56 shrink-0 bg-[#0f1422] border-r border-[#1e293b] flex flex-col z-20 shadow-xl">
           {/* Header Spacer (соответствует высоте линейки 28px) */}
-          <div className="h-7 bg-slate-950 border-b border-slate-800 px-3 flex items-center justify-between text-[10px] font-mono text-slate-400 uppercase tracking-wider">
-            <span>Дорожки</span>
-            <span>M / S / R</span>
+          <div className="h-7 bg-[#090d16] border-b border-[#1e293b] px-3 flex items-center justify-between text-[10px] font-mono text-slate-400 uppercase tracking-wider">
+            <span>Дорожки проекта</span>
+            <span>Параметры</span>
           </div>
 
-          {/* Track Headers List */}
-          <div className="flex flex-col divide-y divide-slate-800/60">
+          {/* 1. Дорожка ВИДЕО (Фиксированная верхняя дорожка) */}
+          <div className="h-14 px-3 py-1.5 flex flex-col justify-between bg-purple-950/20 border-b border-purple-900/40 border-l-2 border-l-purple-500">
+            <div className="flex items-center justify-between gap-1.5">
+              <div className="flex items-center gap-2 min-w-0">
+                <Film size={14} className="text-purple-400 shrink-0" />
+                <div className="min-w-0">
+                  <span
+                    className="text-xs font-bold text-purple-200 truncate block"
+                    title={videoFile?.name || 'Видеоряд'}
+                  >
+                    {videoFile ? videoFile.name : 'Видеоряд'}
+                  </span>
+                  <span className="text-[10px] text-purple-400 font-mono">
+                    {videoDuration > 0 ? `${videoDuration.toFixed(1)}с • ${fps} FPS` : 'Нет видео'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
+              <span className="px-1.5 py-0.2 rounded bg-purple-950 border border-purple-800/80 text-purple-300">
+                VIDEO 0
+              </span>
+              <span className="text-slate-500">Синхрон</span>
+            </div>
+          </div>
+
+          {/* 2. Дорожка СУБТИТРОВ (Subtitle Track Header) */}
+          <div className="h-12 px-3 py-1.5 flex items-center justify-between bg-cyan-950/20 border-b border-cyan-900/40 border-l-2 border-l-cyan-400">
+            <div className="flex items-center gap-2 min-w-0">
+              <FileText size={14} className="text-cyan-400 shrink-0" />
+              <div className="min-w-0">
+                <span className="text-xs font-bold text-cyan-200 truncate block">Субтитры / Текст</span>
+                <span className="text-[10px] text-cyan-400 font-mono">
+                  {subtitles.length} реплик
+                </span>
+              </div>
+            </div>
+
+            <button
+              onClick={handleAddSubtitleCueAtPlayhead}
+              title="Добавить новую реплику на плейхед"
+              className="p-1 bg-cyan-950 hover:bg-cyan-900 text-cyan-300 border border-cyan-700/60 rounded-md transition-colors cursor-pointer"
+            >
+              <Plus size={12} />
+            </button>
+          </div>
+
+          {/* 3. Аудиодорожки проекта */}
+          <div className="flex flex-col divide-y divide-slate-800/60 overflow-y-auto max-h-[500px]">
             {tracks.map((track) => (
               <div
                 key={track.id}
-                className="h-20 px-3 py-2 flex flex-col justify-between bg-slate-900/90 hover:bg-slate-800/40 transition-colors"
+                className="h-20 px-3 py-2 flex flex-col justify-between bg-slate-900/60 hover:bg-slate-800/40 transition-colors"
+                style={{ borderLeft: `2px solid ${track.color || '#10b981'}` }}
               >
-                {/* Top Row: Color, Icon, Track Name */}
+                {/* Top Row: Icon, Track Name, CH Badge */}
                 <div className="flex items-center justify-between gap-1.5">
                   <div className="flex items-center gap-2 min-w-0">
-                    <span
-                      className="w-2.5 h-2.5 rounded-sm shrink-0"
-                      style={{ backgroundColor: track.color }}
-                    />
                     {getTrackIcon(track.id)}
                     <span className="text-xs font-semibold text-slate-200 truncate" title={track.name}>
                       {track.name}
                     </span>
                   </div>
+                  <span className="text-[9px] font-mono text-slate-400 bg-slate-950 px-1 py-0.2 rounded border border-slate-800">
+                    CH {track.id}
+                  </span>
                 </div>
 
-                {/* Bottom Row: Mute, Solo, Rec Buttons & Gain Info */}
+                {/* Bottom Row: Mute, Solo Buttons & Volume */}
                 <div className="flex items-center justify-between gap-1 text-[10px] font-mono">
                   <div className="flex items-center gap-1">
-                    {/* Mute */}
                     <button
                       onClick={() => onUpdateTrack?.({ ...track, mute: !track.mute })}
-                      className={`w-5 h-5 rounded font-bold transition-all flex items-center justify-center ${
+                      className={`w-5 h-5 rounded font-bold transition-all flex items-center justify-center cursor-pointer ${
                         track.mute
                           ? 'bg-rose-600 text-white shadow-md'
                           : 'bg-slate-800 text-slate-400 hover:text-slate-200'
@@ -462,10 +1302,9 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                       M
                     </button>
 
-                    {/* Solo */}
                     <button
                       onClick={() => onUpdateTrack?.({ ...track, solo: !track.solo })}
-                      className={`w-5 h-5 rounded font-bold transition-all flex items-center justify-center ${
+                      className={`w-5 h-5 rounded font-bold transition-all flex items-center justify-center cursor-pointer ${
                         track.solo
                           ? 'bg-amber-500 text-slate-950 shadow-md'
                           : 'bg-slate-800 text-slate-400 hover:text-slate-200'
@@ -473,16 +1312,9 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                     >
                       S
                     </button>
-
-                    {/* Rec Arm */}
-                    <button
-                      className="w-5 h-5 rounded font-bold bg-slate-800 text-slate-400 hover:text-rose-400 transition-all flex items-center justify-center"
-                    >
-                      <Radio size={10} />
-                    </button>
                   </div>
 
-                  <span className="text-slate-400">
+                  <span className="text-slate-400 font-bold">
                     {track.volumeDb >= 0 ? `+${track.volumeDb.toFixed(1)}` : track.volumeDb.toFixed(1)} dB
                   </span>
                 </div>
@@ -491,28 +1323,155 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
           </div>
         </div>
 
-        {/* RIGHT COLUMN: Horizontal Scrollable Timeline Area (Ruler + Tracks Lanes) */}
+        {/* RIGHT COLUMN: Horizontal Scrollable Timeline Area (Ruler + Video + Subtitles + Audio Lanes) */}
         <div
           ref={timelineScrollRef}
-          className="flex-1 overflow-x-auto overflow-y-hidden relative bg-slate-950 select-none scrollbar-thin scrollbar-thumb-slate-800 scrollbar-track-slate-950"
+          className="flex-1 overflow-x-auto overflow-y-hidden relative bg-[#070a12] select-none scrollbar-thin scrollbar-thumb-slate-800 scrollbar-track-slate-950"
         >
           <div style={{ width: `${totalWidthPx}px` }} className="relative flex flex-col">
-            {/* 1. Time Ruler Canvas */}
+            {/* 1. Линейка времени (Time Ruler) */}
             <div
               className="h-7 sticky top-0 z-10 cursor-pointer"
-              onClick={handleRulerClick}
+              onClick={(e) => handleSeekByCoord(e.clientX)}
             >
               <canvas ref={rulerCanvasRef} className="block w-full h-full" />
             </div>
 
-            {/* 2. Track Lanes with Clips & Canvas Waveforms */}
+            {/* 2. Дорожка ВИДЕОПОТОКА (Filmstrip Lane) */}
+            <div
+              className="h-14 relative bg-purple-950/10 border-b border-purple-900/30 cursor-pointer overflow-hidden group"
+              onClick={(e) => handleSeekByCoord(e.clientX)}
+            >
+              {videoDuration > 0 ? (
+                <div
+                  style={{ width: `${Math.max(20, videoDuration * pxPerSec)}px` }}
+                  className="h-full bg-gradient-to-r from-purple-900/40 via-purple-950/60 to-purple-900/40 border border-purple-500/30 rounded-md relative flex items-center px-3 overflow-hidden shadow-inner"
+                >
+                  {/* Перфорация кинопленки (Filmstrip sprocket holes) */}
+                  <div
+                    className="absolute top-0 left-0 right-0 h-1.5 opacity-30 pointer-events-none"
+                    style={{
+                      backgroundImage: `radial-gradient(circle, #c084fc 1px, transparent 1.5px)`,
+                      backgroundSize: `16px 6px`
+                    }}
+                  />
+                  <div
+                    className="absolute bottom-0 left-0 right-0 h-1.5 opacity-30 pointer-events-none"
+                    style={{
+                      backgroundImage: `radial-gradient(circle, #c084fc 1px, transparent 1.5px)`,
+                      backgroundSize: `16px 6px`
+                    }}
+                  />
+
+                  {/* Название видеофайла и кадры */}
+                  <div className="flex items-center gap-2 z-10 text-xs font-mono text-purple-200 pointer-events-none">
+                    <Film size={13} className="text-purple-400" />
+                    <span className="font-bold">{videoFile?.name || 'Видеоряд'}</span>
+                    <span className="text-[10px] text-purple-300 opacity-70">
+                      [0.00с — {videoDuration.toFixed(2)}с]
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <div className="h-full flex items-center px-4 text-xs font-mono text-purple-400/50">
+                  <Film size={13} className="mr-2" />
+                  Видео не загружено. Откройте «Импорт медиа (Hub)» для загрузки видео.
+                </div>
+              )}
+            </div>
+
+            {/* 3. ДОРОЖКА СУБТИТРОВ (SUBTITLE LANE) */}
+            <div
+              className="h-12 relative bg-cyan-950/10 border-b border-cyan-900/30 overflow-hidden"
+              onClick={(e) => handleSeekByCoord(e.clientX)}
+            >
+              {/* Фоновая сетка делений */}
+              <div
+                className="absolute inset-0 pointer-events-none opacity-5"
+                style={{
+                  backgroundImage: `linear-gradient(to right, #06b6d4 1px, transparent 1px)`,
+                  backgroundSize: `${pxPerSec}px 100%`
+                }}
+              />
+
+              {/* Блоки субтитров */}
+              {subtitles.map((cue) => {
+                const cueLeftPx = cue.startSec * pxPerSec;
+                const cueWidthPx = Math.max(28, (cue.endSec - cue.startSec) * pxPerSec);
+                const isSelected = selectedCueIndex === cue.index;
+
+                return (
+                  <div
+                    key={cue.index}
+                    onMouseDown={(e) => handleCueMouseDown(e, cue, 'cue-move')}
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      setEditingCue(cue);
+                      setCueEditorOpen(true);
+                    }}
+                    style={{
+                      left: `${cueLeftPx}px`,
+                      width: `${cueWidthPx}px`
+                    }}
+                    className={`absolute top-1 bottom-1 rounded-lg border text-xs overflow-hidden group shadow-md cursor-grab active:cursor-grabbing transition-all flex flex-col justify-between p-1.5 ${
+                      isSelected
+                        ? 'bg-gradient-to-r from-cyan-900/80 to-blue-900/80 border-cyan-400 ring-2 ring-cyan-400 shadow-cyan-950/80 z-20'
+                        : 'bg-gradient-to-r from-cyan-950/60 to-slate-900/80 border-cyan-700/60 hover:border-cyan-500 hover:bg-cyan-900/40 z-10'
+                    }`}
+                  >
+                    {/* Cue Header (Speaker badge & timing) */}
+                    <div className="flex items-center justify-between text-[9px] font-mono text-cyan-200 pointer-events-none truncate">
+                      <span className="font-bold px-1 py-0.2 rounded bg-cyan-950/80 border border-cyan-700/60 text-cyan-300 truncate max-w-[90px]">
+                        {cue.speaker || `Реплика #${cue.index}`}
+                      </span>
+                      <span className="opacity-80 text-[8px] text-cyan-400 shrink-0 ml-1">
+                        {(cue.endSec - cue.startSec).toFixed(1)}с
+                      </span>
+                    </div>
+
+                    {/* Cue Text */}
+                    <div
+                      className="text-[10px] text-slate-100 font-medium truncate pointer-events-none drop-shadow-sm"
+                      title={cue.text}
+                    >
+                      {cue.text}
+                    </div>
+
+                    {/* Левый Trim Handle для оттаймовки начала реплики */}
+                    <div
+                      onMouseDown={(e) => handleCueMouseDown(e, cue, 'cue-start')}
+                      title="Подтянуть начало реплики (Trim Start)"
+                      className="absolute top-0 bottom-0 left-0 w-2.5 hover:w-3.5 bg-cyan-400/60 hover:bg-cyan-300 cursor-w-resize transition-all opacity-0 group-hover:opacity-100 z-30 flex items-center justify-center"
+                    >
+                      <div className="w-0.5 h-3 bg-slate-950 rounded-full" />
+                    </div>
+
+                    {/* Правый Trim Handle для оттаймовки конца реплики */}
+                    <div
+                      onMouseDown={(e) => handleCueMouseDown(e, cue, 'cue-end')}
+                      title="Подтянуть конец реплики (Trim End)"
+                      className="absolute top-0 bottom-0 right-0 w-2.5 hover:w-3.5 bg-cyan-400/60 hover:bg-cyan-300 cursor-e-resize transition-all opacity-0 group-hover:opacity-100 z-30 flex items-center justify-center"
+                    >
+                      <div className="w-0.5 h-3 bg-slate-950 rounded-full" />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* 4. ДОРОЖКИ АУДИОСИГНАЛОВ с волновыми формами (Waveforms) */}
             <div className="flex flex-col divide-y divide-slate-800/60 relative">
               {tracks.map((track) => (
                 <div
                   key={track.id}
-                  className="h-20 relative bg-slate-950/70 hover:bg-slate-900/30 transition-colors"
+                  className="h-20 relative bg-[#070a12] hover:bg-slate-900/20 transition-colors"
+                  onClick={(e) => {
+                    if (activeTool === 'razor') {
+                      handleSeekByCoord(e.clientX);
+                    }
+                  }}
                 >
-                  {/* Grid background lines */}
+                  {/* Фоновая сетка делений */}
                   <div
                     className="absolute inset-0 pointer-events-none opacity-10"
                     style={{
@@ -521,7 +1480,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                     }}
                   />
 
-                  {/* Render Clips on this Track */}
+                  {/* Клипы дорожки */}
                   {track.clips.map((clip) => {
                     const clipStartSec = clip.offsetSamples / sampleRate;
                     const clipLenSec = clip.lengthSamples / sampleRate;
@@ -542,11 +1501,11 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                           backgroundColor: `${clip.color}18`,
                           borderColor: isSelected ? '#38bdf8' : `${clip.color}80`
                         }}
-                        className={`absolute top-1 bottom-1 rounded-md border text-xs overflow-hidden group shadow-lg cursor-grab active:cursor-grabbing transition-shadow ${
-                          isSelected ? 'ring-2 ring-cyan-400 shadow-cyan-950/50' : ''
-                        }`}
+                        className={`absolute top-1 bottom-1 rounded-lg border text-xs overflow-hidden group shadow-lg cursor-grab active:cursor-grabbing transition-all ${
+                          isSelected ? 'ring-2 ring-cyan-400 shadow-cyan-950/60 z-20' : 'z-10'
+                        } ${activeTool === 'razor' ? 'cursor-crosshair' : ''}`}
                       >
-                        {/* Clip Waveform Canvas */}
+                        {/* Волновой спектр клипа */}
                         <div className="absolute inset-0 pointer-events-none">
                           <WaveformCanvas
                             buffer={clip.buffer}
@@ -560,17 +1519,26 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                           />
                         </div>
 
-                        {/* Clip Header Label */}
-                        <div className="absolute top-1 left-2 right-2 flex items-center justify-between text-[10px] font-mono text-slate-200 pointer-events-none drop-shadow">
-                          <span className="font-bold truncate bg-slate-950/60 px-1.5 py-0.5 rounded border border-slate-800/80">
+                        {/* Информационный бейдж клипа */}
+                        <div className="absolute top-1 left-2 right-2 flex items-center justify-between text-[10px] font-mono text-slate-200 pointer-events-none drop-shadow z-10">
+                          <span className="font-bold truncate bg-slate-950/70 px-1.5 py-0.5 rounded border border-slate-800/80">
                             {clip.name}
                           </span>
-                          <span className="bg-slate-950/60 px-1.5 py-0.5 rounded text-[9px] text-slate-300">
-                            {clipLenSec.toFixed(2)}s
-                          </span>
+
+                          <div className="flex items-center gap-1">
+                            {/* Индикатор Time Stretch (если дорожка подогнана по времени) */}
+                            {clip.timeStretchRatio && Math.abs(clip.timeStretchRatio - 1.0) > 0.01 && (
+                              <span className="bg-amber-950/80 border border-amber-600/60 text-amber-300 px-1 py-0.2 rounded text-[9px] font-bold">
+                                ↔ x{clip.timeStretchRatio}
+                              </span>
+                            )}
+                            <span className="bg-slate-950/70 px-1.5 py-0.5 rounded text-[9px] text-slate-300">
+                              {clipLenSec.toFixed(2)}с
+                            </span>
+                          </div>
                         </div>
 
-                        {/* Fade In Handle (Top Left Corner) */}
+                        {/* Ручка Fade In (Левый верхний угол) */}
                         <div
                           onMouseDown={(e) => handleClipMouseDown(e, track.id, clip, 'fade-in')}
                           title="Fade In Handle"
@@ -578,7 +1546,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                           className="absolute top-0 w-3 h-3 -translate-x-1.5 bg-white border border-slate-900 rounded-full cursor-ew-resize opacity-0 group-hover:opacity-100 transition-opacity z-30 shadow"
                         />
 
-                        {/* Fade Out Handle (Top Right Corner) */}
+                        {/* Ручка Fade Out (Правый верхний угол) */}
                         <div
                           onMouseDown={(e) => handleClipMouseDown(e, track.id, clip, 'fade-out')}
                           title="Fade Out Handle"
@@ -586,20 +1554,35 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                           className="absolute top-0 w-3 h-3 translate-x-1.5 bg-white border border-slate-900 rounded-full cursor-ew-resize opacity-0 group-hover:opacity-100 transition-opacity z-30 shadow"
                         />
 
-                        {/* Left Trim Handle */}
+                        {/* Левый Trim Handle */}
                         <div
                           onMouseDown={(e) => handleClipMouseDown(e, track.id, clip, 'trim-start')}
-                          title="Trim Left (Start)"
-                          className="absolute top-0 bottom-0 left-0 w-2 hover:w-3 bg-emerald-500/60 hover:bg-emerald-400 cursor-w-resize transition-all opacity-0 group-hover:opacity-100 z-20 flex items-center justify-center"
+                          title="Обрезать слева (Trim Left)"
+                          className="absolute top-0 bottom-0 left-0 w-2.5 hover:w-3.5 bg-emerald-500/60 hover:bg-emerald-400 cursor-w-resize transition-all opacity-0 group-hover:opacity-100 z-20 flex items-center justify-center"
                         >
                           <div className="w-0.5 h-4 bg-slate-950 rounded-full" />
                         </div>
 
-                        {/* Right Trim Handle */}
+                        {/* Правый Trim Handle ИЛИ Time-Stretch Handle */}
                         <div
-                          onMouseDown={(e) => handleClipMouseDown(e, track.id, clip, 'trim-end')}
-                          title="Trim Right (End)"
-                          className="absolute top-0 bottom-0 right-0 w-2 hover:w-3 bg-emerald-500/60 hover:bg-emerald-400 cursor-e-resize transition-all opacity-0 group-hover:opacity-100 z-20 flex items-center justify-center"
+                          onMouseDown={(e) =>
+                            handleClipMouseDown(
+                              e,
+                              track.id,
+                              clip,
+                              activeTool === 'stretch' || e.altKey ? 'time-stretch' : 'trim-end'
+                            )
+                          }
+                          title={
+                            activeTool === 'stretch'
+                              ? 'Сжать / растянуть по времени (WSOLA)'
+                              : 'Обрезать справа (Trim Right) или тяните с Alt для Time Stretch'
+                          }
+                          className={`absolute top-0 bottom-0 right-0 w-2.5 hover:w-3.5 cursor-e-resize transition-all opacity-0 group-hover:opacity-100 z-20 flex items-center justify-center ${
+                            activeTool === 'stretch'
+                              ? 'bg-amber-500/80 hover:bg-amber-400'
+                              : 'bg-emerald-500/60 hover:bg-emerald-400'
+                          }`}
                         >
                           <div className="w-0.5 h-4 bg-slate-950 rounded-full" />
                         </div>
@@ -610,17 +1593,306 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
               ))}
             </div>
 
-            {/* 3. 60 FPS RequestAnimationFrame Playhead Line */}
+            {/* 5. 60 FPS RequestAnimationFrame Плейхед (Playhead Cursor) */}
             <div
               ref={playheadRef}
               className="absolute top-0 bottom-0 w-px bg-rose-500 z-30 pointer-events-none shadow-[0_0_10px_rgba(244,63,94,1)] will-change-transform"
             >
-              {/* Playhead Arrow Badge */}
               <div className="w-3.5 h-3.5 bg-rose-500 rotate-45 -translate-x-[6px] -translate-y-1 rounded-xs shadow-md border border-rose-300 pointer-events-none" />
             </div>
           </div>
         </div>
       </div>
+
+      {/* =====================================================================
+          MODAL: C++ STRIP SILENCE (УДАЛЕНИЕ ТИШИНЫ)
+          ===================================================================== */}
+      {stripSilenceModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-[#0f1422] border border-slate-800 p-6 rounded-2xl max-w-lg w-full shadow-2xl space-y-5">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm">
+                <Zap size={18} className="text-amber-300" />
+                <span>C++ Нативное удаление тишины (Silence Stripper)</span>
+              </div>
+              <button
+                onClick={() => setStripSilenceModalOpen(false)}
+                className="text-slate-400 hover:text-slate-100 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Автоматически находит звуковые фразы диктора через VAD-алгоритм в C++ WebAssembly ядре.
+              Длинная запись будет мгновенно нарезана на отдельные клипы без пауз тишины с сохранением
+              точных таймкодов!
+            </p>
+
+            <div className="space-y-4 bg-slate-950/60 p-4 rounded-xl border border-slate-800/80">
+              {/* Выбор целевой дорожки */}
+              <div>
+                <label className="text-xs text-slate-300 block font-semibold mb-1.5">
+                  Целевая дорожка:
+                </label>
+                <select
+                  value={stripTargetTrackId}
+                  onChange={(e) => setStripTargetTrackId(Number(e.target.value))}
+                  className="w-full bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-xl p-2.5 focus:border-cyan-500 outline-none"
+                >
+                  {tracks.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      CH {t.id} — {t.name} ({t.clips.length} клипов)
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Порог чувствительности (dB) */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between text-xs font-semibold">
+                  <span className="text-slate-300">Порог тишины (Threshold):</span>
+                  <span className="font-mono text-cyan-400">{stripThresholdDb} dB</span>
+                </div>
+                <input
+                  type="range"
+                  min="-60"
+                  max="-20"
+                  step="1"
+                  value={stripThresholdDb}
+                  onChange={(e) => setStripThresholdDb(Number(e.target.value))}
+                  className="w-full accent-cyan-500 cursor-pointer"
+                />
+                <div className="flex justify-between text-[10px] text-slate-500 font-mono">
+                  <span>-60 dB (Высокая чувствительность)</span>
+                  <span>-20 dB (Только громкий голос)</span>
+                </div>
+              </div>
+
+              {/* Мин. длительность паузы (мс) */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between text-xs font-semibold">
+                  <span className="text-slate-300">Минимальная пауза (Min Silence):</span>
+                  <span className="font-mono text-emerald-400">{stripMinSilenceMs} мс</span>
+                </div>
+                <input
+                  type="range"
+                  min="100"
+                  max="1000"
+                  step="50"
+                  value={stripMinSilenceMs}
+                  onChange={(e) => setStripMinSilenceMs(Number(e.target.value))}
+                  className="w-full accent-emerald-500 cursor-pointer"
+                />
+              </div>
+
+              {/* Удержание краев речи (Padding) */}
+              <div className="space-y-1.5">
+                <div className="flex justify-between text-xs font-semibold">
+                  <span className="text-slate-300">Запас краев фразы (Padding):</span>
+                  <span className="font-mono text-amber-400">{stripPaddingMs} мс</span>
+                </div>
+                <input
+                  type="range"
+                  min="10"
+                  max="200"
+                  step="10"
+                  value={stripPaddingMs}
+                  onChange={(e) => setStripPaddingMs(Number(e.target.value))}
+                  className="w-full accent-amber-500 cursor-pointer"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2">
+              <button
+                onClick={() => setStripSilenceModalOpen(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs cursor-pointer"
+              >
+                Отмена
+              </button>
+              <button
+                onClick={handleExecuteStripSilence}
+                className="px-5 py-2 bg-gradient-to-r from-emerald-600 to-cyan-600 hover:from-emerald-500 hover:to-cyan-500 text-white font-bold rounded-xl text-xs flex items-center gap-2 cursor-pointer shadow-lg shadow-emerald-950/50"
+              >
+                <Zap size={14} className="text-amber-300" />
+                Нарезать на фразы (C++)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          MODAL: РЕДАКТОР СУБТИТРА
+          ===================================================================== */}
+      {cueEditorOpen && editingCue && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-[#0f1422] border border-slate-800 p-6 rounded-2xl max-w-md w-full shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2 text-cyan-400 font-bold text-sm">
+                <Edit3 size={16} />
+                <span>Редактирование реплики #{editingCue.index}</span>
+              </div>
+              <button
+                onClick={() => setCueEditorOpen(false)}
+                className="text-slate-400 hover:text-slate-100 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">Говорящий (Спикер):</label>
+                <input
+                  type="text"
+                  value={editingCue.speaker || ''}
+                  onChange={(e) => setEditingCue({ ...editingCue, speaker: e.target.value })}
+                  placeholder="Диктор / Имя персонажа"
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-xs text-slate-100 focus:border-cyan-500 outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">Текст реплики:</label>
+                <textarea
+                  rows={3}
+                  value={editingCue.text}
+                  onChange={(e) => setEditingCue({ ...editingCue, text: e.target.value })}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-xs text-slate-100 focus:border-cyan-500 outline-none resize-none"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 font-mono">
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">Начало (сек):</label>
+                  <input
+                    type="number"
+                    step="0.05"
+                    value={editingCue.startSec}
+                    onChange={(e) =>
+                      setEditingCue({ ...editingCue, startSec: Math.max(0, parseFloat(e.target.value) || 0) })
+                    }
+                    className="w-full bg-slate-900 border border-slate-700 rounded-xl p-2 text-xs text-cyan-400 focus:border-cyan-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">Конец (сек):</label>
+                  <input
+                    type="number"
+                    step="0.05"
+                    value={editingCue.endSec}
+                    onChange={(e) =>
+                      setEditingCue({
+                        ...editingCue,
+                        endSec: Math.max(editingCue.startSec + 0.1, parseFloat(e.target.value) || 0)
+                      })
+                    }
+                    className="w-full bg-slate-900 border border-slate-700 rounded-xl p-2 text-xs text-cyan-400 focus:border-cyan-500 outline-none"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-2">
+              <button
+                onClick={() => {
+                  handleDeleteSelectedCue();
+                  setCueEditorOpen(false);
+                }}
+                className="px-3 py-2 bg-rose-950 hover:bg-rose-900 text-rose-300 border border-rose-800/80 rounded-xl text-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <Trash2 size={13} />
+                Удалить
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setCueEditorOpen(false)}
+                  className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs cursor-pointer"
+                >
+                  Отмена
+                </button>
+                <button
+                  onClick={() => handleSaveEditedCue(editingCue)}
+                  className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 cursor-pointer shadow-md shadow-cyan-950/50"
+                >
+                  <Check size={14} />
+                  Сохранить
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          MODAL: TIME STRETCH ТОЧНАЯ ПОДГОНКА
+          ===================================================================== */}
+      {stretchDialogOpen && selectedClip && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-[#0f1422] border border-slate-800 p-5 rounded-2xl max-w-md w-full shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2 text-amber-400 font-bold text-sm">
+                <Gauge size={18} />
+                <span>Подгонка по времени (WSOLA Time Stretch)</span>
+              </div>
+              <button
+                onClick={() => setStretchDialogOpen(false)}
+                className="text-slate-400 hover:text-slate-100 text-sm cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-300">
+              Сжатие или растяжение фразы <strong>«{selectedClip.clip.name}»</strong> без изменения высоты голоса (Pitch-Preserved):
+            </p>
+
+            <div className="space-y-2">
+              <label className="text-xs text-slate-400 block font-medium">
+                Коэффициент скорости / длины:
+              </label>
+              <div className="flex items-center gap-3">
+                <input
+                  type="range"
+                  min="0.5"
+                  max="2.0"
+                  step="0.05"
+                  value={targetStretchRatio}
+                  onChange={(e) => setTargetStretchRatio(e.target.value)}
+                  className="flex-1 accent-amber-500 cursor-pointer"
+                />
+                <span className="font-mono text-amber-400 font-bold text-sm min-w-[50px]">
+                  {parseFloat(targetStretchRatio).toFixed(2)}x
+                </span>
+              </div>
+              <div className="flex justify-between text-[10px] text-slate-500 font-mono">
+                <span>0.5x (Быстрее вдвое)</span>
+                <span>1.0x (Оригинал)</span>
+                <span>2.0x (Медленнее вдвое)</span>
+              </div>
+            </div>
+
+            <div className="pt-2 flex items-center justify-end gap-2">
+              <button
+                onClick={() => setStretchDialogOpen(false)}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs cursor-pointer"
+              >
+                Отмена
+              </button>
+              <button
+                onClick={() => handleApplyStretchRatio(parseFloat(targetStretchRatio))}
+                className="px-4 py-1.5 bg-amber-600 hover:bg-amber-500 text-slate-950 font-bold rounded-xl text-xs flex items-center gap-1.5 cursor-pointer shadow-md shadow-amber-950/40"
+              >
+                <Check size={14} />
+                Применить WSOLA
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { MediaNormalizer, LoudnessMatchingResult } from '../services/MediaNormalizer';
-import { TrackState } from '../audio/dawEngine';
+import { TrackState, ClipConfig } from '../audio/dawEngine';
+import { systemLogger } from '../services/SystemLogger';
+import { globalNativeDAWBridge } from '../services/NativeDAWBridge';
 
 export interface TrackMeterData {
   trackId: number;
@@ -46,6 +48,8 @@ export interface UseAudioEngineReturn {
     pan?: number,
     isStereo?: boolean
   ) => void;
+
+  syncTrackClips: (trackId: number, clips: ClipConfig[]) => void;
 
   setTrackVolume: (trackId: number, volumeDb: number) => void;
   setTrackPan: (trackId: number, pan: number) => void;
@@ -95,6 +99,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
   const initAudioEngine = useCallback(async () => {
     try {
       setError(null);
+      systemLogger.info('AudioWorklet', 'Инициализация Web AudioContext...');
 
       // 1. Проверка поддержки Web Audio API
       const AudioCtxClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -111,6 +116,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
       // Снятие блокировки автоплея браузером
       if (ctx.state === 'suspended') {
         await ctx.resume();
+        systemLogger.debug('AudioWorklet', 'AudioContext возобновлен (resume after suspend).');
       }
 
       // 2. Подключение AudioWorklet модуля
@@ -146,30 +152,42 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
               }
             } else if (data.type === 'WASM_INIT_SUCCESS' || data.type === 'WASM_INIT_HYBRID_SUCCESS') {
               setIsAudioWorkletActive(true);
+              systemLogger.info('C++ WASM', 'C++ DSP аудиомикшер инициализирован в AudioWorklet (48000 Hz).');
             }
           };
 
           workletNode.connect(ctx.destination);
           workletNodeRef.current = workletNode;
 
-          // Посылаем команду инициализации в Worklet
+          // Инициализируем WASM движок и получаем байты для AudioWorklet
+          await globalNativeDAWBridge.initWasmEngine();
+          const wasmBytes = await globalNativeDAWBridge.getWasmBinary();
+
+          // Посылаем команду инициализации с бинарником WASM в Worklet
           workletNode.port.postMessage({
             type: 'INIT_WASM',
-            sampleRate: ctx.sampleRate
+            wasmBytes,
+            sampleRate: ctx.sampleRate || 48000
           });
 
           setIsAudioWorkletActive(true);
+          systemLogger.info('AudioWorklet', 'AudioWorklet-процессор успешно смонтирован и запущен.');
         } catch (workletErr) {
-          console.warn('[useAudioEngine] Предупреждение регистрации AudioWorklet:', workletErr);
+          systemLogger.warn(
+            'AudioWorklet',
+            'Предупреждение регистрации AudioWorklet: ' + String(workletErr),
+            workletErr
+          );
           setIsAudioWorkletActive(false);
         }
       }
 
       setIsInitialized(true);
+      systemLogger.info('System', 'Аудиосистема готова к воспроизведению и микшированию.');
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : 'Неизвестная ошибка инициализации аудиосистемы';
       setError(errMsg);
-      console.error('[useAudioEngine Error]:', err);
+      systemLogger.error('AudioWorklet', `Сбой инициализации аудиосистемы: ${errMsg}`, err, err instanceof Error ? err.stack : undefined);
     }
   }, []);
 
@@ -226,9 +244,20 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
       }
 
       // Используем MediaNormalizer для унификации Sample Rate до 48 кГц и формирования стерео-интерливированного буфера
+      systemLogger.info('MediaNormalizer', `Декодирование и ресэмплинг файла для дорожки #${trackId}...`, {
+        trackId,
+        clipId,
+        sizeBytes: file.size
+      });
       const pcmFloat32 = await MediaNormalizer.unifyAudioBuffer(file, 48000);
       const totalFrames = pcmFloat32.length / 2;
       const durationSec = totalFrames / 48000;
+
+      systemLogger.info(
+        'AudioWorklet',
+        `Клип #${clipId} успешно декодирован и загружен в дорожку #${trackId}: ${durationSec.toFixed(2)} сек (${totalFrames} фреймов 48 кГц стерео).`,
+        { trackId, clipId, durationSec, totalFrames }
+      );
 
       // Отправляем стерео-интерливированные Float32Array PCM аудиоданные в AudioWorklet
       if (workletNodeRef.current) {
@@ -278,6 +307,16 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     },
     []
   );
+
+  const syncTrackClips = useCallback((trackId: number, clips: ClipConfig[]) => {
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({
+        type: 'SET_TRACK_CLIPS',
+        trackId,
+        clips
+      });
+    }
+  }, []);
 
   /**
    * Пакетный расчет и отправка выровненных уровней громкости (Loudness Matching) в аудиоядро
@@ -394,6 +433,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
 
     uploadAudioFileToTrack,
     uploadRawPCMToTrack,
+    syncTrackClips,
 
     setTrackVolume,
     setTrackPan,

@@ -33,8 +33,10 @@ import {
   Sliders,
   Check,
   Download,
-  Info
+  Info,
+  Upload
 } from 'lucide-react';
+import { MediaImportModal } from './MediaImportModal';
 
 interface ProjectWorkspaceProps {
   tracks: TrackState[];
@@ -60,6 +62,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<{ type: 'info' | 'success' | 'warning' | 'error'; text: string } | null>(null);
   const [autoSave, setAutoSave] = useState<boolean>(false);
+  const [showImportModal, setShowImportModal] = useState<boolean>(false);
 
   const fallbackInputRef = useRef<HTMLInputElement | null>(null);
   const isFSSupported = globalProjectManager.isFileSystemAccessSupported();
@@ -267,6 +270,16 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
         {/* Кнопки открытия и сохранения */}
         <div className="flex items-center gap-2">
           <button
+            id="btn-open-import-hub"
+            onClick={() => setShowImportModal(true)}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-gradient-to-r from-cyan-600 to-emerald-600 hover:from-cyan-500 hover:to-emerald-500 text-sm font-semibold text-white transition-all cursor-pointer shadow-md shadow-cyan-950/40"
+            title="Единый хаб загрузки видео, дублей и субтитров"
+          >
+            <Upload className="w-4 h-4" />
+            <span>Импорт медиа (Hub)</span>
+          </button>
+
+          <button
             id="btn-open-project-folder"
             onClick={handleOpenDirectory}
             disabled={isLoading}
@@ -440,6 +453,31 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
           )}
         </div>
       </div>
+
+      {/* Единый модальный хаб импорта медиаматериалов */}
+      <MediaImportModal
+        isOpen={showImportModal}
+        onClose={() => {
+          setShowImportModal(false);
+          // Обновляем список файлов в рабочей директории
+          const dir = globalProjectManager.getCurrentDirectoryContent();
+          if (dir) {
+            setDirectoryContent(dir);
+          }
+        }}
+        existingTracks={tracks}
+        currentVideoFile={sourceVideoFile}
+        onImportVideo={(file) => {
+          if (onImportMediaFiles) {
+            onImportMediaFiles({ videoFile: file, audioFiles: [] });
+          }
+        }}
+        onImportAudioTrack={(file, pcm, config) => {
+          if (onImportMediaFiles) {
+            onImportMediaFiles({ audioFiles: [{ file, name: config.name }] });
+          }
+        }}
+      />
     </div>
   );
 };

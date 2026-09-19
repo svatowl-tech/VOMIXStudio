@@ -21,9 +21,9 @@ import {
   NativeDAWBridge,
   globalNativeDAWBridge,
   NativeLoudnessResult,
-  NativeTrackLoudnessAdjustment,
-  NativeLoudnessStats
+  NativeTrackLoudnessAdjustment
 } from './NativeDAWBridge';
+import { systemLogger } from './SystemLogger';
 
 /**
  * Метрики громкости и мощности сигнала
@@ -97,6 +97,14 @@ export class MediaNormalizer {
     let decodedBuffer: AudioBuffer;
     try {
       decodedBuffer = await tempAudioCtx.decodeAudioData(arrayBuffer);
+    } catch (err: any) {
+      systemLogger.error(
+        'MediaNormalizer',
+        `Ошибка декодирования аудиоданных браузером: ${err?.message || 'Неподдерживаемый аудиокодек или поврежденный файл'}`,
+        { byteLength: arrayBuffer.byteLength },
+        err instanceof Error ? err.stack : undefined
+      );
+      throw err;
     } finally {
       if (tempAudioCtx.state !== 'closed') {
         await tempAudioCtx.close().catch(() => {});
@@ -235,17 +243,29 @@ export class MediaNormalizer {
 
     try {
       const mod = bridge.getModule();
-      const stats: NativeLoudnessStats = mod.calculateLoudnessStats
-        ? mod.calculateLoudnessStats(ptr, numFrames, channels, -18.0, -1.0)
-        : {
-            peakLinear: 0,
-            peakDb: MediaNormalizer.MIN_DB_FLOOR,
-            rmsLinear: 0,
-            rmsDb: MediaNormalizer.MIN_DB_FLOOR,
-            gainDeltaToTargetDb: 0,
-            isClipping: false,
-            numSamples: numFrames
-          };
+      let stats = {
+        peakLinear: 0,
+        peakDb: MediaNormalizer.MIN_DB_FLOOR,
+        rmsLinear: 0,
+        rmsDb: MediaNormalizer.MIN_DB_FLOOR,
+        isClipping: false,
+        numSamples: numFrames
+      };
+
+      if (mod.analyzeLoudness) {
+        // Вызов нативного C++ AutoGainStager::analyzeLoudness
+        const nativeStats = mod.analyzeLoudness(ptr, 0, numFrames, -18.0, -1.0);
+        stats = {
+          peakLinear: nativeStats.truePeakLinear,
+          peakDb: nativeStats.truePeakDb,
+          rmsLinear: nativeStats.integratedRmsLinear,
+          rmsDb: nativeStats.integratedRmsDb,
+          isClipping: nativeStats.truePeakDb > 0.0,
+          numSamples: numFrames
+        };
+      } else if (mod.calculateLoudnessStats) {
+        stats = mod.calculateLoudnessStats(ptr, numFrames, channels, -18.0, -1.0);
+      }
 
       const durationSec = numFrames / MediaNormalizer.TARGET_SAMPLE_RATE;
 
@@ -282,16 +302,37 @@ export class MediaNormalizer {
   }
 
   /**
-   * Векторное умножение сигнала на цифровой гейн
+   * Векторное умножение сигнала на цифровой гейн в C++ WASM
    */
   public static applyGain(buffer: Float32Array, gainDb: number, inPlace: boolean = false): Float32Array {
+    if (!buffer || buffer.length === 0 || Math.abs(gainDb) < 0.001) {
+      return inPlace ? buffer : new Float32Array(buffer);
+    }
+
+    const bridge = globalNativeDAWBridge;
+    const mod = bridge.getModule();
+
+    if (mod.applyGain) {
+      const ptr = bridge.writeFloat32Direct(buffer);
+      try {
+        mod.applyGain(ptr, buffer.length, gainDb);
+        const result = bridge.readFloat32Direct(ptr, buffer.length);
+        if (inPlace) {
+          buffer.set(result);
+          return buffer;
+        }
+        return result;
+      } finally {
+        bridge.freeFloats(ptr);
+      }
+    }
+
+    // Fallback
     const target = inPlace ? buffer : new Float32Array(buffer.length);
     const linearGain = MediaNormalizer.dbToLinear(gainDb);
-
     for (let i = 0; i < buffer.length; i++) {
       target[i] = buffer[i] * linearGain;
     }
-
     return target;
   }
 }

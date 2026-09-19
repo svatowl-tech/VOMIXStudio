@@ -40,13 +40,25 @@ import {
   ChevronRight,
   Headphones,
   Zap,
-  Info
+  Info,
+  Plus,
+  Trash2,
+  Database,
+  SlidersHorizontal,
+  Upload,
+  Terminal
 } from 'lucide-react';
+import { systemLogger } from '../services/SystemLogger';
 import { useAudioEngine } from '../hooks/useAudioEngine';
-import { TrackState, MasterState, LiveDAWEngine } from '../audio/dawEngine';
+import { TrackState, MasterState, LiveDAWEngine, createNewTrack } from '../audio/dawEngine';
 import { MediaNormalizer } from '../services/MediaNormalizer';
 import { ProjectState, globalProjectManager } from '../services/ProjectManager';
 import { RenderProgressInfo, globalRenderManager } from '../services/RenderManager';
+import { AssetDatabase, DatabaseStats } from '../services/AssetDatabase';
+import { TrackDSPPanel } from './TrackDSPPanel';
+import { TimelineView } from './TimelineView';
+import { MediaImportModal } from './MediaImportModal';
+import { SubtitleCue } from '../services/ProjectManager';
 import { formatSMPTE } from '../utils/waveformUtils';
 
 export const MinimalStudio: React.FC = () => {
@@ -61,17 +73,24 @@ export const MinimalStudio: React.FC = () => {
     seek,
     uploadAudioFileToTrack,
     uploadRawPCMToTrack,
+    syncTrackClips,
     setTrackVolume,
     setTrackPan,
     setTrackSolo,
     setTrackMute,
+    setTrackEq,
+    setTrackCompressor,
+    setTrackAutoDucker,
     setMasterVolume,
     setMasterLimiter,
     performLoudnessMatching
   } = useAudioEngine();
 
-  // --- 2. Состояние дорожек и мастера проекта ---
+  // --- 2. Состояние дорожек и мастера проекта (Поддержка до 32 дорожек) ---
   const [tracks, setTracks] = useState<TrackState[]>(() => new LiveDAWEngine().getTracks());
+  const [activeDspTrack, setActiveDspTrack] = useState<TrackState | null>(null);
+  const [dbStats, setDbStats] = useState<DatabaseStats | null>(null);
+  const [showDbModal, setShowDbModal] = useState<boolean>(false);
   const [master, setMaster] = useState<MasterState>({
     volumeDb: 0,
     pan: 0,
@@ -103,6 +122,8 @@ export const MinimalStudio: React.FC = () => {
   const [exportedVideoBlob, setExportedVideoBlob] = useState<Blob | null>(null);
   const [exportedVideoUrl, setExportedVideoUrl] = useState<string | null>(null);
   const [loudnessMatchReport, setLoudnessMatchReport] = useState<string | null>(null);
+  const [showMediaImportModal, setShowMediaImportModal] = useState<boolean>(false);
+  const [subtitles, setSubtitles] = useState<SubtitleCue[]>([]);
 
   // Refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -110,14 +131,15 @@ export const MinimalStudio: React.FC = () => {
   const videoInputRef = useRef<HTMLInputElement | null>(null);
   const autoSaveTimeoutRef = useRef<number | null>(null);
 
-  // Инициализация коллбэка прогресса FFmpeg рендерера
+  // Инициализация коллбэка прогресса FFmpeg рендерера и статистики SQL базы
   useEffect(() => {
     globalRenderManager.setProgressCallback((info) => {
       setExportProgress(info);
     });
+    AssetDatabase.getInstance().getStats().then(setDbStats).catch(() => {});
   }, []);
 
-  // --- 6. Синхронизация видео-плеера с таймлайном C++ движка ---
+  // --- 6. Синхронизация видео-плеера с таймлайном C++ движка (Jitter-free Micro-Rate Sync) ---
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !videoSrc) return;
@@ -132,10 +154,19 @@ export const MinimalStudio: React.FC = () => {
       }
     }
 
-    // Синхронизация с порогом дрифта 40 мс
-    const driftSec = Math.abs(video.currentTime - currentTimeSec);
-    if (driftSec > 0.04) {
+    // Фазовая микро-подстройка скорости без сброса очередей декодера (исключает заикание видео)
+    const driftSec = video.currentTime - currentTimeSec;
+    const absDrift = Math.abs(driftSec);
+
+    if (absDrift > 0.35) {
+      // Жесткий переход только при ручной перемотке или большом разрыве
       video.currentTime = currentTimeSec;
+      video.playbackRate = 1.0;
+    } else if (absDrift > 0.04) {
+      // Мягкое плавное выравнивание скорости воспроизведения на +-4%
+      video.playbackRate = driftSec > 0 ? 0.96 : 1.04;
+    } else {
+      video.playbackRate = 1.0;
     }
   }, [currentTimeSec, isPlaying, videoSrc]);
 
@@ -237,45 +268,73 @@ export const MinimalStudio: React.FC = () => {
         setVideoFile(discoveredVideo.fileObj);
         setVideoSrc(URL.createObjectURL(discoveredVideo.fileObj));
         setStatusMessage(`Обнаружено видео: ${discoveredVideo.name}`);
+
+        // Кэшируем видеофайл в SQL/IndexedDB базу данных
+        AssetDatabase.getInstance().saveAsset({
+          id: `video_${Date.now()}`,
+          name: discoveredVideo.name,
+          type: 'video',
+          mimeType: discoveredVideo.fileObj.type || 'video/mp4',
+          sizeBytes: discoveredVideo.fileObj.size,
+          timestamp: Date.now(),
+          blob: discoveredVideo.fileObj
+        }).catch(console.error);
       }
 
-      // 2. Обнаружение аудиофайлов и пропуск через C++ унификатор 48 кГц
+      // 2. Обнаружение аудиофайлов и динамическое расширение до 20-25+ дорожек
       const audioFiles = content.discoveredFiles.filter((f) => f.type === 'audio');
       if (audioFiles.length > 0) {
         setStatusMessage(`C++ ресемплинг ${audioFiles.length} аудиодорожек к 48 кГц...`);
-        for (let i = 0; i < audioFiles.length && i < tracks.length; i++) {
+
+        // Динамически увеличиваем количество дорожек под все найденные файлы (до 32)
+        let workingTracks = [...tracks];
+        while (workingTracks.length < audioFiles.length && workingTracks.length < 32) {
+          const nextId = workingTracks.length + 1;
+          workingTracks.push(createNewTrack(nextId, `Dubber ${nextId}`));
+        }
+
+        for (let i = 0; i < audioFiles.length && i < workingTracks.length; i++) {
           const audioFile = audioFiles[i].fileObj;
           if (audioFile) {
-            const track = tracks[i];
+            const track = workingTracks[i];
             const uploadRes = await uploadAudioFileToTrack(audioFile, track.id, Date.now() + i, 0);
 
-            setTracks((prev) =>
-              prev.map((t) => {
-                if (t.id === track.id) {
-                  return {
-                    ...t,
-                    name: audioFile.name.replace(/\.[^/.]+$/, ''),
-                    clips: [
-                      {
-                        id: Date.now() + i,
-                        name: audioFile.name,
-                        offsetSamples: 0,
-                        lengthSamples: uploadRes.samplesCount,
-                        gain: 1.0,
-                        pan: 0,
-                        fadeInSamples: 0,
-                        fadeOutSamples: 0,
-                        buffer: uploadRes.pcmData,
-                        color: t.color
-                      }
-                    ]
-                  };
+            // Сохраняем ассет дорожки в SQL базу данных
+            AssetDatabase.getInstance().saveAsset({
+              id: `asset_ch${track.id}_${Date.now()}`,
+              name: audioFile.name,
+              type: 'audio',
+              mimeType: audioFile.type || 'audio/wav',
+              sizeBytes: audioFile.size,
+              durationSec: uploadRes.durationSec,
+              sampleRate: 48000,
+              channels: 1,
+              timestamp: Date.now(),
+              blob: audioFile
+            }).catch(console.error);
+
+            workingTracks[i] = {
+              ...track,
+              name: audioFile.name.replace(/\.[^/.]+$/, ''),
+              clips: [
+                {
+                  id: Date.now() + i,
+                  name: audioFile.name,
+                  offsetSamples: 0,
+                  lengthSamples: uploadRes.samplesCount,
+                  gain: 1.0,
+                  pan: 0,
+                  fadeInSamples: 0,
+                  fadeOutSamples: 0,
+                  buffer: uploadRes.pcmData,
+                  color: track.color
                 }
-                return t;
-              })
-            );
+              ]
+            };
           }
         }
+        setTracks(workingTracks);
+        AssetDatabase.getInstance().getStats().then(setDbStats).catch(console.error);
       }
 
       // 3. Восстановление сохраненного состояния project/project.json
@@ -345,36 +404,54 @@ export const MinimalStudio: React.FC = () => {
       }
 
       const audioFiles = content.discoveredFiles.filter((f) => f.type === 'audio');
-      for (let i = 0; i < audioFiles.length && i < tracks.length; i++) {
-        const audioFile = audioFiles[i].fileObj;
-        if (audioFile) {
-          const track = tracks[i];
-          const uploadRes = await uploadAudioFileToTrack(audioFile, track.id, Date.now() + i, 0);
-          setTracks((prev) =>
-            prev.map((t) =>
-              t.id === track.id
-                ? {
-                    ...t,
-                    name: audioFile.name.replace(/\.[^/.]+$/, ''),
-                    clips: [
-                      {
-                        id: Date.now() + i,
-                        name: audioFile.name,
-                        offsetSamples: 0,
-                        lengthSamples: uploadRes.samplesCount,
-                        gain: 1.0,
-                        pan: 0,
-                        fadeInSamples: 0,
-                        fadeOutSamples: 0,
-                        buffer: uploadRes.pcmData,
-                        color: t.color
-                      }
-                    ]
-                  }
-                : t
-            )
-          );
+      if (audioFiles.length > 0) {
+        let workingTracks = [...tracks];
+        while (workingTracks.length < audioFiles.length && workingTracks.length < 32) {
+          const nextId = workingTracks.length + 1;
+          workingTracks.push(createNewTrack(nextId, `Dubber ${nextId}`));
         }
+
+        for (let i = 0; i < audioFiles.length && i < workingTracks.length; i++) {
+          const audioFile = audioFiles[i].fileObj;
+          if (audioFile) {
+            const track = workingTracks[i];
+            const uploadRes = await uploadAudioFileToTrack(audioFile, track.id, Date.now() + i, 0);
+
+            AssetDatabase.getInstance().saveAsset({
+              id: `asset_ch${track.id}_${Date.now()}`,
+              name: audioFile.name,
+              type: 'audio',
+              mimeType: audioFile.type || 'audio/wav',
+              sizeBytes: audioFile.size,
+              durationSec: uploadRes.durationSec,
+              sampleRate: 48000,
+              channels: 1,
+              timestamp: Date.now(),
+              blob: audioFile
+            }).catch(console.error);
+
+            workingTracks[i] = {
+              ...track,
+              name: audioFile.name.replace(/\.[^/.]+$/, ''),
+              clips: [
+                {
+                  id: Date.now() + i,
+                  name: audioFile.name,
+                  offsetSamples: 0,
+                  lengthSamples: uploadRes.samplesCount,
+                  gain: 1.0,
+                  pan: 0,
+                  fadeInSamples: 0,
+                  fadeOutSamples: 0,
+                  buffer: uploadRes.pcmData,
+                  color: track.color
+                }
+              ]
+            };
+          }
+        }
+        setTracks(workingTracks);
+        AssetDatabase.getInstance().getStats().then(setDbStats).catch(console.error);
       }
       setStatusMessage(`Папка "${content.directoryName}" загружена (режим совместимости).`);
     } catch (err: any) {
@@ -393,6 +470,16 @@ export const MinimalStudio: React.FC = () => {
     const url = URL.createObjectURL(file);
     setVideoSrc(url);
     setStatusMessage(`Видео "${file.name}" загружено.`);
+
+    AssetDatabase.getInstance().saveAsset({
+      id: `video_${Date.now()}`,
+      name: file.name,
+      type: 'video',
+      mimeType: file.type || 'video/mp4',
+      sizeBytes: file.size,
+      timestamp: Date.now(),
+      blob: file
+    }).then(() => AssetDatabase.getInstance().getStats().then(setDbStats)).catch(console.error);
   };
 
   // Извлечение звука оригинала на Дорожку №1 (C++ resample)
@@ -478,10 +565,261 @@ export const MinimalStudio: React.FC = () => {
     triggerAutoSave();
   };
 
+  // Добавление новой аудиодорожки (поддержка 20-25+ дорожек)
+  const handleAddNewTrack = () => {
+    if (tracks.length >= 32) {
+      alert('Достигнут максимальный лимит дорожек (32).');
+      return;
+    }
+    const nextId = tracks.length > 0 ? Math.max(...tracks.map((t) => t.id)) + 1 : 1;
+    const newTr = createNewTrack(nextId, `Dubber ${nextId}`);
+    setTracks((prev) => [...prev, newTr]);
+    triggerAutoSave();
+    setStatusMessage(`Добавлена новая дорожка CH ${nextId} (всего дорожек: ${tracks.length + 1})`);
+  };
+
+  // Удаление дорожки
+  const handleRemoveTrack = (trackId: number) => {
+    if (tracks.length <= 1) {
+      alert('Нельзя удалить последнюю дорожку.');
+      return;
+    }
+    setTracks((prev) => prev.filter((t) => t.id !== trackId));
+    triggerAutoSave();
+    setStatusMessage(`Дорожка CH ${trackId} удалена.`);
+  };
+
+  // Загрузка аудиофайла напрямую в дорожку
+  const handleTrackFileUpload = async (trackId: number, file: File) => {
+    if (!isInitialized) {
+      await initAudioEngine();
+    }
+    setStatusMessage(`Загрузка и ресемплинг "${file.name}" в CH ${trackId}...`);
+    try {
+      const uploadRes = await uploadAudioFileToTrack(file, trackId, Date.now(), 0);
+
+      // Кэшируем ассет в SQL/IndexedDB базу данных
+      await AssetDatabase.getInstance().saveAsset({
+        id: `track_${trackId}_${Date.now()}`,
+        name: file.name,
+        type: 'audio',
+        mimeType: file.type || 'audio/wav',
+        sizeBytes: file.size,
+        durationSec: uploadRes.durationSec,
+        sampleRate: 48000,
+        channels: 1,
+        timestamp: Date.now(),
+        blob: file
+      });
+      const stats = await AssetDatabase.getInstance().getStats();
+      setDbStats(stats);
+
+      setTracks((prev) =>
+        prev.map((t) =>
+          t.id === trackId
+            ? {
+                ...t,
+                name: file.name.replace(/\.[^/.]+$/, ''),
+                clips: [
+                  {
+                    id: Date.now(),
+                    name: file.name,
+                    offsetSamples: 0,
+                    lengthSamples: uploadRes.samplesCount,
+                    gain: 1.0,
+                    pan: 0,
+                    fadeInSamples: 0,
+                    fadeOutSamples: 0,
+                    buffer: uploadRes.pcmData,
+                    color: t.color
+                  }
+                ]
+              }
+            : t
+        )
+      );
+      triggerAutoSave();
+      setStatusMessage(`Файл "${file.name}" успешно загружен в CH ${trackId}.`);
+    } catch (err: any) {
+      setStatusMessage(`Ошибка загрузки аудио: ${err.message}`);
+    }
+  };
+
+  // --- 8.5. Универсальный импорт через MediaImportModal ---
+  const handleModalImportVideo = async (file: File, audioPcm?: Float32Array, durationSec?: number) => {
+    setVideoFile(file);
+    const url = URL.createObjectURL(file);
+    setVideoSrc(url);
+    if (durationSec && durationSec > 0) {
+      setVideoDuration(durationSec);
+    }
+
+    if (audioPcm && audioPcm.length > 0) {
+      const totalFrames = audioPcm.length / 2;
+      const calcDur = totalFrames / 48000;
+      setVideoDuration((prev) => (prev > 0 ? prev : calcDur));
+
+      setTracks((prev) => {
+        const targetId = prev.length > 0 ? prev[0].id : 1;
+        const videoClip = {
+          id: Date.now(),
+          name: `Audio_${file.name}`,
+          offsetSamples: 0,
+          lengthSamples: totalFrames,
+          gain: 1.0,
+          pan: 0,
+          fadeInSamples: 0,
+          fadeOutSamples: 0,
+          buffer: audioPcm,
+          color: '#06b6d4'
+        };
+
+        const exists = prev.some((t) => t.id === targetId);
+        if (exists) {
+          return prev.map((t) =>
+            t.id === targetId
+              ? {
+                  ...t,
+                  name: `Видео-звук [${file.name}]`,
+                  clips: [videoClip]
+                }
+              : t
+          );
+        } else {
+          const newTr = createNewTrack(targetId, `Видео-звук [${file.name}]`, '#06b6d4');
+          newTr.clips = [videoClip];
+          return [...prev, newTr];
+        }
+      });
+
+      uploadRawPCMToTrack(audioPcm, 1, Date.now(), 0, 1.0, 0.0, true);
+    }
+
+    triggerAutoSave();
+    setStatusMessage(`Видео [${file.name}] загружено в проект!`);
+  };
+
+  const handleModalImportAudioTrack = async (
+    file: File,
+    pcmBuffer: Float32Array,
+    config: { name: string; trackId?: number; color?: string; replaceExisting?: boolean }
+  ) => {
+    const totalFrames = pcmBuffer.length / 2;
+    const clipId = Date.now();
+
+    let effectiveTrackId = config.trackId;
+
+    setTracks((prev) => {
+      if (!effectiveTrackId || !config.replaceExisting) {
+        const nextId = effectiveTrackId || (prev.length > 0 ? Math.max(...prev.map((t) => t.id)) + 1 : 1);
+        effectiveTrackId = nextId;
+        const newTrack = createNewTrack(nextId, config.name, config.color);
+        newTrack.clips = [
+          {
+            id: clipId,
+            name: file.name,
+            offsetSamples: 0,
+            lengthSamples: totalFrames,
+            gain: 1.0,
+            pan: 0,
+            fadeInSamples: 0,
+            fadeOutSamples: 0,
+            buffer: pcmBuffer,
+            color: config.color || newTrack.color
+          }
+        ];
+        return [...prev, newTrack];
+      } else {
+        return prev.map((t) =>
+          t.id === effectiveTrackId
+            ? {
+                ...t,
+                name: config.name || t.name,
+                color: config.color || t.color,
+                clips: [
+                  {
+                    id: clipId,
+                    name: file.name,
+                    offsetSamples: 0,
+                    lengthSamples: totalFrames,
+                    gain: 1.0,
+                    pan: 0,
+                    fadeInSamples: 0,
+                    fadeOutSamples: 0,
+                    buffer: pcmBuffer,
+                    color: config.color || t.color
+                  }
+                ]
+              }
+            : t
+        );
+      }
+    });
+
+    if (effectiveTrackId) {
+      uploadRawPCMToTrack(pcmBuffer, effectiveTrackId, clipId, 0, 1.0, 0.0, true);
+    }
+
+    triggerAutoSave();
+  };
+
+  const handleModalImportSubtitles = async (cues: SubtitleCue[], sourceFileName?: string) => {
+    setSubtitles(cues);
+    setStatusMessage(`Субтитры [${sourceFileName || 'файл'}] импортированы: ${cues.length} реплик.`);
+    triggerAutoSave();
+  };
+
+  // Обновление DSP настроек дорожки из C++ DSP рэка
+  const handleUpdateDspTrack = (updated: TrackState) => {
+    setTracks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+
+    // Передаем параметры в реальном времени в AudioWorklet
+    if (updated.eq.enabled) {
+      setTrackEq(updated.id, {
+        lowGain: updated.eq.lowShelf.gainDb,
+        midGain: updated.eq.peaking.gainDb,
+        highGain: updated.eq.highShelf.gainDb
+      });
+    }
+    if (updated.compressor.enabled) {
+      setTrackCompressor(updated.id, {
+        threshold: updated.compressor.thresholdDb,
+        ratio: updated.compressor.ratio,
+        attack: updated.compressor.attackMs,
+        release: updated.compressor.releaseMs,
+        knee: updated.compressor.kneeDb,
+        makeup: updated.compressor.makeupGainDb
+      });
+    }
+    if (updated.autoDucker.enabled) {
+      setTrackAutoDucker(updated.id, {
+        enabled: updated.autoDucker.enabled,
+        threshold: updated.autoDucker.thresholdDb,
+        depth: updated.autoDucker.duckDepthDb,
+        sourceTrackId: updated.autoDucker.sourceTrackId
+      });
+    }
+
+    triggerAutoSave();
+  };
+
+  // Обновление дорожки и клипов из TimelineView (Сплит, Time Stretch, перемещение клипов)
+  const handleUpdateTrack = (updatedTrack: TrackState) => {
+    setTracks((prev) => prev.map((t) => (t.id === updatedTrack.id ? updatedTrack : t)));
+
+    // Синхронизируем клипы с AudioWorklet и C++ ядром
+    syncTrackClips(updatedTrack.id, updatedTrack.clips);
+
+    triggerAutoSave();
+  };
+
   // --- 10. Шаг 3: Автоматическое выравнивание громкости (C++ Loudness Match EBU R128) ---
   const handleAutoLoudnessMatch = (targetRmsDb = -18.0) => {
     const result = performLoudnessMatching(tracks, targetRmsDb, -1.0);
     setTracks(result.updatedTracks);
+    systemLogger.info('C++ WASM', `Выполнено выравнивание громкости дорожек (цель: ${targetRmsDb} dBFS True Peak ≤ -1.0)`, {
+      adjustments: result.adjustments
+    });
 
     const activeAdjustments = result.adjustments.filter((a) => !a.isSilent);
     if (activeAdjustments.length === 0) {
@@ -497,29 +835,69 @@ export const MinimalStudio: React.FC = () => {
     setTimeout(() => setLoudnessMatchReport(null), 8000);
   };
 
-  // --- 11. Шаг 5: Сведение и экспорт видео в один клик ---
+  // --- 11. Сквозной рабочий процесс «Свести и вшить звук в видео» в один клик ---
   const handleExportAndMuxVideo = async () => {
     if (!videoFile) {
-      alert('Пожалуйста, загрузите исходный видеофайл перед запуском финального сведения и муксинга.');
+      alert('Пожалуйста, выберите рабочую папку или загрузите исходный видеофайл перед запуском финального сведения и муксинга.');
       return;
     }
 
     setIsExporting(true);
     setExportedVideoBlob(null);
     setExportedVideoUrl(null);
+    setStatusMessage('Запуск сквозного C++ конвейера сведения и муксинга...');
+    systemLogger.info('RenderManager', `Старт 6-этапного сквозного процесса сведения для [${videoFile.name}]...`, {
+      videoSize: videoFile.size,
+      videoDuration,
+      tracksCount: tracks.length
+    });
 
     try {
-      // 1. Офлайн-рендеринг C++ DSP микса в 24-битный стерео WAV
+      // ШАГ 1: Чтение и валидация аудиодорожек и видео из открытой папки (ProjectManager)
+      setExportProgress({
+        stage: 'rendering_audio',
+        progressPercent: 10,
+        message: 'Шаг 1/6: Подготовка аудиодорожек и дескрипторов видео из проекта...',
+        logs: ['[Шаг 1] Сбор аудиоклипов и видеопотока из ProjectManager']
+      });
+
+      // ШАГ 2: Вызов нативного C++ метода autoMatchAllTracks(-18.0) для аппаратного выравнивания громкости по EBU R128
+      setExportProgress({
+        stage: 'rendering_audio',
+        progressPercent: 25,
+        message: 'Шаг 2/6: C++ аппаратно-ускоренное EBU R128 автовыравнивание громкости (-18 dBFS)...',
+        logs: ['[Шаг 2] Вызов C++ autoMatchAllTracks(-18.0, True Peak <= -1.0 dBFS)']
+      });
+      const normResult = performLoudnessMatching(tracks, -18.0, -1.0);
+      const normalizedTracks = normResult.updatedTracks;
+      setTracks(normalizedTracks);
+
+      // ШАГ 3 & 4: Запуск C++ BatchOfflineRenderer (NativeDAWBridge.renderMasterMix) + C++ NativeWavPacker (24-bit RIFF WAV)
+      setExportProgress({
+        stage: 'rendering_audio',
+        progressPercent: 45,
+        message: 'Шаг 3-4/6: C++ BatchOfflineRenderer (100x) & упаковка в 24-bit RIFF WAV в памяти...',
+        logs: ['[Шаг 3-4] Высокоскоростной C++ DSP микс (100x) и NativeWavPacker 24-bit WAV']
+      });
       const renderDuration = videoDuration > 0 ? videoDuration : undefined;
       const renderResult = await globalRenderManager.renderMasterMix(
-        tracks,
+        normalizedTracks,
         master,
         48000,
         24,
         renderDuration
       );
 
-      // 2. Муксинг через FFmpeg WASM (-c:v copy -c:a aac)
+      // Сохраняем мастер-микс WAV в папку project/
+      await globalProjectManager.saveRenderedAsset('master_mix.wav', renderResult.wavBlob, true);
+
+      // ШАГ 5: Передача сгенерированного WAV в @ffmpeg/ffmpeg WASM -> выполнение команды (-c:v copy -c:a aac -b:a 320k)
+      setExportProgress({
+        stage: 'muxing_video',
+        progressPercent: 70,
+        message: 'Шаг 5/6: Муксинг FFmpeg WASM (-c:v copy -c:a aac -b:a 320k)...',
+        logs: ['[Шаг 5] Замена аудиодорожки без перекодирования видеопотока']
+      });
       const outputFileName = `mixed_${videoFile.name.replace(/\.[^/.]+$/, '')}.mp4`;
       const finalVideoBlob = await globalRenderManager.muxAudioIntoVideo(
         videoFile,
@@ -528,19 +906,54 @@ export const MinimalStudio: React.FC = () => {
       );
 
       if (!finalVideoBlob) {
-        throw new Error('FFmpeg не смог сформировать выходной видеофайл.');
+        throw new Error('FFmpeg WebAssembly не смог сформировать выходной видеофайл.');
       }
 
       setExportedVideoBlob(finalVideoBlob);
       const finalUrl = URL.createObjectURL(finalVideoBlob);
       setExportedVideoUrl(finalUrl);
 
-      // 3. Автосохранение готового MP4 в папку проекта через File System Access API
-      await globalProjectManager.saveBlobToProjectDirectory(finalVideoBlob, outputFileName);
-      setStatusMessage(`Видео успешно сведено и сохранено: ${outputFileName}`);
+      // ШАГ 6: Прямая запись готового MP4 в подпапку "project/" через ProjectManager.saveRenderedAsset()
+      setExportProgress({
+        stage: 'completed',
+        progressPercent: 95,
+        message: 'Шаг 6/6: Прямая запись готового MP4 в папку проекта (File System Access API)...',
+        logs: [`[Шаг 6] Сохранение ${outputFileName} в подпапку project/`]
+      });
+      await globalProjectManager.saveRenderedAsset(outputFileName, finalVideoBlob, true);
+      // Также сохраняем копию в корне для мгновенного доступа
+      await globalProjectManager.saveRenderedAsset(outputFileName, finalVideoBlob, false);
+
+      // Кэшируем готовый ассет рендера в локальную SQL базу данных
+      await AssetDatabase.getInstance().saveAsset({
+        id: `render_${Date.now()}`,
+        name: outputFileName,
+        type: 'render',
+        mimeType: 'video/mp4',
+        sizeBytes: finalVideoBlob.size,
+        timestamp: Date.now(),
+        blob: finalVideoBlob
+      });
+      AssetDatabase.getInstance().getStats().then(setDbStats).catch(console.error);
+
+      setExportProgress({
+        stage: 'completed',
+        progressPercent: 100,
+        message: `Готово! Видео успешно сведено и сохранено в проект: ${outputFileName}`,
+        logs: [`Файл ${outputFileName} (${(finalVideoBlob.size / (1024 * 1024)).toFixed(2)} МБ) сохранен.`]
+      });
+      setStatusMessage(`Видео [${outputFileName}] успешно сведено и сохранено в project/!`);
+      systemLogger.info('RenderManager', `Сквозной процесс завершен: ${outputFileName} (${Math.round(finalVideoBlob.size / 1024)} КБ)`);
     } catch (err: any) {
-      console.error('Ошибка экспорта и муксинга:', err);
-      setStatusMessage(`Сбой экспорта: ${err.message}`);
+      console.error('Ошибка сквозного сведения и муксинга:', err);
+      systemLogger.error('RenderManager', `Сбой сквозного конвейера: ${err?.message || err}`, err, err instanceof Error ? err.stack : undefined);
+      setExportProgress({
+        stage: 'error',
+        progressPercent: 0,
+        message: `Ошибка сведения: ${err.message}`,
+        logs: [`[Error] ${err.message}`]
+      });
+      setStatusMessage(`Сбой сведения: ${err.message}`);
     } finally {
       setIsExporting(false);
     }
@@ -612,12 +1025,23 @@ export const MinimalStudio: React.FC = () => {
               )}
             </div>
 
+            {/* Кнопка универсального импорта медиа */}
+            <button
+              id="btn-media-import-modal"
+              onClick={() => setShowMediaImportModal(true)}
+              className="px-4 py-2 bg-gradient-to-r from-cyan-600 to-emerald-600 hover:from-cyan-500 hover:to-emerald-500 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-2 shadow-lg shadow-cyan-950/40 cursor-pointer"
+              title="Единый хаб загрузки медиаматериалов (видео, дубли, субтитры)"
+            >
+              <Upload size={14} />
+              Импорт медиа (Hub)
+            </button>
+
             {/* Кнопка открытия директории */}
             <button
               id="btn-open-project-folder"
               onClick={handleOpenProjectFolder}
               disabled={isFileSystemLoading}
-              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 text-white rounded-xl text-xs font-semibold transition-all flex items-center gap-2 shadow-lg shadow-emerald-950/40 cursor-pointer"
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-900 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold transition-all flex items-center gap-2 cursor-pointer"
             >
               {isFileSystemLoading ? (
                 <RefreshCw size={14} className="animate-spin" />
@@ -898,6 +1322,25 @@ export const MinimalStudio: React.FC = () => {
         </div>
       </div>
 
+      {/* 2.5. МУЛЬТИТРЕК ТАЙМЛАЙН & ВОЛНОВЫЕ ФОРМЫ (ВИДЕОДОРОЖКА, СУБТИТРЫ, C++ STRIP SILENCE, TIME STRETCH WSOLA) */}
+      <div className="bg-[#0f1422] border border-[#1e293b] p-5 rounded-2xl shadow-xl space-y-4">
+        <TimelineView
+          tracks={tracks}
+          currentTimeSec={currentTimeSec}
+          totalTimeSec={videoDuration > 0 ? videoDuration : 30}
+          isPlaying={isPlaying}
+          onSeek={seek}
+          onUpdateTrack={handleUpdateTrack}
+          videoFile={videoFile}
+          videoSrc={videoSrc}
+          videoDuration={videoDuration}
+          fps={fps}
+          onTogglePlay={togglePlay}
+          subtitles={subtitles}
+          onUpdateSubtitles={setSubtitles}
+        />
+      </div>
+
       {/* 3. КОНСОЛЬ СВЕДЕНИЯ МИКШЕРА */}
       <div className="bg-[#0f1422] border border-[#1e293b] p-5 rounded-2xl shadow-xl space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-800">
@@ -913,14 +1356,48 @@ export const MinimalStudio: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              id="btn-import-track-hub"
+              onClick={() => setShowMediaImportModal(true)}
+              className="px-3 py-2 bg-gradient-to-r from-cyan-900/60 to-emerald-900/60 hover:from-cyan-800/80 hover:to-emerald-800/80 text-cyan-300 border border-cyan-700/80 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
+              title="Догрузить дубли актеров, звуки или субтитры без сброса проекта"
+            >
+              <Upload size={14} className="text-cyan-400" />
+              + Догрузить файлы / дубли
+            </button>
+
+            <button
+              id="btn-add-track"
+              onClick={handleAddNewTrack}
+              disabled={tracks.length >= 32}
+              className="px-3 py-2 bg-slate-900 hover:bg-slate-800 text-emerald-400 border border-emerald-800/80 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              title="Добавить пустую аудиодорожку (до 32)"
+            >
+              <Plus size={14} />
+              + Новая дорожка ({tracks.length}/32)
+            </button>
+
+            <button
+              id="btn-sql-db-stats"
+              onClick={() => {
+                AssetDatabase.getInstance().getStats().then(setDbStats).catch(console.error);
+                alert(`📦 SQL Хранилище IndexedDB:\n• Всего ассетов: ${dbStats?.totalAssets || 0}\n• Размер в БД: ${(dbStats?.totalSizeMb || 0).toFixed(2)} МБ\n• Аудиодорожек: ${dbStats?.audioCount || 0}\n• Видео: ${dbStats?.videoCount || 0}\n\nВсе медиафайлы хранятся вне кучи WebAssembly, предотвращая сбои Out of Memory!`);
+              }}
+              className="px-3 py-2 bg-slate-900 hover:bg-slate-800 text-cyan-400 border border-cyan-800/80 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer"
+              title="Статус локальной SQL/IndexedDB базы данных ассетов"
+            >
+              <Database size={14} />
+              SQL База ({dbStats ? `${dbStats.totalSizeMb.toFixed(1)} МБ` : 'OK'})
+            </button>
+
             <button
               id="btn-loudness-match-broadcast"
               onClick={() => handleAutoLoudnessMatch(-18.0)}
-              className="px-4 py-2 bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-2 shadow-lg shadow-blue-950/40 cursor-pointer"
+              className="px-3.5 py-2 bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 shadow-lg shadow-blue-950/40 cursor-pointer"
             >
               <Wand2 size={14} className="text-amber-300" />
-              Автоматически выровнять громкость всех дорожек (EBU R128)
+              Выровнять громкость (EBU R128)
             </button>
 
             <button
@@ -974,20 +1451,87 @@ export const MinimalStudio: React.FC = () => {
                       </span>
                     </div>
 
-                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-900 text-slate-400 border border-slate-800">
-                      CH {track.id}
-                    </span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-900 text-slate-400 border border-slate-800">
+                        CH {track.id}
+                      </span>
+                      {tracks.length > 1 && (
+                        <button
+                          onClick={() => handleRemoveTrack(track.id)}
+                          className="p-1 text-slate-500 hover:text-rose-400 hover:bg-slate-900 rounded transition-all cursor-pointer"
+                          title="Удалить дорожку"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      )}
+                    </div>
                   </div>
 
-                  <div className="text-[11px] text-slate-400 mb-3 truncate">
-                    {hasClips ? (
-                      <span className="text-emerald-400">
-                        {track.clips[0].name} ({((track.clips[0].lengthSamples || 0) / 48000).toFixed(1)}с)
-                      </span>
-                    ) : (
-                      <span className="text-slate-600">Нет аудиофайла</span>
-                    )}
+                  {/* Аудиоклип & Загрузка файла */}
+                  <div className="flex items-center justify-between gap-2 mb-3 bg-slate-950/60 p-2 rounded-lg border border-slate-800/80">
+                    <div className="text-[11px] truncate flex-1">
+                      {hasClips ? (
+                        <span className="text-emerald-400 font-medium truncate block" title={track.clips[0].name}>
+                          {track.clips[0].name} ({((track.clips[0].lengthSamples || 0) / 48000).toFixed(1)}с)
+                        </span>
+                      ) : (
+                        <span className="text-slate-500">Нет аудиофайла</span>
+                      )}
+                    </div>
+
+                    <label className="shrink-0 px-2 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 rounded text-[10px] font-semibold flex items-center gap-1 cursor-pointer transition-all">
+                      <Upload size={10} />
+                      <span>{hasClips ? 'Заменить' : 'Загрузить'}</span>
+                      <input
+                        type="file"
+                        accept="audio/*"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          if (f) handleTrackFileUpload(track.id, f);
+                        }}
+                        className="hidden"
+                      />
+                    </label>
                   </div>
+
+                  {/* Кнопка открытия C++ DSP рэка */}
+                  <button
+                    onClick={() => setActiveDspTrack(track)}
+                    className="w-full mb-3 px-2.5 py-1.5 bg-[#0f1422] hover:bg-slate-800 border border-slate-700/80 rounded-lg text-xs font-semibold text-slate-200 flex items-center justify-between transition-all cursor-pointer shadow-sm"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <SlidersHorizontal size={13} className="text-cyan-400" />
+                      <span>C++ DSP Vocal Rack</span>
+                    </div>
+
+                    <div className="flex items-center gap-1">
+                      <span
+                        className={`text-[9px] px-1 py-0.2 rounded font-mono ${
+                          track.eq.enabled ? 'bg-cyan-950 text-cyan-400 border border-cyan-800' : 'bg-slate-900 text-slate-600'
+                        }`}
+                      >
+                        EQ
+                      </span>
+                      <span
+                        className={`text-[9px] px-1 py-0.2 rounded font-mono ${
+                          track.compressor.enabled
+                            ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                            : 'bg-slate-900 text-slate-600'
+                        }`}
+                      >
+                        COMP
+                      </span>
+                      <span
+                        className={`text-[9px] px-1 py-0.2 rounded font-mono ${
+                          track.autoDucker.enabled
+                            ? 'bg-purple-950 text-purple-400 border border-purple-800'
+                            : 'bg-slate-900 text-slate-600'
+                        }`}
+                      >
+                        DUCK
+                      </span>
+                    </div>
+                  </button>
 
                   {/* Peak/RMS Индикаторы */}
                   <div className="space-y-1 bg-slate-950 p-2.5 rounded-lg border border-slate-800 mb-4">
@@ -1102,6 +1646,27 @@ export const MinimalStudio: React.FC = () => {
           })}
         </div>
       </div>
+
+      {/* Модальное окно C++ DSP Vocal Rack для выбранного трека */}
+      {activeDspTrack && (
+        <TrackDSPPanel
+          track={activeDspTrack}
+          allTracks={tracks}
+          onUpdateTrack={handleUpdateDspTrack}
+          onClose={() => setActiveDspTrack(null)}
+        />
+      )}
+
+      {/* Единый модальный хаб импорта медиаматериалов */}
+      <MediaImportModal
+        isOpen={showMediaImportModal}
+        onClose={() => setShowMediaImportModal(false)}
+        existingTracks={tracks}
+        currentVideoFile={videoFile}
+        onImportVideo={handleModalImportVideo}
+        onImportAudioTrack={handleModalImportAudioTrack}
+        onImportSubtitles={handleModalImportSubtitles}
+      />
     </div>
   );
 };

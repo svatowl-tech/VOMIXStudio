@@ -21,6 +21,7 @@ import {
   NativeRenderAudioResult,
   NativeStemExportItem
 } from './NativeDAWBridge';
+import { systemLogger } from './SystemLogger';
 
 export interface RenderProgressInfo {
   stage: 'idle' | 'rendering_audio' | 'stems' | 'loading_ffmpeg' | 'muxing_video' | 'completed' | 'error';
@@ -61,7 +62,7 @@ export class RenderManager {
     const timestamp = new Date().toLocaleTimeString();
     const formatted = `[${timestamp}] ${msg}`;
     this.logs.push(formatted);
-    console.log(`[RenderManager] ${msg}`);
+    systemLogger.info('RenderManager', msg);
   }
 
   /**
@@ -277,6 +278,7 @@ export class RenderManager {
     } catch (err) {
       const errMessage = err instanceof Error ? err.message : String(err);
       this.addLog(`Критическая ошибка муксинга: ${errMessage}`);
+      systemLogger.error('FFmpeg', `Критическая ошибка FFmpeg видеомуксинга: ${errMessage}`, err, err instanceof Error ? err.stack : undefined);
       this.notifyProgress('error', 0, `Ошибка FFmpeg: ${errMessage}`);
       return null;
     }

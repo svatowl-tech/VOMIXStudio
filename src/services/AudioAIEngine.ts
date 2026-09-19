@@ -10,6 +10,7 @@
  */
 
 import * as ort from 'onnxruntime-web';
+import { globalNativeDAWBridge } from './NativeDAWBridge';
 
 // ============================================================================
 // 1. ИНТЕРФЕЙСЫ И ТИПЫ ДАННЫХ
@@ -306,26 +307,14 @@ export class AudioAIEngine {
 
   /**
    * Локальный DSP детектор спектральной энергии голоса (Zero-crossing rate + Formant Band energy)
+   * Использует оптимизированный C++ SIMD128 движок через globalNativeDAWBridge с фолбэком на JS.
    */
   private calculateEnergyVoiceProbability(chunk: Float32Array): number {
-    let energy = 0;
-    let zcr = 0;
-
-    for (let i = 0; i < chunk.length; i++) {
-      energy += chunk[i] * chunk[i];
-      if (i > 0 && ((chunk[i] >= 0 && chunk[i - 1] < 0) || (chunk[i] < 0 && chunk[i - 1] >= 0))) {
-        zcr++;
-      }
+    const stats = globalNativeDAWBridge.calculateFrameEnergyStats(chunk);
+    if (stats.voiceProbability > 0) {
+      return stats.voiceProbability;
     }
-
-    const rms = Math.sqrt(energy / chunk.length);
-    const zcrRatio = zcr / chunk.length;
-
-    // Речевые признаки: умеренный ZCR и энергия выше фонового шума
-    if (rms > 0.015 && zcrRatio > 0.04 && zcrRatio < 0.45) {
-      return Math.min(0.98, 0.5 + rms * 15.0);
-    }
-    return Math.max(0.02, rms * 5.0);
+    return Math.max(0.02, stats.rms * 5.0);
   }
 
   /**
@@ -585,39 +574,10 @@ export class AudioAIEngine {
 
   /**
    * Вычисление коэффициента схожести двух строк по Левенштейну (0.0 .. 1.0)
+   * Использует C++ UTF-8 модуль FastLevenshtein через globalNativeDAWBridge.
    */
   public calculateStringSimilarity(s1: string, s2: string): number {
-    const clean1 = s1.toLowerCase().replace(/[^\wа-яё]/gi, '');
-    const clean2 = s2.toLowerCase().replace(/[^\wа-яё]/gi, '');
-
-    if (!clean1 && !clean2) return 1.0;
-    if (!clean1 || !clean2) return 0.0;
-
-    const len1 = clean1.length;
-    const len2 = clean2.length;
-    const dp: number[][] = [];
-
-    for (let i = 0; i <= len1; i++) {
-      dp[i] = [i];
-    }
-    for (let j = 0; j <= len2; j++) {
-      dp[0][j] = j;
-    }
-
-    for (let i = 1; i <= len1; i++) {
-      for (let j = 1; j <= len2; j++) {
-        const cost = clean1[i - 1] === clean2[j - 1] ? 0 : 1;
-        dp[i][j] = Math.min(
-          dp[i - 1][j] + 1,
-          dp[i][j - 1] + 1,
-          dp[i - 1][j - 1] + cost
-        );
-      }
-    }
-
-    const maxLen = Math.max(len1, len2);
-    const distance = dp[len1][len2];
-    return Math.max(0, 1 - distance / maxLen);
+    return globalNativeDAWBridge.fastStringSimilarity(s1, s2);
   }
 }
 

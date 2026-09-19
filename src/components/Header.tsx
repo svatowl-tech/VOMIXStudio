@@ -1,7 +1,8 @@
-import React from 'react';
-import { Sliders, Cpu, Terminal, Sparkles, Volume2, FolderKanban, PlaySquare } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Sliders, Cpu, Terminal, Sparkles, Volume2, FolderKanban, PlaySquare, AlertCircle } from 'lucide-react';
+import { systemLogger } from '../services/SystemLogger';
 
-export type NavigationTab = 'minimal' | 'studio' | 'project' | 'video' | 'ai-dubbing' | 'export' | 'cpp' | 'emcc';
+export type NavigationTab = 'minimal' | 'studio' | 'project' | 'video' | 'ai-dubbing' | 'export' | 'cpp' | 'emcc' | 'console';
 
 interface HeaderProps {
   activeTab: NavigationTab;
@@ -9,6 +10,14 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({ activeTab, onSelectTab }) => {
+  const [errorCount, setErrorCount] = useState<number>(() => systemLogger.getErrorsCount());
+
+  useEffect(() => {
+    const unsub = systemLogger.subscribe(() => {
+      setErrorCount(systemLogger.getErrorsCount());
+    });
+    return unsub;
+  }, []);
   return (
     <header className="bg-slate-950 border-b border-slate-800 sticky top-0 z-50 backdrop-blur-md bg-opacity-90">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3.5 flex flex-col xl:flex-row items-center justify-between gap-4">
@@ -126,6 +135,25 @@ export const Header: React.FC<HeaderProps> = ({ activeTab, onSelectTab }) => {
           >
             <Terminal size={14} />
             Скрипт Emcc
+          </button>
+
+          <button
+            onClick={() => onSelectTab('console')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
+              activeTab === 'console'
+                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30'
+                : errorCount > 0
+                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 hover:bg-rose-500/30'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Terminal size={14} className={errorCount > 0 ? 'text-rose-400 animate-pulse' : ''} />
+            Логи & Консоль
+            {errorCount > 0 && (
+              <span className="px-1.5 py-0.2 rounded-full bg-rose-600 text-white text-[10px] font-bold">
+                {errorCount}
+              </span>
+            )}
           </button>
         </nav>
       </div>

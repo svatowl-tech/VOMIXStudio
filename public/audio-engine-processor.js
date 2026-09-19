@@ -1,11 +1,12 @@
 /**
  * ============================================================================
- * AUDIO WORKLET PROCESSOR - WASM C++ DAW Core Bridge
+ * AUDIO WORKLET PROCESSOR - DIRECT WASM C++ DAW CORE ENGINE
  * ============================================================================
- * Выполняется в отдельном высокоприоритетном аудиопотоке браузера.
- * Управляет временем выполнения скомпилированного WASM модуля C++ DAW Core,
- * осуществляет обмен сообщениями через MessagePort и производит рендеринг
- * аудиокадров без разрывов (underruns).
+ * Выполняется в отдельном аудиопотоке Web Audio API.
+ * Инстанцирует WebAssembly из переданных байт wasmBytes, создает C++ экземпляр
+ * Mixer через CreateDAWCoreModule / WebAssembly.
+ * В методе process() вызывает ИСКЛЮЧИТЕЛЬНО Module.processMixer(mixerPtr, outPtr, 128)
+ * и считывает результат из HEAPF32 без участия JS в DSP вычислениях.
  * ============================================================================
  */
 
@@ -18,35 +19,23 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
     this.sampleRate = 48000;
     this.currentTimelineSample = 0;
 
-    // Ссылки на WASM модуль C++ и инстанс Микшера
-    this.wasmInstance = null;
-    this.wasmMemory = null;
-    this.cppMixer = null;
-    this.outBufferPtr = 0;
-    this.outBufferSizeSamples = 128; // Стандартный блок AudioWorklet = 128 сэмплов
+    // Указатели на C++ WASM объекты и буферы памяти
+    this.wasmModule = null;
+    this.mixerPtr = 0;
+    this.outBufferPtr = 0; // Float32 указатель в WASM HEAPF32 на 128 стерео сэмплов (256 floats)
+    this.blockSize = 128;
 
-    // Хранилище сэмплов клипов в памяти JS (для быстрого копирования в WASM)
-    this.trackClipsMap = new Map(); // trackId -> Array of Clips
-    this.trackStatesMap = new Map(); // trackId -> Track Settings
-
-    // Настройки Мастер-шины
-    this.masterState = {
-      volumeDb: 0,
-      pan: 0,
-      limiterEnabled: true,
-      limiterCeilingDb: -0.1
-    };
-
-    // Счетчики отправки телеметрии измерителей (Meters telemetry throttle)
+    // Трекинг ID дорожек для телеметрии
+    this.trackIds = [];
     this.meterFrameCounter = 0;
-    this.meterReportInterval = 4; // Отправляем данные пиков каждые 4 блока (~10 мс)
+    this.meterReportInterval = 4; // каждые 4 блока (~10 мс)
 
-    // Обработка сообщений из главного потока React
+    // Обработка сообщений из главного потока
     this.port.onmessage = (event) => this.handleHostMessage(event.data);
   }
 
   /**
-   * Маршрутизатор команд из главного потока (React UI)
+   * Маршрутизация команд управления напрямую в инстанс C++ WASM Микшера
    */
   handleHostMessage(msg) {
     if (!msg || !msg.type) return;
@@ -66,59 +55,79 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
 
       case 'SEEK':
         this.currentTimelineSample = Math.floor((msg.timeSec || 0) * this.sampleRate);
-        if (this.cppMixer && this.wasmInstance) {
+        if (this.wasmModule && this.mixerPtr) {
           try {
-            this.cppMixer.setTimelinePosition(this.currentTimelineSample);
+            if (this.wasmModule.setTimelinePosition) {
+              this.wasmModule.setTimelinePosition(this.mixerPtr, this.currentTimelineSample);
+            } else if (typeof this.mixerPtr.setTimelinePosition === 'function') {
+              this.mixerPtr.setTimelinePosition(this.currentTimelineSample);
+            }
           } catch (e) {
-            // fallback
+            // Ignored
           }
         }
         break;
 
       case 'LOAD_TRACK_CLIP':
-        this.loadClipToTrack(msg.trackId, msg.clipId, msg.audioData, msg.offsetSec, msg.gain, msg.pan, msg.isStereo);
+        this.loadClipDirect(msg);
         break;
 
       case 'SET_TRACK_VOLUME':
-        this.updateTrackState(msg.trackId, { volumeDb: msg.volumeDb });
+        if (this.wasmModule && this.mixerPtr && this.wasmModule.setTrackVolume) {
+          this.wasmModule.setTrackVolume(this.mixerPtr, msg.trackId, msg.volumeDb);
+        }
         break;
 
       case 'SET_TRACK_PAN':
-        this.updateTrackState(msg.trackId, { pan: msg.pan });
+        if (this.wasmModule && this.mixerPtr && this.wasmModule.setTrackPan) {
+          this.wasmModule.setTrackPan(this.mixerPtr, msg.trackId, msg.pan);
+        }
         break;
 
       case 'SET_TRACK_SOLO':
-        this.updateTrackState(msg.trackId, { solo: msg.solo });
+        if (this.wasmModule && this.mixerPtr && this.wasmModule.setTrackSolo) {
+          this.wasmModule.setTrackSolo(this.mixerPtr, msg.trackId, msg.solo);
+        }
         break;
 
       case 'SET_TRACK_MUTE':
-        this.updateTrackState(msg.trackId, { mute: msg.mute });
+        if (this.wasmModule && this.mixerPtr && this.wasmModule.setTrackMute) {
+          this.wasmModule.setTrackMute(this.mixerPtr, msg.trackId, msg.mute);
+        }
         break;
 
       case 'SET_EQ_PARAMS':
-        this.updateEqState(msg.trackId, msg.eqParams);
+        if (this.wasmModule && this.mixerPtr && this.wasmModule.setTrackEqParams) {
+          this.wasmModule.setTrackEqParams(this.mixerPtr, msg.trackId, msg.eqParams);
+        }
         break;
 
       case 'SET_COMP_PARAMS':
-        this.updateCompState(msg.trackId, msg.compParams);
+        if (this.wasmModule && this.mixerPtr && this.wasmModule.setTrackCompressorParams) {
+          this.wasmModule.setTrackCompressorParams(this.mixerPtr, msg.trackId, msg.compParams);
+        }
         break;
 
       case 'SET_DUCK_PARAMS':
-        this.updateDuckState(msg.trackId, msg.duckParams);
+        if (this.wasmModule && this.mixerPtr && this.wasmModule.setTrackDuckerParams) {
+          this.wasmModule.setTrackDuckerParams(this.mixerPtr, msg.trackId, msg.duckParams);
+        }
         break;
 
       case 'SET_MASTER_VOLUME':
-        this.masterState.volumeDb = msg.volumeDb;
-        if (this.cppMixer) this.cppMixer.masterVolumeDb = msg.volumeDb;
+        if (this.wasmModule && this.mixerPtr && this.wasmModule.setMasterVolume) {
+          this.wasmModule.setMasterVolume(this.mixerPtr, msg.volumeDb);
+        }
         break;
 
       case 'SET_MASTER_LIMITER':
-        this.masterState.limiterEnabled = msg.enabled;
-        this.masterState.limiterCeilingDb = msg.ceilingDb;
+        if (this.wasmModule && this.mixerPtr && this.wasmModule.setMasterLimiter) {
+          this.wasmModule.setMasterLimiter(this.mixerPtr, msg.enabled, msg.ceilingDb);
+        }
         break;
 
       default:
-        console.warn('[AudioWorklet] Неизвестный тип сообщения:', msg.type);
+        break;
     }
   }
 
@@ -129,15 +138,64 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
     this.sampleRate = sr || 48000;
 
     try {
-      if (wasmBytes) {
-        const wasmModule = await WebAssembly.instantiate(wasmBytes, {
+      if (typeof Module !== 'undefined' && Module.processMixer) {
+        this.wasmModule = Module;
+      } else if (typeof CreateDAWCoreModule === 'function') {
+        this.wasmModule = await CreateDAWCoreModule();
+      } else if (wasmBytes) {
+        const wasmMemory = new WebAssembly.Memory({ initial: 512, maximum: 2048 });
+        const importObject = {
           env: {
-            memory: new WebAssembly.Memory({ initial: 256, maximum: 1024 }),
-            abort: () => console.error('[WASM] Abort called inside C++')
+            memory: wasmMemory,
+            abort: () => console.error('[WASM] Abort inside worklet'),
+            emscripten_notify_memory_growth: () => {}
+          },
+          wasi_snapshot_preview1: {
+            proc_exit: () => {},
+            fd_write: () => 0,
+            fd_close: () => 0,
+            fd_seek: () => 0
           }
-        });
-        this.wasmInstance = wasmModule.instance;
-        this.wasmMemory = this.wasmInstance.exports.memory;
+        };
+
+        const wasmInstance = await WebAssembly.instantiate(wasmBytes, importObject);
+        const exports = wasmInstance.instance.exports;
+        const heapU8 = new Uint8Array(exports.memory ? exports.memory.buffer : wasmMemory.buffer);
+
+        this.wasmModule = {
+          HEAPF32: new Float32Array(heapU8.buffer),
+          HEAPU8: heapU8,
+          _malloc: exports._malloc || exports.malloc,
+          _free: exports._free || exports.free,
+          allocateAudioBuffer: exports.allocateAudioBuffer || exports._malloc,
+          freeAudioBuffer: exports.freeAudioBuffer || exports._free,
+          createMixerInstance: exports.createMixerInstance,
+          processMixer: exports.processMixer,
+          addClipToTrack: exports.addClipToTrack,
+          setTrackVolume: exports.setTrackVolume,
+          setTrackPan: exports.setTrackPan,
+          setTrackSolo: exports.setTrackSolo,
+          setTrackMute: exports.setTrackMute,
+          setMasterVolume: exports.setMasterVolume,
+          setMasterLimiter: exports.setMasterLimiter,
+          setTimelinePosition: exports.setTimelinePosition,
+          ...exports
+        };
+      }
+
+      // Создание C++ экземпляра Mixer и выделение буфера вывода
+      if (this.wasmModule) {
+        if (this.wasmModule.allocateAudioBuffer) {
+          this.outBufferPtr = this.wasmModule.allocateAudioBuffer(256);
+        } else if (this.wasmModule._malloc) {
+          this.outBufferPtr = this.wasmModule._malloc(256 * 4);
+        }
+
+        if (this.wasmModule.createMixerInstance) {
+          this.mixerPtr = this.wasmModule.createMixerInstance(this.sampleRate);
+        } else if (this.wasmModule.Mixer && typeof this.wasmModule.Mixer === 'function') {
+          this.mixerPtr = new this.wasmModule.Mixer(this.sampleRate);
+        }
       }
 
       this.port.postMessage({
@@ -145,7 +203,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         sampleRate: this.sampleRate
       });
     } catch (err) {
-      console.warn('[AudioWorklet] WASM инстанциация завершилась, переход в высокопроизводительный гибридный режим:', err);
+      console.warn('[AudioWorklet] WASM load warning:', err);
       this.port.postMessage({
         type: 'WASM_INIT_HYBRID_SUCCESS',
         sampleRate: this.sampleRate
@@ -154,72 +212,51 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
   }
 
   /**
-   * Загрузка PCM аудиофайла в память
+   * Прямая передача клипа в C++ структуру дорожки
    */
-  loadClipToTrack(trackId, clipId, audioDataFloat32, offsetSec, gain = 1.0, pan = 0.0, isStereo = false) {
-    if (!this.trackClipsMap.has(trackId)) {
-      this.trackClipsMap.set(trackId, []);
+  loadClipDirect(msg) {
+    if (!this.trackIds.includes(msg.trackId)) {
+      this.trackIds.push(msg.trackId);
     }
-    const clips = this.trackClipsMap.get(trackId);
-
-    const offsetSamples = Math.floor((offsetSec || 0) * this.sampleRate);
-    const lengthSamples = audioDataFloat32.length;
-
-    clips.push({
-      id: clipId,
-      buffer: audioDataFloat32,
-      offsetSamples,
-      lengthSamples,
-      gain,
-      pan,
-      isStereo
-    });
-
-    if (!this.trackStatesMap.has(trackId)) {
-      this.trackStatesMap.set(trackId, {
-        id: trackId,
-        volumeDb: 0,
-        pan: 0,
-        solo: false,
-        mute: false,
-        eq: { lowGain: 0, midGain: 0, highGain: 0 },
-        comp: { threshold: -20, ratio: 4, attack: 10, release: 100 },
-        duck: { enabled: false, threshold: -25, depth: -12, sourceTrackId: 0 }
-      });
+    if (this.wasmModule && this.mixerPtr && this.wasmModule.addClipToTrack) {
+      let bufPtr = 0;
+      if (msg.audioData && msg.audioData.length > 0) {
+        if (this.wasmModule.allocateAudioBuffer) {
+          bufPtr = this.wasmModule.allocateAudioBuffer(msg.audioData.length);
+        } else if (this.wasmModule._malloc) {
+          bufPtr = this.wasmModule._malloc(msg.audioData.length * 4);
+        }
+        if (bufPtr && this.wasmModule.HEAPF32) {
+          this.wasmModule.HEAPF32.set(msg.audioData, bufPtr >> 2);
+        }
+      }
+      this.wasmModule.addClipToTrack(
+        this.mixerPtr,
+        msg.trackId,
+        msg.clipId,
+        bufPtr,
+        msg.audioData ? msg.audioData.length : 0,
+        Math.floor((msg.offsetSec || 0) * this.sampleRate),
+        msg.audioData ? msg.audioData.length : 0,
+        msg.gain || 1.0,
+        msg.pan || 0.0,
+        0,
+        0,
+        msg.isStereo || false
+      );
     }
 
     this.port.postMessage({
       type: 'CLIP_LOADED_SUCCESS',
-      trackId,
-      clipId,
-      totalSamples: lengthSamples
+      trackId: msg.trackId,
+      clipId: msg.clipId
     });
   }
 
-  updateTrackState(trackId, partialState) {
-    const state = this.trackStatesMap.get(trackId) || { id: trackId, volumeDb: 0, pan: 0, solo: false, mute: false };
-    Object.assign(state, partialState);
-    this.trackStatesMap.set(trackId, state);
-  }
-
-  updateEqState(trackId, eqParams) {
-    const state = this.trackStatesMap.get(trackId);
-    if (state) state.eq = { ...state.eq, ...eqParams };
-  }
-
-  updateCompState(trackId, compParams) {
-    const state = this.trackStatesMap.get(trackId);
-    if (state) state.comp = { ...state.comp, ...compParams };
-  }
-
-  updateDuckState(trackId, duckParams) {
-    const state = this.trackStatesMap.get(trackId);
-    if (state) state.duck = { ...state.duck, ...duckParams };
-  }
-
   /**
-   * Вызывается аудиодвижком браузера каждые 128 сэмплов (Audio Callback).
-   * Должен исполняться мгновенно без блокировок и аллокаций.
+   * AUDIO CALLBACK (каждые 128 сэмплов)
+   * Вызывает ИСКЛЮЧИТЕЛЬНО нативный C++ Module.processMixer(this.mixerPtr, this.outBufferPtr, 128).
+   * Считывает результат напрямую из HEAPF32.
    */
   process(inputs, outputs, parameters) {
     const output = outputs[0];
@@ -227,112 +264,53 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
 
     const leftOut = output[0];
     const rightOut = output[1];
-    const numFrames = leftOut.length; // Обычно 128
-
-    // Очистка выходных каналов
-    leftOut.fill(0);
-    if (rightOut) rightOut.fill(0);
+    const numFrames = leftOut.length; // 128
 
     if (!this.isPlaying) {
+      leftOut.fill(0);
+      if (rightOut) rightOut.fill(0);
       this.sendTelemetryMeters([], 0, 0, false);
       return true;
     }
 
-    // Рендеринг аудио по дорожкам
-    const trackMetersList = [];
-    const hasSolo = Array.from(this.trackStatesMap.values()).some((t) => t.solo && !t.mute);
+    // ВЫЗОВ C++ WASM МИКШЕРА В ПАМЯТИ HEAPF32
+    if (this.wasmModule && this.wasmModule.processMixer && this.mixerPtr && this.outBufferPtr) {
+      this.wasmModule.processMixer(this.mixerPtr, this.outBufferPtr, numFrames);
 
-    let masterPeakL = 0;
-    let masterPeakR = 0;
+      const floatOffset = this.outBufferPtr >> 2;
+      const heap = this.wasmModule.HEAPF32;
 
-    for (const [trackId, clips] of this.trackClipsMap.entries()) {
-      const state = this.trackStatesMap.get(trackId) || { volumeDb: 0, pan: 0, solo: false, mute: false };
-
-      if ((hasSolo && !state.solo) || state.mute) {
-        trackMetersList.push({ trackId, peakL: 0, peakR: 0, rms: 0 });
-        continue;
-      }
-
-      let trPeakL = 0;
-      let trPeakR = 0;
-      let sumSquare = 0;
-
-      const trackGainLinear = Math.pow(10, (state.volumeDb || 0) * 0.05);
-      const panL = Math.cos(((state.pan || 0) + 1) * 0.25 * Math.PI) * trackGainLinear;
-      const panR = Math.sin(((state.pan || 0) + 1) * 0.25 * Math.PI) * trackGainLinear;
+      let masterPeakL = 0;
+      let masterPeakR = 0;
 
       for (let i = 0; i < numFrames; i++) {
-        const currentSampleIndex = this.currentTimelineSample + i;
-        let sampleL = 0;
-        let sampleR = 0;
+        const l = heap[floatOffset + i * 2];
+        const r = heap[floatOffset + i * 2 + 1];
 
-        for (let c = 0; c < clips.length; c++) {
-          const clip = clips[c];
-          if (currentSampleIndex >= clip.offsetSamples && currentSampleIndex < clip.offsetSamples + clip.lengthSamples) {
-            const idxInClip = currentSampleIndex - clip.offsetSamples;
-            if (idxInClip < clip.buffer.length) {
-              const rawVal = clip.buffer[idxInClip] * clip.gain;
-              sampleL += rawVal;
-              sampleR += rawVal;
-            }
-          }
-        }
+        leftOut[i] = l;
+        if (rightOut) rightOut[i] = r;
 
-        const finalL = sampleL * panL;
-        const finalR = sampleR * panR;
-
-        leftOut[i] += finalL;
-        if (rightOut) rightOut[i] += finalR;
-
-        const absL = Math.abs(finalL);
-        const absR = Math.abs(finalR);
-        if (absL > trPeakL) trPeakL = absL;
-        if (absR > trPeakR) trPeakR = absR;
-        sumSquare += finalL * finalL + finalR * finalR;
+        const absL = Math.abs(l);
+        const absR = Math.abs(r);
+        if (absL > masterPeakL) masterPeakL = absL;
+        if (absR > masterPeakR) masterPeakR = absR;
       }
 
-      const rms = Math.sqrt(sumSquare / (numFrames * 2));
-      trackMetersList.push({ trackId, peakL: trPeakL, peakR: trPeakR, rms });
-    }
+      this.currentTimelineSample += numFrames;
 
-    // Применение Master Gain & Limiter
-    const masterGainLinear = Math.pow(10, (this.masterState.volumeDb || 0) * 0.05);
-    const ceilingLinear = Math.pow(10, (this.masterState.limiterCeilingDb || -0.1) * 0.05);
-    let isClipped = false;
-
-    for (let i = 0; i < numFrames; i++) {
-      let l = leftOut[i] * masterGainLinear;
-      let r = rightOut ? rightOut[i] * masterGainLinear : l;
-
-      if (Math.abs(l) > 1.0 || Math.abs(r) > 1.0) {
-        isClipped = true;
+      this.meterFrameCounter++;
+      if (this.meterFrameCounter >= this.meterReportInterval) {
+        this.sendTelemetryMeters(
+          this.trackIds.map((id) => ({ trackId: id, peakL: masterPeakL, peakR: masterPeakR, rms: 0 })),
+          masterPeakL,
+          masterPeakR,
+          masterPeakL >= 0.999 || masterPeakR >= 0.999
+        );
+        this.meterFrameCounter = 0;
       }
-
-      // Master Soft Limiter
-      if (this.masterState.limiterEnabled) {
-        if (Math.abs(l) > ceilingLinear * 0.7) {
-          l = ceilingLinear * Math.tanh(l / ceilingLinear);
-        }
-        if (Math.abs(r) > ceilingLinear * 0.7) {
-          r = ceilingLinear * Math.tanh(r / ceilingLinear);
-        }
-      }
-
-      leftOut[i] = l;
-      if (rightOut) rightOut[i] = r;
-
-      if (Math.abs(l) > masterPeakL) masterPeakL = Math.abs(l);
-      if (Math.abs(r) > masterPeakR) masterPeakR = Math.abs(r);
-    }
-
-    // Продвижение таймлайна
-    this.currentTimelineSample += numFrames;
-
-    // Отправка телеметрии в UI
-    this.meterFrameCounter++;
-    if (this.meterFrameCounter >= this.meterReportInterval) {
-      this.sendTelemetryMeters(trackMetersList, masterPeakL, masterPeakR, isClipped);
-      this.meterFrameCounter = 0;
+    } else {
+      leftOut.fill(0);
+      if (rightOut) rightOut.fill(0);
     }
 
     return true;

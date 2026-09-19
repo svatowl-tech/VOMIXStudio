@@ -624,6 +624,245 @@ export class ProjectManager {
   }
 
   /**
+   * Прямое сохранение загруженного File объекта в рабочую папку
+   */
+  public async saveFileToProjectFolder(
+    file: File,
+    saveInProjectSubdir: boolean = false
+  ): Promise<boolean> {
+    this.memoryFiles.set(file.name, file);
+    return await this.saveRenderedAsset(file.name, file, saveInProjectSubdir);
+  }
+
+  /**
+   * Регистрация обнаруженного файла в оперативной памяти проекта
+   */
+  public addDiscoveredFile(file: File): DiscoveredFile {
+    const fileType = this.getFileType(file.name);
+    this.memoryFiles.set(file.name, file);
+
+    const discovered: DiscoveredFile = {
+      name: file.name,
+      type: fileType,
+      sizeBytes: file.size,
+      lastModified: file.lastModified,
+      fileObj: file,
+      relativePath: file.webkitRelativePath || file.name
+    };
+
+    return discovered;
+  }
+
+  /**
+   * Регистрация пачки файлов в оперативной памяти проекта
+   */
+  public addDiscoveredFiles(files: File[]): DiscoveredFile[] {
+    return files.map((file) => this.addDiscoveredFile(file));
+  }
+
+  /**
+   * Парсинг текста субтитров (SRT, VTT, ASS, JSON) в структурированный массив SubtitleCue
+   */
+  public parseSubtitleText(content: string, format: string = 'srt'): SubtitleCue[] {
+    const cues: SubtitleCue[] = [];
+    const fmt = format.toLowerCase().replace(/^\./, '');
+
+    // 1. JSON формат
+    if (fmt === 'json' || content.trim().startsWith('[') || (content.trim().startsWith('{') && content.includes('"subtitles"'))) {
+      try {
+        const parsed = JSON.parse(content);
+        const list = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.subtitles) ? parsed.subtitles : (Array.isArray(parsed.cues) ? parsed.cues : []));
+        return list.map((item: any, idx: number) => ({
+          index: typeof item.index === 'number' ? item.index : idx + 1,
+          startSec: typeof item.startSec === 'number' ? item.startSec : (typeof item.start === 'number' ? item.start : 0),
+          endSec: typeof item.endSec === 'number' ? item.endSec : (typeof item.end === 'number' ? item.end : 0),
+          speaker: item.speaker ? String(item.speaker) : undefined,
+          text: String(item.text || item.content || '')
+        }));
+      } catch (err) {
+        console.warn('[ProjectManager] Ошибка парсинга JSON субтитров:', err);
+      }
+    }
+
+    // 2. ASS / SSA формат
+    if (fmt === 'ass' || fmt === 'ssa' || content.includes('[Events]') || content.includes('Dialogue:')) {
+      const lines = content.split(/\r?\n/);
+      let cueIndex = 1;
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('Dialogue:')) {
+          const parts = trimmed.substring(9).split(',');
+          if (parts.length >= 10) {
+            const startStr = parts[1].trim();
+            const endStr = parts[2].trim();
+            const speaker = parts[4]?.trim() || undefined;
+            const text = parts.slice(9).join(',').replace(/\\N/g, ' ').replace(/\{[^}]*\}/g, '').trim();
+
+            const parseAssTime = (t: string): number => {
+              const p = t.split(':');
+              if (p.length === 3) {
+                const h = parseFloat(p[0]) || 0;
+                const m = parseFloat(p[1]) || 0;
+                const s = parseFloat(p[2]) || 0;
+                return h * 3600 + m * 60 + s;
+              }
+              return 0;
+            };
+
+            const startSec = parseAssTime(startStr);
+            const endSec = parseAssTime(endStr);
+
+            if (text && endSec > startSec) {
+              cues.push({
+                index: cueIndex++,
+                startSec,
+                endSec,
+                speaker: speaker && speaker !== 'Default' ? speaker : undefined,
+                text
+              });
+            }
+          }
+        }
+      }
+
+      if (cues.length > 0) return cues;
+    }
+
+    // 3. SRT & WebVTT форматы
+    // Универсальный разбор блоков с таймкодами вида 00:00:00,000 --> 00:00:00,000 или 00:00.000 --> 00:00.000
+    const parseTimecode = (t: string): number => {
+      const clean = t.trim().replace(',', '.');
+      const parts = clean.split(':');
+      if (parts.length === 3) {
+        const h = parseFloat(parts[0]) || 0;
+        const m = parseFloat(parts[1]) || 0;
+        const s = parseFloat(parts[2]) || 0;
+        return h * 3600 + m * 60 + s;
+      } else if (parts.length === 2) {
+        const m = parseFloat(parts[0]) || 0;
+        const s = parseFloat(parts[1]) || 0;
+        return m * 60 + s;
+      }
+      return 0;
+    };
+
+    const blocks = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split(/\n\s*\n/);
+    let index = 1;
+
+    for (const block of blocks) {
+      const lines = block.trim().split('\n');
+      if (lines.length === 0 || (lines.length === 1 && lines[0].startsWith('WEBVTT'))) continue;
+
+      let timeLineIdx = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes('-->')) {
+          timeLineIdx = i;
+          break;
+        }
+      }
+
+      if (timeLineIdx >= 0) {
+        const timeParts = lines[timeLineIdx].split('-->');
+        if (timeParts.length === 2) {
+          const startSec = parseTimecode(timeParts[0].trim().split(' ')[0]);
+          const endSec = parseTimecode(timeParts[1].trim().split(' ')[0]);
+
+          const rawTextLines = lines.slice(timeLineIdx + 1);
+          let rawText = rawTextLines.join(' ').replace(/<[^>]*>/g, '').trim();
+
+          // Определение диктора/спикера: "Актёр 1: Текст" или "[Диктор]: Текст" или "<v Speaker>Текст"
+          let speaker: string | undefined = undefined;
+          const speakerMatch = rawText.match(/^\[([^\]]+)\]:\s*(.*)$/) || rawText.match(/^([А-Яа-яA-Za-z0-9\s_-]+):\s+(.*)$/);
+          if (speakerMatch) {
+            speaker = speakerMatch[1].trim();
+            rawText = speakerMatch[2].trim();
+          }
+
+          if (rawText && endSec > startSec) {
+            cues.push({
+              index: index++,
+              startSec,
+              endSec,
+              speaker,
+              text: rawText
+            });
+          }
+        }
+      }
+    }
+
+    return cues;
+  }
+
+  /**
+   * Асинхронный парсинг файла субтитров
+   */
+  public async parseSubtitleFile(file: File): Promise<SubtitleCue[]> {
+    const text = await file.text();
+    const ext = file.name.split('.').pop() || 'srt';
+    return this.parseSubtitleText(text, ext);
+  }
+
+  /**
+   * Синхронизация состояния project.json при добавлении дорожек, видео или субтитров
+   */
+  public async syncProjectState(
+    currentTracks: TrackMetadata[],
+    videoMeta: VideoMetadata | null,
+    subtitles?: SubtitleCue[],
+    masterMeta?: MasterMetadata,
+    projectName?: string
+  ): Promise<ProjectState> {
+    const existingState = await this.loadProjectState();
+
+    const updatedState: ProjectState = {
+      id: existingState?.id || `proj_${Date.now()}`,
+      name: projectName || existingState?.name || this.activeDirectoryName || 'Проект дубляжа',
+      createdAt: existingState?.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      sampleRate: 48000,
+      videoFile: videoMeta || existingState?.videoFile || null,
+      tracks: currentTracks,
+      master: masterMeta || existingState?.master || {
+        volumeDb: 0,
+        pan: 0,
+        limiterEnabled: true,
+        limiterCeilingDb: -0.1
+      },
+      subtitles: subtitles || existingState?.subtitles || []
+    };
+
+    await this.saveProjectState(updatedState);
+    return updatedState;
+  }
+
+  /**
+   * Получение текущего состояния содержимого рабочей директории
+   */
+  public getCurrentDirectoryContent(): ProjectDirectoryContent | null {
+    if (!this.activeDirectoryName && this.memoryFiles.size === 0) {
+      return null;
+    }
+    const discoveredFiles: DiscoveredFile[] = Array.from(this.memoryFiles.values()).map((file) => ({
+      name: file.name,
+      type: this.getFileType(file.name),
+      sizeBytes: file.size,
+      lastModified: file.lastModified,
+      fileObj: file,
+      relativePath: file.name,
+      fileHandle: this.fileHandlesMap.get(file.name)
+    }));
+
+    return {
+      directoryName: this.activeDirectoryName || 'Текущая папка проекта',
+      hasWritePermission: !this.isFallbackMode && !!this.dirHandle,
+      discoveredFiles,
+      savedState: null
+    };
+  }
+
+  /**
    * Чтение аудиофайла как ArrayBuffer
    */
   public async readFileAsArrayBuffer(fileName: string): Promise<ArrayBuffer | null> {

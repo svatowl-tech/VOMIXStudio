@@ -10,6 +10,8 @@ import { VideoMonitor } from './components/VideoMonitor';
 import { ExportStudio } from './components/ExportStudio';
 import { ProjectWorkspace } from './components/ProjectWorkspace';
 import { MinimalStudio } from './components/MinimalStudio';
+import { LogConsole } from './components/LogConsole';
+import { ConsoleStatusBar } from './components/ConsoleStatusBar';
 import { useAudioEngine } from './hooks/useAudioEngine';
 import { TrackState, MasterState, LiveDAWEngine } from './audio/dawEngine';
 import { SubtitleLine } from './services/AudioAIEngine';
@@ -511,10 +513,23 @@ export default function App() {
             />
           </div>
         )}
+
+        {/* Tab 7: System Log Console & Runtime Diagnostics */}
+        {activeTab === 'console' && (
+          <div className="space-y-6 animate-fadeIn">
+            <LogConsole />
+          </div>
+        )}
       </main>
 
+      {/* Floating / Sticky Console & System Status Bar */}
+      <ConsoleStatusBar
+        isWorkletActive={isAudioWorkletActive}
+        isAudioInitialized={isInitialized}
+      />
+
       {/* Footer */}
-      <footer className="border-t border-slate-800 bg-slate-950 py-4 px-6 text-center text-xs text-slate-500 font-mono">
+      <footer className="border-t border-slate-800 bg-slate-950 py-3 px-6 text-center text-xs text-slate-500 font-mono">
         FFmpeg WASM Video Muxing • C++17 DSP Audio Core • AudioWorklet Bridge • Silero VAD ONNX Web
       </footer>
     </div>
