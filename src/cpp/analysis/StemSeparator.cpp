@@ -161,7 +161,7 @@ void FastFourierTransform::inverse(float* real, float* imag) const {
     v128_t v_neg_zero = wasm_f32x4_splat(-0.0f);
     for (; i + 4 <= n; i += 4) {
         v128_t v_im = wasm_v128_load(&imag[i]);
-        wasm_v128_store(&imag[i], wasm_f32x4_xor(v_im, v_neg_zero));
+        wasm_v128_store(&imag[i], wasm_v128_xor(v_im, v_neg_zero));
     }
 #endif
     for (; i < n; ++i) {
