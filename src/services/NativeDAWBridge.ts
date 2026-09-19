@@ -310,6 +310,12 @@ export class NativeDAWBridge {
 
   private constructor() {
     this.detectSimdSupport();
+    // Проактивный прогрев C++ WebAssembly в фоновом режиме при запуске
+    if (typeof window !== 'undefined') {
+      this.initWasmEngine().catch((err) => {
+        console.warn('[NativeDAWBridge] Ошибка фонового прогрева C++ ядра:', err);
+      });
+    }
   }
 
   /**

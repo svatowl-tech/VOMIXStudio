@@ -78,6 +78,11 @@ export class MediaNormalizer {
     fileOrBlob: File | Blob,
     targetSr: number = MediaNormalizer.TARGET_SAMPLE_RATE
   ): Promise<Float32Array> {
+    // Автоматически ожидаем инициализацию C++ WebAssembly ядра
+    await globalNativeDAWBridge.initWasmEngine().catch((err) => {
+      systemLogger.warn('MediaNormalizer', 'Предупреждение при прогреве C++ WebAssembly:', err);
+    });
+
     if (!globalNativeDAWBridge.isReady) {
       throw new Error('[C++ MediaNormalizer] Ошибка обработки аудио: нативное C++ ядро WebAssembly не загружено или не инициализировано.');
     }
@@ -158,6 +163,11 @@ export class MediaNormalizer {
     videoFile: File,
     targetSr: number = MediaNormalizer.TARGET_SAMPLE_RATE
   ): Promise<Float32Array> {
+    // Автоматически ожидаем инициализацию C++ WebAssembly ядра
+    await globalNativeDAWBridge.initWasmEngine().catch((err) => {
+      systemLogger.warn('MediaNormalizer', 'Предупреждение при прогреве C++ WebAssembly:', err);
+    });
+
     if (!globalNativeDAWBridge.isReady) {
       throw new Error('[C++ MediaNormalizer] Ошибка извлечения аудио: C++ ядро WebAssembly не готово.');
     }

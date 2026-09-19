@@ -236,7 +236,8 @@ export class ProjectManager {
           create: true
         });
       } catch (subErr) {
-        console.warn('[ProjectManager] Не удалось сразу создать подпапку "project/":', subErr);
+        console.warn('[ProjectManager] Не удалось создать подпапку "project/". Включаем режим сохранения в корень:', subErr);
+        this.projectSubDirHandle = null;
       }
 
       // 4. Сканирование содержимого директории
@@ -434,21 +435,32 @@ export class ProjectManager {
     if (!this.dirHandle) return null;
 
     try {
-      let subDir: FileSystemDirectoryHandle;
+      let subDir: FileSystemDirectoryHandle | null = null;
       try {
         subDir = await this.dirHandle.getDirectoryHandle('project', { create: false });
         this.projectSubDirHandle = subDir;
       } catch {
-        return null; // Папка project/ еще не была создана
+        // Папка project/ еще не была создана или недоступна
       }
 
-      const fileHandle = await subDir.getFileHandle('project.json', { create: false });
+      let fileHandle: FileSystemFileHandle;
+      if (subDir) {
+        try {
+          fileHandle = await subDir.getFileHandle('project.json', { create: false });
+        } catch {
+          // Если в подпапке нет, попробуем загрузить из корня проекта
+          fileHandle = await this.dirHandle.getFileHandle('project.json', { create: false });
+        }
+      } else {
+        fileHandle = await this.dirHandle.getFileHandle('project.json', { create: false });
+      }
+
       const file = await fileHandle.getFile();
       const text = await file.text();
 
       return this.validateAndParseProjectJson(text);
     } catch (err) {
-      console.warn('[ProjectManager] project/project.json не найден или к нему нет доступа:', err);
+      console.info('[ProjectManager] Файл project.json еще не создан или недоступен:', err);
       return null;
     }
   }
@@ -499,11 +511,18 @@ export class ProjectManager {
 
         if (saveInProjectSubdir) {
           if (!this.projectSubDirHandle) {
-            this.projectSubDirHandle = await this.dirHandle.getDirectoryHandle('project', {
-              create: true
-            });
+            try {
+              this.projectSubDirHandle = await this.dirHandle.getDirectoryHandle('project', {
+                create: true
+              });
+              targetDirHandle = this.projectSubDirHandle;
+            } catch (subErr) {
+              console.warn('[ProjectManager] Не удалось создать подпапку "project/". Файл будет записан напрямую в корень проекта:', subErr);
+              targetDirHandle = this.dirHandle;
+            }
+          } else {
+            targetDirHandle = this.projectSubDirHandle;
           }
-          targetDirHandle = this.projectSubDirHandle;
         }
 
         // Запрос/создание дескриптора файла
