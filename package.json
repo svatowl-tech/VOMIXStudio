@@ -50,6 +50,10 @@
     "@tauri-apps/cli-linux-x64-gnu": "^2.11.4",
     "@tauri-apps/cli-darwin-x64": "^2.11.4",
     "@tauri-apps/cli-darwin-arm64": "^2.11.4",
-    "@tauri-apps/cli-darwin-universal": "^2.11.4"
+    "@tauri-apps/cli-darwin-universal": "^2.11.4",
+    "lightningcss-win32-x64-msvc": "^1.32.0",
+    "lightningcss-darwin-arm64": "^1.32.0",
+    "lightningcss-darwin-x64": "^1.32.0",
+    "lightningcss-linux-x64-gnu": "^1.32.0"
   }
 }

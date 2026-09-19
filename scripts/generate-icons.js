@@ -160,4 +160,30 @@ const icoBuffer = createPNG(256, 256, drawVomixLogo);
 fs.writeFileSync(path.join(tauriIconsDir, 'icon.ico'), icoBuffer);
 console.log('  ✓ Создан Windows контейнер icon.ico');
 
+// Создаем macOS Apple ICNS контейнер для Tauri и macOS / Linux
+function makeIcnsChunk(type, data) {
+  const buf = Buffer.alloc(8 + data.length);
+  buf.write(type, 0, 4, 'ascii');
+  buf.writeUInt32BE(8 + data.length, 4);
+  data.copy(buf, 8);
+  return buf;
+}
+
+const png128 = createPNG(128, 128, drawVomixLogo);
+const png256 = createPNG(256, 256, drawVomixLogo);
+const png512 = createPNG(512, 512, drawVomixLogo);
+
+const chunk128 = makeIcnsChunk('ic07', png128);
+const chunk256 = makeIcnsChunk('ic08', png256);
+const chunk512 = makeIcnsChunk('ic09', png512);
+
+const totalIcnsLen = 8 + chunk128.length + chunk256.length + chunk512.length;
+const icnsHeader = Buffer.alloc(8);
+icnsHeader.write('icns', 0, 4, 'ascii');
+icnsHeader.writeUInt32BE(totalIcnsLen, 4);
+
+const icnsBuffer = Buffer.concat([icnsHeader, chunk128, chunk256, chunk512]);
+fs.writeFileSync(path.join(tauriIconsDir, 'icon.icns'), icnsBuffer);
+console.log('  ✓ Создан macOS контейнер icon.icns');
+
 console.log('✨ Все иконки VOMIXStudio успешно сформированы!');
