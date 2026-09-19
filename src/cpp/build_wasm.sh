@@ -3,6 +3,9 @@
 # Скрипт компиляции модульного C++ DAW Core в WebAssembly с помощью Emscripten
 # ==============================================================================
 
+# Останавливать скрипт при любой ошибке
+set -euo pipefail
+
 # Проверка наличия emcc
 if ! command -v emcc &> /dev/null
 then
@@ -39,7 +42,7 @@ SOURCES=(
     "bindings/EmscriptenBindings.cpp"
 )
 
-em++ -O3 \
+if em++ -O3 \
     -std=c++17 \
     -msimd128 \
     -flto \
@@ -55,6 +58,11 @@ em++ -O3 \
     -s EXPORTED_RUNTIME_METHODS='["cwrap", "setValue", "getValue", "HEAPF32"]' \
     -s SINGLE_FILE=0 \
     "${SOURCES[@]}" \
-    -o ../../public/wasm/daw_core.js
+    -o ../../public/wasm/daw_core.js; then
+    
+    echo "Компиляция успешно завершена! Файлы daw_core.js и daw_core.wasm созданы в public/wasm/"
+else
+    echo "Ошибка: Сборка WebAssembly-модуля (em++) завершилась со сбоем!"
+    exit 1
+fi
 
-echo "Компиляция успешно завершена! Файлы daw_core.js и daw_core.wasm созданы в public/wasm/"
