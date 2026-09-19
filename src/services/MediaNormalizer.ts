@@ -92,7 +92,7 @@ export class MediaNormalizer {
     }
 
     // Чтение бинарного массива из файла
-    const arrayBuffer = await fileOrBlob.arrayBuffer();
+    let arrayBuffer = await fileOrBlob.arrayBuffer();
     if (arrayBuffer.byteLength === 0) {
       return new Float32Array(0);
     }
@@ -101,7 +101,7 @@ export class MediaNormalizer {
     const tempAudioCtx = new (window.AudioContext ||
       (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
 
-    let decodedBuffer: AudioBuffer;
+    let decodedBuffer: AudioBuffer | null = null;
     try {
       decodedBuffer = await tempAudioCtx.decodeAudioData(arrayBuffer);
     } catch (err: any) {
@@ -118,6 +118,10 @@ export class MediaNormalizer {
       }
     }
 
+    if (!decodedBuffer) {
+      return new Float32Array(0);
+    }
+
     const numFrames = decodedBuffer.length;
     if (numFrames === 0) {
       return new Float32Array(0);
@@ -127,7 +131,7 @@ export class MediaNormalizer {
     const inSampleRate = decodedBuffer.sampleRate;
 
     // Подготовка плоского массива сэмплов для C++ кучи
-    let rawInputPcm: Float32Array;
+    let rawInputPcm: Float32Array | null = null;
     if (numChannels === 1) {
       rawInputPcm = decodedBuffer.getChannelData(0);
     } else {
@@ -141,10 +145,12 @@ export class MediaNormalizer {
     }
 
     // Подсказка GC: очищаем исходные данные, так как у нас есть rawInputPcm
-    (decodedBuffer as any) = null;
+    decodedBuffer = null;
     (arrayBuffer as any) = null;
 
     try {
+      if (!rawInputPcm) return new Float32Array(0);
+
       // Ресэмплинг выполняется ИСКЛЮЧИТЕЛЬНО на C++ через globalNativeDAWBridge.resampleCatmullRom()
       const resampled = globalNativeDAWBridge.resampleCatmullRom(
         rawInputPcm,
@@ -153,7 +159,7 @@ export class MediaNormalizer {
       );
       
       // Очищаем промежуточный буфер
-      (rawInputPcm as any) = null;
+      rawInputPcm = null;
       
       return resampled;
     } catch (err: any) {
