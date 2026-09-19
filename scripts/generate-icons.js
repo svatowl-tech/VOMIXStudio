@@ -155,10 +155,96 @@ for (const iconSpec of sizes) {
   console.log(`  ✓ Сгенерирована икона: ${targetPath} (${iconSpec.width}x${iconSpec.height})`);
 }
 
-// Копируем икону в icon.ico для совместимости с Windows
-const icoBuffer = createPNG(256, 256, drawVomixLogo);
+// Генератор Windows ICO (3.00 Format) для совместимости с Microsoft RC.EXE и Windows Resource Compiler
+function createDIB(width, height, drawPixel) {
+  const header = Buffer.alloc(40);
+  header.writeUInt32LE(40, 0); // biSize (40 bytes BITMAPINFOHEADER)
+  header.writeInt32LE(width, 4); // biWidth
+  header.writeInt32LE(height * 2, 8); // biHeight * 2 (XOR mask + AND mask)
+  header.writeUInt16LE(1, 12); // biPlanes
+  header.writeUInt16LE(32, 14); // biBitCount (32-bit BGRA)
+  header.writeUInt32LE(0, 16); // biCompression (BI_RGB)
+
+  const xorSize = width * height * 4;
+  const andRowBytes = Math.ceil(width / 32) * 4;
+  const andSize = andRowBytes * height;
+  header.writeUInt32LE(xorSize + andSize, 20); // biSizeImage
+
+  // XOR mask (bottom-to-top, BGRA)
+  const xorData = Buffer.alloc(xorSize);
+  for (let y = 0; y < height; y++) {
+    const srcY = height - 1 - y;
+    for (let x = 0; x < width; x++) {
+      const [r, g, b, a] = drawPixel(x, srcY, width, height);
+      const offset = (y * width + x) * 4;
+      xorData[offset] = b;
+      xorData[offset + 1] = g;
+      xorData[offset + 2] = r;
+      xorData[offset + 3] = a;
+    }
+  }
+
+  // AND mask (bottom-to-top, 1-bit per pixel, 0 = opaque, 1 = transparent)
+  const andData = Buffer.alloc(andSize);
+  for (let y = 0; y < height; y++) {
+    const srcY = height - 1 - y;
+    for (let x = 0; x < width; x++) {
+      const [r, g, b, a] = drawPixel(x, srcY, width, height);
+      if (a === 0) {
+        const byteOffset = y * andRowBytes + Math.floor(x / 8);
+        const bitOffset = 7 - (x % 8);
+        andData[byteOffset] |= (1 << bitOffset);
+      }
+    }
+  }
+
+  return Buffer.concat([header, xorData, andData]);
+}
+
+function buildWindowsIco(dibImages) {
+  const count = dibImages.length;
+  const headerSize = 6 + count * 16;
+  let offset = headerSize;
+
+  const header = Buffer.alloc(6);
+  header.writeUInt16LE(0, 0); // reserved
+  header.writeUInt16LE(1, 2); // type: 1 for icon
+  header.writeUInt16LE(count, 4); // count of icon images
+
+  const entries = [];
+  const datas = [];
+
+  for (const img of dibImages) {
+    const entry = Buffer.alloc(16);
+    entry.writeUInt8(img.width >= 256 ? 0 : img.width, 0); // bWidth
+    entry.writeUInt8(img.height >= 256 ? 0 : img.height, 1); // bHeight
+    entry.writeUInt8(0, 2); // bColorCount
+    entry.writeUInt8(0, 3); // bReserved
+    entry.writeUInt16LE(1, 4); // wPlanes
+    entry.writeUInt16LE(32, 6); // wBitCount
+    entry.writeUInt32LE(img.data.length, 8); // dwBytesInRes
+    entry.writeUInt32LE(offset, 12); // dwImageOffset
+
+    entries.push(entry);
+    datas.push(img.data);
+    offset += img.data.length;
+  }
+
+  return Buffer.concat([header, ...entries, ...datas]);
+}
+
+const icoImages = [
+  { width: 16, height: 16, data: createDIB(16, 16, drawVomixLogo) },
+  { width: 32, height: 32, data: createDIB(32, 32, drawVomixLogo) },
+  { width: 48, height: 48, data: createDIB(48, 48, drawVomixLogo) },
+  { width: 64, height: 64, data: createDIB(64, 64, drawVomixLogo) },
+  { width: 128, height: 128, data: createDIB(128, 128, drawVomixLogo) },
+  { width: 256, height: 256, data: createDIB(256, 256, drawVomixLogo) },
+];
+
+const icoBuffer = buildWindowsIco(icoImages);
 fs.writeFileSync(path.join(tauriIconsDir, 'icon.ico'), icoBuffer);
-console.log('  ✓ Создан Windows контейнер icon.ico');
+console.log(`  ✓ Создан Windows 3.00 совместимый icon.ico (${icoBuffer.length} байт, 6 разрешений)`);
 
 // Создаем macOS Apple ICNS контейнер для Tauri и macOS / Linux
 function makeIcnsChunk(type, data) {
