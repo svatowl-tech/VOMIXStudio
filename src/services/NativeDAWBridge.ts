@@ -1040,15 +1040,14 @@ export class NativeDAWBridge {
     customDurationSec?: number,
     onProgress?: (progressPercent: number, message: string) => void
   ): Promise<NativeRenderAudioResult> {
-    const mod = this.getModule();
-    if (onProgress) onProgress(5, 'Подготовка C++ WASM аудиомикшера для офлайн-рендеринга...');
-
     // Расчет длительности в сэмплах
     let maxFrames = 0;
+    let totalClipSamples = 0;
     for (const track of tracks) {
       for (const clip of track.clips || []) {
         const endFrame = clip.offsetSamples + clip.lengthSamples;
         if (endFrame > maxFrames) maxFrames = endFrame;
+        if (clip.buffer) totalClipSamples += clip.buffer.length;
       }
     }
 
@@ -1059,48 +1058,62 @@ export class NativeDAWBridge {
 
     const totalDurationSec = maxFrames / sampleRate;
 
+    // Защита от переполнения 32-битной WASM кучи (>15M сэмплов = >60MB)
+    // При длинных файлах (>10-20 минут) сразу переключаемся на параллельный DSP рендерер
+    const shouldUseJsDsp = totalClipSamples > 12_000_000 || (maxFrames * 2) > 8_000_000;
+
+    if (shouldUseJsDsp) {
+      console.info(`[NativeDAWBridge] Большой проект (${(totalClipSamples / 1000000).toFixed(1)}M сэмплов). Используем высокоскоростной DSP офлайн-микшер.`);
+      return this.renderMasterMixDirect(tracks, master, sampleRate, bitDepth, maxFrames, onProgress);
+    }
+
+    let mod: any = null;
+    try {
+      mod = this.getModule();
+    } catch {
+      return this.renderMasterMixDirect(tracks, master, sampleRate, bitDepth, maxFrames, onProgress);
+    }
+
+    if (onProgress) onProgress(5, 'Подготовка C++ WASM аудиомикшера для офлайн-рендеринга...');
+
     // Создаем экземпляр C++ Mixer (предпочитаем класс, если он доступен через Embind)
     let mixerInstance: any = null;
-    if (mod.Mixer) {
-      mixerInstance = new mod.Mixer(sampleRate);
-    } else {
-      const createMixerFn = mod.createMixerInstance || mod._createMixerInstance;
-      if (!createMixerFn) {
-        throw new Error('[NativeDAWBridge] Нативный C++ Mixer (Mixer class or createMixerInstance) отсутствует в WASM модуле');
-      }
-      mixerInstance = createMixerFn(sampleRate);
-    }
-
-    if (!mixerInstance) {
-      throw new Error('[NativeDAWBridge] Не удалось создать C++ экземпляр Mixer в памяти WASM');
-    }
-
-    // Вспомогательная функция для вызова методов/функций с правильным контекстом
-    const isObject = typeof mixerInstance === 'object';
-    const callNative = (fnName: string, ...args: any[]) => {
-      if (isObject && typeof mixerInstance[fnName] === 'function') {
-        return mixerInstance[fnName](...args);
-      }
-      if (typeof mod[fnName] === 'function') {
-        return mod[fnName](mixerInstance, ...args);
-      }
-      const rawFnName = '_' + fnName;
-      if (typeof mod[rawFnName] === 'function') {
-        return mod[rawFnName](isObject ? (mixerInstance as any).ptr : mixerInstance, ...args);
-      }
-      return null;
-    };
-
     const allocatedPcmPtrs: number[] = [];
 
     try {
+      if (mod.Mixer) {
+        mixerInstance = new mod.Mixer(sampleRate);
+      } else {
+        const createMixerFn = mod.createMixerInstance || mod._createMixerInstance;
+        if (createMixerFn) {
+          mixerInstance = createMixerFn(sampleRate);
+        }
+      }
+
+      if (!mixerInstance) {
+        throw new Error('C++ экземпляр Mixer недоступен');
+      }
+
+      const isObject = typeof mixerInstance === 'object';
+      const callNative = (fnName: string, ...args: any[]) => {
+        if (isObject && typeof mixerInstance[fnName] === 'function') {
+          return mixerInstance[fnName](...args);
+        }
+        if (typeof mod[fnName] === 'function') {
+          return mod[fnName](mixerInstance, ...args);
+        }
+        const rawFnName = '_' + fnName;
+        if (typeof mod[rawFnName] === 'function') {
+          return mod[rawFnName](isObject ? (mixerInstance as any).ptr : mixerInstance, ...args);
+        }
+        return null;
+      };
+
       if (onProgress) onProgress(15, 'Загрузка треков и клипов в C++ микшер...');
 
-      // Устанавливаем мастер-параметры в C++
       callNative('setMasterVolume', master.volumeDb);
       callNative('setMasterLimiter', master.limiterEnabled, master.limiterCeilingDb);
 
-      // Загружаем треки и клипы в C++ микшер
       for (const t of tracks) {
         callNative('setTrackVolume', t.id, t.volumeDb);
         callNative('setTrackPan', t.id, t.pan);
@@ -1141,7 +1154,6 @@ export class NativeDAWBridge {
 
       if (onProgress) onProgress(30, 'Выполнение C++ блочного микширования и DSP обработки...');
 
-      // Выделяем выходной буфер на весь проект
       const totalOutFloats = maxFrames * 2; // Стерео
       const outPcmPtr = this.allocateFloats(totalOutFloats);
       allocatedPcmPtrs.push(outPcmPtr);
@@ -1162,10 +1174,8 @@ export class NativeDAWBridge {
         }
       }
 
-      // Считываем готовый интерливированный стерео буфер из WASM кучи
       const interleavedBuffer = this.readFloat32Direct(outPcmPtr, totalOutFloats);
 
-      // Разделяем на Left / Right каналы
       const leftChannel = new Float32Array(maxFrames);
       const rightChannel = new Float32Array(maxFrames);
       for (let i = 0; i < maxFrames; i++) {
@@ -1173,59 +1183,40 @@ export class NativeDAWBridge {
         rightChannel[i] = interleavedBuffer[i * 2 + 1];
       }
 
-      if (onProgress) onProgress(85, 'C++ бинарная упаковка WAV файла...');
+      if (onProgress) onProgress(85, 'Бинарная упаковка WAV файла...');
 
-      // Бинарная кодировка WAV на C++
       let wavArrayBuffer: ArrayBuffer;
       let wavBlob: Blob;
 
-      if (typeof mod.packWav === 'function') {
-        const bytesPerSample = Math.floor(bitDepth / 8);
-        const maxOutBytes = 44 + maxFrames * 2 * bytesPerSample + 1024;
-        const outBytePtr = this.allocateBytes(maxOutBytes);
-
-        try {
-          const actualBytes = mod.packWav(outPcmPtr, maxFrames, bitDepth, outBytePtr, maxOutBytes, sampleRate);
-          if (actualBytes > 0) {
-            const rawBytes = this.readUint8Direct(outBytePtr, actualBytes);
-            const ab = new ArrayBuffer(actualBytes);
-            new Uint8Array(ab).set(rawBytes);
-            wavArrayBuffer = ab;
-            wavBlob = new Blob([ab], { type: 'audio/wav' });
-          } else {
-            throw new Error('[NativeDAWBridge] C++ packWav вернул 0 байт');
+      try {
+        if (typeof mod.packWav === 'function') {
+          const bytesPerSample = Math.floor(bitDepth / 8);
+          const maxOutBytes = 44 + maxFrames * 2 * bytesPerSample + 1024;
+          const outBytePtr = this.allocateBytes(maxOutBytes);
+          try {
+            const actualBytes = mod.packWav(outPcmPtr, maxFrames, bitDepth, outBytePtr, maxOutBytes, sampleRate);
+            if (actualBytes > 0) {
+              const rawBytes = this.readUint8Direct(outBytePtr, actualBytes);
+              const ab = new ArrayBuffer(actualBytes);
+              new Uint8Array(ab).set(rawBytes);
+              wavArrayBuffer = ab;
+              wavBlob = new Blob([ab], { type: 'audio/wav' });
+            } else {
+              throw new Error('C++ packWav 0 bytes');
+            }
+          } finally {
+            this.freeBytes(outBytePtr);
           }
-        } finally {
-          this.freeBytes(outBytePtr);
+        } else {
+          wavBlob = NativeDAWBridge.createWavBlobDirect(leftChannel, rightChannel, sampleRate, bitDepth);
+          wavArrayBuffer = await wavBlob.arrayBuffer();
         }
-      } else if (typeof mod.buildWav === 'function') {
-        const bytesPerSample = Math.floor(bitDepth / 8);
-        const maxOutBytes = 44 + maxFrames * 2 * bytesPerSample + 1024;
-        const outBytePtr = this.allocateBytes(maxOutBytes);
-        const leftPtr = this.writeFloat32Direct(leftChannel);
-        const rightPtr = this.writeFloat32Direct(rightChannel);
-
-        try {
-          const actualBytes = mod.buildWav(leftPtr, rightPtr, maxFrames, sampleRate, bitDepth, outBytePtr, maxOutBytes);
-          if (actualBytes > 0) {
-            const rawBytes = this.readUint8Direct(outBytePtr, actualBytes);
-            const ab = new ArrayBuffer(actualBytes);
-            new Uint8Array(ab).set(rawBytes);
-            wavArrayBuffer = ab;
-            wavBlob = new Blob([ab], { type: 'audio/wav' });
-          } else {
-            throw new Error('[NativeDAWBridge] C++ buildWav вернул 0 байт');
-          }
-        } finally {
-          this.freeFloats(leftPtr);
-          this.freeFloats(rightPtr);
-          this.freeBytes(outBytePtr);
-        }
-      } else {
-        throw new Error('[NativeDAWBridge] Нативные C++ функции кодирования WAV (packWav или buildWav) отсутствуют в WASM модуле. Рендеринг невозможен.');
+      } catch {
+        wavBlob = NativeDAWBridge.createWavBlobDirect(leftChannel, rightChannel, sampleRate, bitDepth);
+        wavArrayBuffer = await wavBlob.arrayBuffer();
       }
 
-      if (onProgress) onProgress(100, 'Мастер-микс успешно создан на C++!');
+      if (onProgress) onProgress(100, 'Мастер-микс успешно создан!');
 
       return {
         leftChannel,
@@ -1236,20 +1227,205 @@ export class NativeDAWBridge {
         wavArrayBuffer,
         wavBlob
       };
+    } catch (wasmErr) {
+      console.warn('[NativeDAWBridge] Сбой рендеринга через WASM, переключаемся на DSP микшер:', wasmErr);
+      return this.renderMasterMixDirect(tracks, master, sampleRate, bitDepth, maxFrames, onProgress);
     } finally {
       for (const ptr of allocatedPcmPtrs) {
-        this.freeFloats(ptr);
+        try { this.freeFloats(ptr); } catch {}
       }
-      
       if (mixerInstance) {
-        if (isObject && typeof mixerInstance.delete === 'function') {
-          mixerInstance.delete();
-        } else if (mod._freeMixerInstance || mod.freeMixerInstance) {
-          const freeMixFn = mod._freeMixerInstance || mod.freeMixerInstance;
-          freeMixFn(isObject ? (mixerInstance as any).ptr : mixerInstance);
-        }
+        try {
+          if (typeof mixerInstance.delete === 'function') {
+            mixerInstance.delete();
+          } else if (mod?._freeMixerInstance || mod?.freeMixerInstance) {
+            const freeMixFn = mod._freeMixerInstance || mod.freeMixerInstance;
+            freeMixFn(typeof mixerInstance === 'object' ? (mixerInstance as any).ptr : mixerInstance);
+          }
+        } catch {}
       }
     }
+  }
+
+  /**
+   * Высокоскоростной и надежный DSP офлайн-рендерер без ограничений памяти кучи WASM.
+   * Безопасен для длинных аудиодорожек (1400+ сек, сотни мегабайт).
+   */
+  public async renderMasterMixDirect(
+    tracks: TrackState[],
+    master: MasterState,
+    sampleRate: number = NativeDAWBridge.TARGET_SAMPLE_RATE,
+    bitDepth: WavBitDepth = 24,
+    maxFrames: number,
+    onProgress?: (progressPercent: number, message: string) => void
+  ): Promise<NativeRenderAudioResult> {
+    const totalDurationSec = maxFrames / sampleRate;
+    if (onProgress) onProgress(10, 'Подготовка DSP буферов микширования...');
+
+    const leftChannel = new Float32Array(maxFrames);
+    const rightChannel = new Float32Array(maxFrames);
+
+    const hasSolo = tracks.some((t) => !!t.solo);
+
+    for (let tIdx = 0; tIdx < tracks.length; tIdx++) {
+      const t = tracks[tIdx];
+      if (t.mute) continue;
+      if (hasSolo && !t.solo) continue;
+
+      const trackVolLinear = Math.pow(10, (t.volumeDb || 0) / 20);
+      const pan = Math.max(-1, Math.min(1, t.pan || 0));
+      const panL = Math.min(1.0, 1.0 - pan);
+      const panR = Math.min(1.0, 1.0 + pan);
+
+      const clips = t.clips || [];
+      for (const c of clips) {
+        const pcm = c.buffer;
+        if (!pcm || pcm.length === 0) continue;
+
+        const isStereo = pcm.length >= (c.lengthSamples || 0) * 2;
+        const clipLen = c.lengthSamples || (isStereo ? Math.floor(pcm.length / 2) : pcm.length);
+        const offsetSamples = c.offsetSamples || 0;
+        const gain = (typeof c.gain === 'number' ? c.gain : 1.0) * trackVolLinear;
+        const fadeIn = c.fadeInSamples || 0;
+        const fadeOut = c.fadeOutSamples || 0;
+
+        const startFrame = Math.max(0, offsetSamples);
+        const endFrame = Math.min(maxFrames, offsetSamples + clipLen);
+
+        for (let f = startFrame; f < endFrame; f++) {
+          const clipFrame = f - offsetSamples;
+          let sL = isStereo ? pcm[clipFrame * 2] : pcm[clipFrame];
+          let sR = isStereo ? pcm[clipFrame * 2 + 1] : sL;
+
+          if (fadeIn > 0 && clipFrame < fadeIn) {
+            const factor = clipFrame / fadeIn;
+            sL *= factor;
+            sR *= factor;
+          }
+          if (fadeOut > 0 && clipLen - clipFrame < fadeOut) {
+            const factor = Math.max(0, (clipLen - clipFrame) / fadeOut);
+            sL *= factor;
+            sR *= factor;
+          }
+
+          leftChannel[f] += sL * gain * panL;
+          rightChannel[f] += sR * gain * panR;
+        }
+      }
+
+      if (onProgress) {
+        const pct = 10 + Math.round(((tIdx + 1) / tracks.length) * 65);
+        onProgress(pct, `DSP сведение дорожки [${t.name || `#${t.id}`}] (${tIdx + 1}/${tracks.length})...`);
+      }
+    }
+
+    if (onProgress) onProgress(80, 'Применение мастер-эффектов и лимитера...');
+
+    const masterVolLinear = Math.pow(10, (master.volumeDb || 0) / 20);
+    const limitCeiling = Math.pow(10, (master.limiterCeilingDb || 0) / 20);
+
+    for (let i = 0; i < maxFrames; i++) {
+      let l = leftChannel[i] * masterVolLinear;
+      let r = rightChannel[i] * masterVolLinear;
+
+      if (master.limiterEnabled) {
+        if (Math.abs(l) > limitCeiling) l = Math.sign(l) * limitCeiling;
+        if (Math.abs(r) > limitCeiling) r = Math.sign(r) * limitCeiling;
+      }
+
+      leftChannel[i] = l;
+      rightChannel[i] = r;
+    }
+
+    if (onProgress) onProgress(90, 'Кодирование мастер-файла WAV...');
+
+    const wavBlob = NativeDAWBridge.createWavBlobDirect(leftChannel, rightChannel, sampleRate, bitDepth);
+    const wavArrayBuffer = await wavBlob.arrayBuffer();
+
+    const interleavedBuffer = new Float32Array(maxFrames * 2);
+    for (let i = 0; i < maxFrames; i++) {
+      interleavedBuffer[i * 2] = leftChannel[i];
+      interleavedBuffer[i * 2 + 1] = rightChannel[i];
+    }
+
+    if (onProgress) onProgress(100, 'Мастер-микс успешно готов!');
+
+    return {
+      leftChannel,
+      rightChannel,
+      interleavedBuffer,
+      sampleRate,
+      durationSec: totalDurationSec,
+      wavArrayBuffer,
+      wavBlob
+    };
+  }
+
+  /**
+   * Прямая быстрая бинарная генерация стандартного RIFF WAV файла в памяти
+   */
+  public static createWavBlobDirect(
+    leftChannel: Float32Array,
+    rightChannel: Float32Array,
+    sampleRate: number = 48000,
+    bitDepth: WavBitDepth = 24
+  ): Blob {
+    const maxFrames = leftChannel.length;
+    const numChannels = 2;
+    const bytesPerSample = bitDepth === 24 ? 3 : 2;
+    const blockAlign = numChannels * bytesPerSample;
+    const byteRate = sampleRate * blockAlign;
+    const dataSize = maxFrames * blockAlign;
+    const totalSize = 44 + dataSize;
+    const buffer = new ArrayBuffer(totalSize);
+    const view = new DataView(buffer);
+
+    view.setUint32(0, 0x52494646, false); // "RIFF"
+    view.setUint32(4, 36 + dataSize, true);
+    view.setUint32(8, 0x57415645, false); // "WAVE"
+
+    view.setUint32(12, 0x666d7420, false); // "fmt "
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); // PCM
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitDepth, true);
+
+    view.setUint32(36, 0x64617461, false); // "data"
+    view.setUint32(40, dataSize, true);
+
+    if (bitDepth === 16) {
+      const pcm16 = new Int16Array(buffer, 44, maxFrames * 2);
+      for (let i = 0; i < maxFrames; i++) {
+        let l = leftChannel[i];
+        let r = rightChannel[i];
+        if (l < -1) l = -1; else if (l > 1) l = 1;
+        if (r < -1) r = -1; else if (r > 1) r = 1;
+        pcm16[i * 2] = l < 0 ? l * 0x8000 : l * 0x7fff;
+        pcm16[i * 2 + 1] = r < 0 ? r * 0x8000 : r * 0x7fff;
+      }
+    } else {
+      const u8 = new Uint8Array(buffer, 44, dataSize);
+      let offset = 0;
+      for (let i = 0; i < maxFrames; i++) {
+        let l = leftChannel[i];
+        let r = rightChannel[i];
+        if (l < -1) l = -1; else if (l > 1) l = 1;
+        if (r < -1) r = -1; else if (r > 1) r = 1;
+        const valL = Math.round(l < 0 ? l * 0x800000 : l * 0x7fffff);
+        const valR = Math.round(r < 0 ? r * 0x800000 : r * 0x7fffff);
+        u8[offset++] = valL & 0xff;
+        u8[offset++] = (valL >> 8) & 0xff;
+        u8[offset++] = (valL >> 16) & 0xff;
+        u8[offset++] = valR & 0xff;
+        u8[offset++] = (valR >> 8) & 0xff;
+        u8[offset++] = (valR >> 16) & 0xff;
+      }
+    }
+
+    return new Blob([buffer], { type: 'audio/wav' });
   }
 
   /**
@@ -1672,7 +1848,7 @@ export class NativeDAWBridge {
   }
 
   /**
-   * Нативный C++ стриппинг тишины (SilenceStripper::stripSilence)
+   * Нативный C++ стриппинг тишины (SilenceStripper::stripSilence) с гарантированным DSP fallback
    */
   public stripSilenceNative(
     samples: Float32Array,
@@ -1682,68 +1858,206 @@ export class NativeDAWBridge {
     isStereo: boolean = false,
     sampleRate: number = 48000
   ): AudioSegmentResult[] {
-    const mod = this.getModule();
-    const maxSegments = 1024;
+    if (!samples || samples.length === 0) {
+      return [];
+    }
+
     const channels = isStereo ? 2 : 1;
+    const totalFrames = Math.floor(samples.length / channels);
+    if (totalFrames <= 0) return [];
+
+    // Если буфер слишком велик для 32-битной кучи WASM (>12MB) или если WASM модуль недоступен/вызывает ошибку:
+    // используем высокоточный блочный VAD стриппер
+    const useNativeWasm = (samples.length * 4 <= 12 * 1024 * 1024);
+
+    if (useNativeWasm) {
+      let mod: any = null;
+      try {
+        mod = this.getModule();
+      } catch {
+        mod = null;
+      }
+
+      if (mod) {
+        const stripFn = mod.stripSilenceNative || mod.stripSilenceFromClip;
+        const allocSeg = mod.allocateSegmentBuffer || mod._malloc;
+        const freeSeg = mod.freeSegmentBuffer || mod._free;
+
+        if (typeof stripFn === 'function' && typeof allocSeg === 'function') {
+          const maxSegments = 1024;
+          let inPcmPtr = 0;
+          let outSegPtr = 0;
+
+          try {
+            inPcmPtr = this.writeFloat32Direct(samples);
+            outSegPtr = allocSeg(maxSegments * 16);
+
+            const count = stripFn(
+              inPcmPtr,
+              samples.length,
+              thresholdDb,
+              minSilenceMs,
+              paddingMs,
+              outSegPtr,
+              maxSegments,
+              isStereo,
+              sampleRate
+            );
+
+            const wasmBuffer = mod.HEAPU8?.buffer || mod.HEAPF32?.buffer || mod.wasmMemory?.buffer || mod.buffer;
+            if (wasmBuffer && count > 0) {
+              const heapU32 = new Uint32Array(wasmBuffer, outSegPtr, count * 4);
+              const heapF32 = new Float32Array(wasmBuffer, outSegPtr, count * 4);
+              const result: AudioSegmentResult[] = [];
+
+              for (let i = 0; i < count; i++) {
+                const base = i * 4;
+                const offset = heapU32[base];
+                const length = heapU32[base + 1];
+                const peak = heapF32[base + 2];
+                const rms = heapF32[base + 3];
+                const duration = length / (channels * sampleRate);
+
+                result.push({
+                  offsetSamples: offset,
+                  lengthSamples: length,
+                  durationSec: duration,
+                  peakLevel: peak,
+                  rmsLevel: rms
+                });
+              }
+              return result;
+            }
+          } catch (wasmErr) {
+            console.warn('[NativeDAWBridge] Сбой C++ stripSilenceNative, переключаемся на DSP VAD:', wasmErr);
+          } finally {
+            if (inPcmPtr) {
+              try { this.freeFloats(inPcmPtr); } catch {}
+            }
+            if (freeSeg && outSegPtr) {
+              try { freeSeg(outSegPtr); } catch {}
+            }
+          }
+        }
+      }
+    }
+
+    // Высокоточный fallback VAD стриппер (без перегрузки памяти)
+    return this.stripSilenceFallback(samples, thresholdDb, minSilenceMs, paddingMs, isStereo, sampleRate);
+  }
+
+  /**
+   * Чистый JavaScript VAD стриппер без ограничений памяти кучи WASM
+   */
+  private stripSilenceFallback(
+    samples: Float32Array,
+    thresholdDb: number = -40.0,
+    minSilenceMs: number = 300.0,
+    paddingMs: number = 50.0,
+    isStereo: boolean = false,
+    sampleRate: number = 48000
+  ): AudioSegmentResult[] {
+    const channels = isStereo ? 2 : 1;
+    const totalFrames = Math.floor(samples.length / channels);
+    if (totalFrames <= 0) return [];
+
+    const thresholdAmp = Math.pow(10, thresholdDb / 20);
+    const windowSize = Math.max(128, Math.floor(sampleRate * 0.01)); // 10 ms
+    const minSilenceFrames = Math.floor((minSilenceMs / 1000) * sampleRate);
+    const paddingFrames = Math.floor((paddingMs / 1000) * sampleRate);
+
+    const numWindows = Math.ceil(totalFrames / windowSize);
+    const isSpeech = new Uint8Array(numWindows);
+
+    for (let w = 0; w < numWindows; w++) {
+      const startF = w * windowSize;
+      const endF = Math.min(totalFrames, startF + windowSize);
+      let sumSq = 0;
+      let count = 0;
+
+      for (let f = startF; f < endF; f++) {
+        const idx = f * channels;
+        const sL = samples[idx];
+        const sR = isStereo ? samples[idx + 1] : sL;
+        sumSq += sL * sL + sR * sR;
+        count += channels;
+      }
+
+      const rms = count > 0 ? Math.sqrt(sumSq / count) : 0;
+      if (rms >= thresholdAmp) {
+        isSpeech[w] = 1;
+      }
+    }
+
+    const minSilenceWindows = Math.ceil(minSilenceFrames / windowSize);
+    let lastSpeech = -1;
+    for (let w = 0; w < numWindows; w++) {
+      if (isSpeech[w]) {
+        if (lastSpeech >= 0 && (w - lastSpeech - 1) < minSilenceWindows) {
+          for (let fill = lastSpeech + 1; fill < w; fill++) {
+            isSpeech[fill] = 1;
+          }
+        }
+        lastSpeech = w;
+      }
+    }
+
+    const rawSegments: { startF: number; endF: number }[] = [];
+    let inSegment = false;
+    let segStart = 0;
+
+    for (let w = 0; w < numWindows; w++) {
+      if (isSpeech[w] && !inSegment) {
+        inSegment = true;
+        segStart = w * windowSize;
+      } else if (!isSpeech[w] && inSegment) {
+        inSegment = false;
+        const segEnd = Math.min(totalFrames, w * windowSize);
+        rawSegments.push({ startF: segStart, endF: segEnd });
+      }
+    }
+    if (inSegment) {
+      rawSegments.push({ startF: segStart, endF: totalFrames });
+    }
+
+    if (rawSegments.length === 0) {
+      return [];
+    }
+
     const result: AudioSegmentResult[] = [];
+    for (const seg of rawSegments) {
+      const paddedStart = Math.max(0, seg.startF - paddingFrames);
+      const paddedEnd = Math.min(totalFrames, seg.endF + paddingFrames);
+      const length = paddedEnd - paddedStart;
+      if (length <= 0) continue;
 
-    const stripFn = mod.stripSilenceNative || mod.stripSilenceFromClip;
-    const allocSeg = mod.allocateSegmentBuffer || mod._malloc;
-    const freeSeg = mod.freeSegmentBuffer || mod._free;
+      let maxPeak = 0;
+      let sumSq = 0;
+      let sampleCount = 0;
+      const stride = Math.max(1, Math.floor(length / 2000));
 
-    if (typeof stripFn !== 'function') {
-      throw new Error('[NativeDAWBridge] Нативная C++ функция stripSilenceNative отсутствует в WASM модуле');
+      for (let f = paddedStart; f < paddedEnd; f += stride) {
+        const idx = f * channels;
+        const sL = Math.abs(samples[idx]);
+        const sR = isStereo ? Math.abs(samples[idx + 1]) : sL;
+        if (sL > maxPeak) maxPeak = sL;
+        if (sR > maxPeak) maxPeak = sR;
+        sumSq += sL * sL + sR * sR;
+        sampleCount += channels;
+      }
+
+      const rms = sampleCount > 0 ? Math.sqrt(sumSq / sampleCount) : 0;
+
+      result.push({
+        offsetSamples: paddedStart,
+        lengthSamples: length,
+        durationSec: length / sampleRate,
+        peakLevel: maxPeak,
+        rmsLevel: rms
+      });
     }
 
-    const inPcmPtr = this.writeFloat32Direct(samples);
-    const outSegPtr = allocSeg(maxSegments * 16);
-
-    try {
-      const count = stripFn(
-        inPcmPtr,
-        samples.length,
-        thresholdDb,
-        minSilenceMs,
-        paddingMs,
-        outSegPtr,
-        maxSegments,
-        isStereo,
-        sampleRate
-      );
-
-      // Более надежный способ получения доступа к буферу памяти WASM
-      const wasmBuffer = mod.HEAPU8 ? mod.HEAPU8.buffer : (mod.HEAPF32 ? mod.HEAPF32.buffer : (mod.wasmMemory ? mod.wasmMemory.buffer : mod.buffer));
-      
-      if (!wasmBuffer) {
-        throw new Error('[NativeDAWBridge] Не удалось получить доступ к памяти WASM в stripSilenceNative');
-      }
-
-      const heapU32 = new Uint32Array(wasmBuffer, outSegPtr, count * 4);
-      const heapF32 = new Float32Array(wasmBuffer, outSegPtr, count * 4);
-
-      for (let i = 0; i < count; i++) {
-        const base = i * 4;
-        const offset = heapU32[base];
-        const length = heapU32[base + 1];
-        const peak = heapF32[base + 2];
-        const rms = heapF32[base + 3];
-        const duration = length / (channels * sampleRate);
-
-        result.push({
-          offsetSamples: offset,
-          lengthSamples: length,
-          durationSec: duration,
-          peakLevel: peak,
-          rmsLevel: rms
-        });
-      }
-      return result;
-    } finally {
-      this.freeFloats(inPcmPtr);
-      if (freeSeg && outSegPtr) {
-        freeSeg(outSegPtr);
-      }
-    }
+    return result;
   }
 }
 

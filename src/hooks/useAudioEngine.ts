@@ -94,138 +94,163 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
+  const initPromiseRef = useRef<Promise<void> | null>(null);
+  const isInitializedRef = useRef<boolean>(false);
+  const pendingClipAcksRef = useRef<Map<number, () => void>>(new Map());
 
   /**
    * Инициализация AudioContext, загрузка C++ WebAssembly ядра (/wasm/daw_core.wasm) и запуск AudioWorklet
    */
   const initAudioEngine = useCallback(async () => {
-    try {
-      setError(null);
-      systemLogger.info('AudioWorklet', 'Инициализация Web AudioContext и загрузка C++ WASM ядра...');
-
-      // 1. Загрузка бинарника /wasm/daw_core.wasm с резервным запуском из Base64 константы
-      let wasmBytes: ArrayBuffer;
-      try {
-        const response = await fetch('/wasm/daw_core.wasm');
-        if (!response.ok || response.status !== 200) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-        wasmBytes = await response.arrayBuffer();
-        if (!wasmBytes || wasmBytes.byteLength === 0) {
-          throw new Error('Пустой бинарник daw_core.wasm');
-        }
-        systemLogger.info('AudioWorklet', 'Высокопроизводительное C++ ядро успешно загружено с диска.');
-      } catch (fetchErr) {
-        systemLogger.warn('AudioWorklet', 'Локальный файл /wasm/daw_core.wasm не найден. Выполняется автономная загрузка встроенного ядра C++...', fetchErr);
-        try {
-          const binaryString = window.atob(EMBEDDED_WASM_CORE_BASE64);
-          const len = binaryString.length;
-          const bytes = new Uint8Array(len);
-          for (let i = 0; i < len; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
-          }
-          wasmBytes = bytes.buffer;
-        } catch (base64Err) {
-          const errMessage = 'Фатальная ошибка: Не удалось декодировать встроенное Base64 C++ ядро.';
-          setError(errMessage);
-          systemLogger.error('AudioWorklet', errMessage, base64Err);
-          throw new Error(errMessage);
-        }
-      }
-
-      // 2. Проверка поддержки Web Audio API
-      const AudioCtxClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      if (!AudioCtxClass) {
-        throw new Error('Ваш браузер не поддерживает Web Audio API.');
-      }
-
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new AudioCtxClass({ sampleRate: 48000 });
-      }
-
-      const ctx = audioCtxRef.current;
-
-      // Снятие блокировки автоплея браузером
-      if (ctx.state === 'suspended') {
-        await ctx.resume();
-        systemLogger.debug('AudioWorklet', 'AudioContext возобновлен (resume after suspend).');
-      }
-
-      // 3. Подключение AudioWorklet модуля
-      if (!workletNodeRef.current) {
-        try {
-          await ctx.audioWorklet.addModule('/audio-engine-processor.js');
-          const workletNode = new AudioWorkletNode(ctx, 'audio-engine-processor', {
-            numberOfInputs: 0,
-            numberOfOutputs: 1,
-            outputChannelCount: [2]
-          });
-
-          // Слушаем сообщения телеметрии и статуса из AudioWorklet
-          workletNode.port.onmessage = (e) => {
-            const data = e.data;
-            if (!data) return;
-
-            if (data.type === 'METERS_TELEMETRY') {
-              setCurrentTimeSec(data.currentTimeSec || 0);
-
-              if (data.tracks && Array.isArray(data.tracks)) {
-                setTrackMeters((prevMap) => {
-                  const newMap = new Map(prevMap);
-                  data.tracks.forEach((item: TrackMeterData) => {
-                    newMap.set(item.trackId, item);
-                  });
-                  return newMap;
-                });
-              }
-
-              if (data.master) {
-                setMasterMeter(data.master);
-              }
-            } else if (data.type === 'WASM_INIT_SUCCESS') {
-              setIsAudioWorkletActive(true);
-              systemLogger.info('C++ WASM', 'C++ DSP аудиомикшер успешно инициализирован в AudioWorklet (48000 Hz).');
-            } else if (data.type === 'WASM_CORE_MISSING') {
-              const errMessage = 'Критическая ошибка: C++ ядро не скомпилировано! Скомпилируйте public/wasm/daw_core.wasm через build_wasm.sh.';
-              setError(errMessage);
-              setIsAudioWorkletActive(false);
-              systemLogger.error('AudioWorklet', errMessage, data.error);
-            }
-          };
-
-          workletNode.connect(ctx.destination);
-          workletNodeRef.current = workletNode;
-
-          // Инициализируем C++ мост в основном потоке
-          await globalNativeDAWBridge.initWasmEngine().catch((bridgeErr) => {
-            console.warn('[useAudioEngine] Предупреждение инициализации NativeDAWBridge:', bridgeErr);
-          });
-
-          // Передаем байты WASM модуля в AudioWorklet процессор (используем transfer для эффективности)
-          workletNode.port.postMessage({
-            type: 'INIT_WASM',
-            wasmBytes,
-            sampleRate: ctx.sampleRate || 48000
-          }, [wasmBytes]);
-
-          setIsAudioWorkletActive(true);
-          systemLogger.info('AudioWorklet', 'AudioWorklet-процессор успешно смонтирован и запущен.');
-        } catch (workletErr) {
-          const errMessage = 'Критическая ошибка: C++ ядро не скомпилировано! Скомпилируйте public/wasm/daw_core.wasm через build_wasm.sh.';
-          setError(errMessage);
-          setIsAudioWorkletActive(false);
-          systemLogger.error('AudioWorklet', `Сбой загрузки AudioWorklet: ${errMessage}`, workletErr);
-          throw workletErr;
-        }
-      }
-
-      setIsInitialized(true);
-      systemLogger.info('System', 'Аудиосистема C++ готова к воспроизведению и микшированию.');
-    } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : 'Критическая ошибка: C++ ядро не скомпилировано! Скомпилируйте public/wasm/daw_core.wasm через build_wasm.sh.';
-      setError(errMsg);
-      systemLogger.error('AudioWorklet', `Сбой инициализации аудиосистемы: ${errMsg}`, err, err instanceof Error ? err.stack : undefined);
+    if (isInitializedRef.current && workletNodeRef.current) {
+      return;
     }
+    if (initPromiseRef.current) {
+      return initPromiseRef.current;
+    }
+
+    const doInit = async () => {
+      try {
+        setError(null);
+        systemLogger.info('AudioWorklet', 'Инициализация Web AudioContext и загрузка C++ WASM ядра...');
+
+        // 1. Загрузка бинарника /wasm/daw_core.wasm с резервным запуском из Base64 константы
+        let wasmBytes: ArrayBuffer;
+        try {
+          const response = await fetch('/wasm/daw_core.wasm');
+          if (!response.ok || response.status !== 200) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          wasmBytes = await response.arrayBuffer();
+          if (!wasmBytes || wasmBytes.byteLength === 0) {
+            throw new Error('Пустой бинарник daw_core.wasm');
+          }
+          systemLogger.info('AudioWorklet', 'Высокопроизводительное C++ ядро успешно загружено с диска.');
+        } catch (fetchErr) {
+          systemLogger.warn('AudioWorklet', 'Локальный файл /wasm/daw_core.wasm не найден. Выполняется автономная загрузка встроенного ядра C++...', fetchErr);
+          try {
+            const binaryString = window.atob(EMBEDDED_WASM_CORE_BASE64);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+              bytes[i] = binaryString.charCodeAt(i);
+            }
+            wasmBytes = bytes.buffer;
+          } catch (base64Err) {
+            const errMessage = 'Фатальная ошибка: Не удалось декодировать встроенное Base64 C++ ядро.';
+            setError(errMessage);
+            systemLogger.error('AudioWorklet', errMessage, base64Err);
+            throw new Error(errMessage);
+          }
+        }
+
+        // 2. Проверка поддержки Web Audio API
+        const AudioCtxClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+        if (!AudioCtxClass) {
+          throw new Error('Ваш браузер не поддерживает Web Audio API.');
+        }
+
+        if (!audioCtxRef.current) {
+          audioCtxRef.current = new AudioCtxClass({ sampleRate: 48000 });
+        }
+
+        const ctx = audioCtxRef.current;
+
+        // Снятие блокировки автоплея браузером
+        if (ctx.state === 'suspended') {
+          await ctx.resume();
+          systemLogger.debug('AudioWorklet', 'AudioContext возобновлен (resume after suspend).');
+        }
+
+        // 3. Подключение AudioWorklet модуля
+        if (!workletNodeRef.current) {
+          try {
+            await ctx.audioWorklet.addModule('/audio-engine-processor.js');
+            const workletNode = new AudioWorkletNode(ctx, 'audio-engine-processor', {
+              numberOfInputs: 0,
+              numberOfOutputs: 1,
+              outputChannelCount: [2]
+            });
+
+            // Слушаем сообщения телеметрии и статуса из AudioWorklet
+            workletNode.port.onmessage = (e) => {
+              const data = e.data;
+              if (!data) return;
+
+              if (data.type === 'METERS_TELEMETRY') {
+                setCurrentTimeSec(data.currentTimeSec || 0);
+
+                if (data.tracks && Array.isArray(data.tracks)) {
+                  setTrackMeters((prevMap) => {
+                    const newMap = new Map(prevMap);
+                    data.tracks.forEach((item: TrackMeterData) => {
+                      newMap.set(item.trackId, item);
+                    });
+                    return newMap;
+                  });
+                }
+
+                if (data.master) {
+                  setMasterMeter(data.master);
+                }
+              } else if (data.type === 'CLIP_LOADED_SUCCESS') {
+                const cb = pendingClipAcksRef.current.get(data.clipId);
+                if (cb) {
+                  pendingClipAcksRef.current.delete(data.clipId);
+                  cb();
+                }
+              } else if (data.type === 'WASM_INIT_SUCCESS') {
+                setIsAudioWorkletActive(true);
+                systemLogger.info('C++ WASM', 'C++ DSP аудиомикшер успешно инициализирован в AudioWorklet (48000 Hz).');
+              } else if (data.type === 'WASM_CORE_MISSING') {
+                const errMessage = 'Критическая ошибка: C++ ядро не скомпилировано! Скомпилируйте public/wasm/daw_core.wasm через build_wasm.sh.';
+                setError(errMessage);
+                setIsAudioWorkletActive(false);
+                systemLogger.error('AudioWorklet', errMessage, data.error);
+              }
+            };
+
+            workletNode.connect(ctx.destination);
+            workletNodeRef.current = workletNode;
+
+            // Инициализируем C++ мост в основном потоке
+            await globalNativeDAWBridge.initWasmEngine().catch((bridgeErr) => {
+              console.warn('[useAudioEngine] Предупреждение инициализации NativeDAWBridge:', bridgeErr);
+            });
+
+            // Передаем байты WASM модуля в AudioWorklet процессор (используем transfer для эффективности)
+            workletNode.port.postMessage({
+              type: 'INIT_WASM',
+              wasmBytes,
+              sampleRate: ctx.sampleRate || 48000
+            }, [wasmBytes]);
+
+            setIsAudioWorkletActive(true);
+            systemLogger.info('AudioWorklet', 'AudioWorklet-процессор успешно смонтирован и запущен.');
+          } catch (workletErr) {
+            const errMessage = 'Критическая ошибка: C++ ядро не скомпилировано! Скомпилируйте public/wasm/daw_core.wasm через build_wasm.sh.';
+            setError(errMessage);
+            setIsAudioWorkletActive(false);
+            systemLogger.error('AudioWorklet', `Сбой загрузки AudioWorklet: ${errMessage}`, workletErr);
+            throw workletErr;
+          }
+        }
+
+        isInitializedRef.current = true;
+        setIsInitialized(true);
+        systemLogger.info('System', 'Аудиосистема C++ готова к воспроизведению и микшированию.');
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : 'Критическая ошибка: C++ ядро не скомпилировано! Скомпилируйте public/wasm/daw_core.wasm через build_wasm.sh.';
+        setError(errMsg);
+        systemLogger.error('AudioWorklet', `Сбой инициализации аудиосистемы: ${errMsg}`, err, err instanceof Error ? err.stack : undefined);
+      }
+    };
+
+    initPromiseRef.current = doInit().finally(() => {
+      initPromiseRef.current = null;
+    });
+
+    return initPromiseRef.current;
   }, []);
 
   /**
@@ -299,43 +324,35 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
         { trackId, clipId, durationSec, totalFrames, bufferLength: pcmFloat32.length }
       );
 
-      // Отправляем интерливированные Float32Array PCM аудиоданные в AudioWorklet C++ Mixer
+      // Отправляем интерливированные Float32Array PCM аудиоданные в AudioWorklet
       if (workletNodeRef.current) {
-        // Чтобы избежать перегрузки памяти (OOM) при пакетной загрузке, мы ждем подтверждения от ворклера,
-        // прежде чем считать операцию завершенной. Это предотвращает накопление огромных клонированных буферов в очереди MessagePort.
-        
-        return new Promise((resolve, reject) => {
+        return new Promise((resolve) => {
           if (!workletNodeRef.current) {
-            reject(new Error('AudioWorklet is not initialized'));
-            return;
-          }
-
-          const timeout = setTimeout(() => {
-            workletNodeRef.current?.port.removeEventListener('message', handleAck);
-            // Если подтверждение не пришло вовремя, все равно продолжаем, чтобы не блокировать UI навсегда,
-            // но логируем предупреждение.
-            systemLogger.warn('System', `Таймаут подтверждения загрузки клипа #${clipId}. Продолжаем.`);
             resolve({
               durationSec,
               samplesCount: totalFrames,
               pcmData: pcmFloat32
             });
-          }, 5000);
+            return;
+          }
 
-          const handleAck = (e: MessageEvent) => {
-            if (e.data && e.data.type === 'CLIP_LOADED_SUCCESS' && e.data.clipId === clipId) {
-              clearTimeout(timeout);
-              workletNodeRef.current?.port.removeEventListener('message', handleAck);
-              resolve({
-                durationSec,
-                samplesCount: totalFrames,
-                pcmData: pcmFloat32
-              });
-            }
-          };
+          const timeout = setTimeout(() => {
+            pendingClipAcksRef.current.delete(clipId);
+            resolve({
+              durationSec,
+              samplesCount: totalFrames,
+              pcmData: pcmFloat32
+            });
+          }, 3000);
 
-          workletNodeRef.current.port.addEventListener('message', handleAck);
-          workletNodeRef.current.port.start();
+          pendingClipAcksRef.current.set(clipId, () => {
+            clearTimeout(timeout);
+            resolve({
+              durationSec,
+              samplesCount: totalFrames,
+              pcmData: pcmFloat32
+            });
+          });
 
           workletNodeRef.current.port.postMessage({
             type: 'LOAD_TRACK_CLIP',

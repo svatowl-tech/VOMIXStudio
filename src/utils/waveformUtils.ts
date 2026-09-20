@@ -13,43 +13,73 @@ export interface WaveformPeaks {
 }
 
 // Кэш пиков для предотвращения повторных тяжелых расчетов по миллионам сэмплов
-const peakCache = new WeakMap<Float32Array, Map<number, WaveformPeaks>>();
+const peakCache = new WeakMap<Float32Array, Map<string, WaveformPeaks>>();
 
 /**
- * Быстрое извлечение экстремумов (Min/Max Peaks) с кэшированием под разрешение экрана.
- * Использует блочную децимацию для отрисовки за O(pixels), а не O(samples).
+ * Быстрое извлечение экстремумов (Min/Max Peaks) с поддержкой стерео-буферов и кэшированием.
+ * Использует блочную децимацию для отрисовки за O(pixels).
  */
 export function extractPeaks(
   buffer: Float32Array,
   targetPixels: number,
   startSample: number = 0,
-  lengthSamples?: number
+  lengthSamples?: number,
+  isStereo: boolean = true
 ): WaveformPeaks {
-  const totalLength = lengthSamples !== undefined ? Math.min(lengthSamples, buffer.length - startSample) : buffer.length - startSample;
-  if (totalLength <= 0 || targetPixels <= 0) {
+  if (!buffer || buffer.length === 0 || targetPixels <= 0) {
     return { minPeaks: new Float32Array(0), maxPeaks: new Float32Array(0) };
   }
 
-  const numBuckets = Math.max(1, Math.min(targetPixels, totalLength));
-  const samplesPerPixel = totalLength / numBuckets;
+  const stride = isStereo ? 2 : 1;
+  const maxAvailableFrames = Math.floor((buffer.length - startSample * stride) / stride);
+  const totalFrames = lengthSamples !== undefined
+    ? Math.min(lengthSamples, maxAvailableFrames)
+    : maxAvailableFrames;
 
+  if (totalFrames <= 0) {
+    return { minPeaks: new Float32Array(0), maxPeaks: new Float32Array(0) };
+  }
+
+  const numBuckets = Math.max(1, Math.min(targetPixels, totalFrames));
+  
+  // Проверяем кэш пиков для данного буфера
+  const cacheKey = `${startSample}_${totalFrames}_${numBuckets}`;
+  let bufferMap = peakCache.get(buffer);
+  if (!bufferMap) {
+    bufferMap = new Map();
+    peakCache.set(buffer, bufferMap);
+  }
+  const cached = bufferMap.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const framesPerPixel = totalFrames / numBuckets;
   const minPeaks = new Float32Array(numBuckets);
   const maxPeaks = new Float32Array(numBuckets);
 
   for (let px = 0; px < numBuckets; px++) {
-    const bucketStart = Math.floor(startSample + px * samplesPerPixel);
-    const bucketEnd = Math.floor(startSample + (px + 1) * samplesPerPixel);
+    const bucketStartFrame = Math.floor(startSample + px * framesPerPixel);
+    const bucketEndFrame = Math.floor(startSample + (px + 1) * framesPerPixel);
 
     let min = 1.0;
     let max = -1.0;
 
-    // Быстрый поиск экстремумов с шагом прореживания при сильном удалении
-    const step = Math.max(1, Math.floor((bucketEnd - bucketStart) / 100));
+    // Быстрый поиск экстремумов: максимум 64 точки на пиксель
+    const bucketFrameCount = Math.max(1, bucketEndFrame - bucketStartFrame);
+    const stepFrames = Math.max(1, Math.floor(bucketFrameCount / 64));
 
-    for (let i = bucketStart; i < bucketEnd; i += step) {
-      const sample = buffer[i];
-      if (sample < min) min = sample;
-      if (sample > max) max = sample;
+    for (let f = bucketStartFrame; f < bucketEndFrame; f += stepFrames) {
+      const idx = f * stride;
+      if (idx >= buffer.length) break;
+      const sL = buffer[idx];
+      let s = sL;
+      if (isStereo && idx + 1 < buffer.length) {
+        const sR = buffer[idx + 1];
+        s = Math.abs(sL) > Math.abs(sR) ? sL : sR;
+      }
+      if (s < min) min = s;
+      if (s > max) max = s;
     }
 
     if (min > max) {
@@ -61,7 +91,14 @@ export function extractPeaks(
     maxPeaks[px] = max;
   }
 
-  return { minPeaks, maxPeaks };
+  const result: WaveformPeaks = { minPeaks, maxPeaks };
+  // Ограничиваем размер кэша
+  if (bufferMap.size > 200) {
+    bufferMap.clear();
+  }
+  bufferMap.set(cacheKey, result);
+
+  return result;
 }
 
 /**

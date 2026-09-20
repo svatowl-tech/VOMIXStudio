@@ -28,6 +28,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
     this.masterLimiterEnabled = true;
     this.masterLimiterCeilingDb = -0.1;
     this.isWasmFallback = false;
+    this.useJsMixer = false;
 
     // C++ WebAssembly указатели и модуль
     this.wasmModule = null;
@@ -222,38 +223,60 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         });
 
         if (!this.isWasmFallback && this.wasmModule && this.mixerPtr && pcmBuffer.length > 0) {
-          const mallocFn = this.wasmModule._malloc || this.wasmModule.malloc || this.wasmModule.allocateAudioBuffer;
-          const freeFn = this.wasmModule._free || this.wasmModule.free || this.wasmModule.freeAudioBuffer;
-          const addClipFn = this.wasmModule.addClipToTrack || this.wasmModule._addClipToTrack;
-          const key = `${trackId}:${clipId}`;
+          try {
+            // Если размер одного клипа превышает 12 МБ (около 1.5 млн сэмплов стерео),
+            // переключаемся на JS DSP микшер, чтобы не переполнять 32-битную WASM-кучу (лимит 256 МБ).
+            if (pcmBuffer.length * 4 > 12000000) {
+              this.useJsMixer = true;
+            } else {
+              const mallocFn = this.wasmModule._malloc || this.wasmModule.malloc || this.wasmModule.allocateAudioBuffer;
+              const freeFn = this.wasmModule._free || this.wasmModule.free || this.wasmModule.freeAudioBuffer;
+              const addClipFn = this.wasmModule.addClipToTrack || this.wasmModule._addClipToTrack;
+              const key = `${trackId}:${clipId}`;
 
-          if (this.clipAllocations.has(key) && freeFn) {
-            freeFn(this.clipAllocations.get(key));
-          }
+              if (this.clipAllocations.has(key) && freeFn) {
+                try {
+                  freeFn(this.clipAllocations.get(key));
+                } catch (e) {}
+              }
 
-          if (mallocFn) {
-            const pcmPtr = mallocFn(pcmBuffer.length * 4);
-            this.clipAllocations.set(key, pcmPtr);
+              if (mallocFn) {
+                const pcmPtr = mallocFn(pcmBuffer.length * 4);
+                if (pcmPtr && pcmPtr > 0 && pcmPtr !== 9999) {
+                  this.clipAllocations.set(key, pcmPtr);
 
-            const heapF32 = new Float32Array(this.wasmMemory.buffer);
-            heapF32.set(pcmBuffer, pcmPtr >> 2);
+                  const heapF32 = new Float32Array(this.wasmMemory.buffer);
+                  const floatOffset = pcmPtr >> 2;
+                  if (floatOffset + pcmBuffer.length <= heapF32.length) {
+                    heapF32.set(pcmBuffer, floatOffset);
 
-            if (addClipFn) {
-              addClipFn(
-                this.mixerPtr,
-                trackId,
-                clipId,
-                pcmPtr,
-                pcmBuffer.length,
-                offsetSamples,
-                lengthSamples,
-                gain,
-                pan,
-                fadeIn,
-                fadeOut,
-                isStereo
-              );
+                    if (addClipFn) {
+                      addClipFn(
+                        this.mixerPtr,
+                        trackId,
+                        clipId,
+                        pcmPtr,
+                        pcmBuffer.length,
+                        offsetSamples,
+                        lengthSamples,
+                        gain,
+                        pan,
+                        fadeIn,
+                        fadeOut,
+                        isStereo
+                      );
+                    }
+                  } else {
+                    this.useJsMixer = true;
+                  }
+                } else {
+                  this.useJsMixer = true;
+                }
+              }
             }
+          } catch (clipErr) {
+            console.warn('[AudioEngineProcessor] Переключение на JS DSP микшер из-за ошибки выделения памяти C++:', clipErr);
+            this.useJsMixer = true;
           }
         }
 
@@ -619,8 +642,8 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
     const rightOut = output[1] || leftOut;
     const numFrames = leftOut.length; // 128
 
-    // 1. Если активирован JS Fallback режим, используем резервный JS DSP микшер
-    if (this.isWasmFallback) {
+    // 1. Если активирован JS Fallback режим или буферы слишком велики для WASM кучи, используем JS DSP микшер
+    if (this.isWasmFallback || this.useJsMixer) {
       if (!this.isPlaying) {
         leftOut.fill(0);
         if (rightOut !== leftOut) rightOut.fill(0);
@@ -646,6 +669,8 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         }
       }
 
+      const trackTelemetry = [];
+
       // Микшируем каждый трек
       for (const [trackId, track] of this.jsTracks.entries()) {
         if (track.mute) continue;
@@ -655,6 +680,9 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         const trackPan = track.pan; // -1.0 to 1.0
         const panL = Math.min(1.0, 1.0 - trackPan);
         const panR = Math.min(1.0, 1.0 + trackPan);
+
+        let tPeakL = 0;
+        let tPeakR = 0;
 
         for (const clip of track.clips.values()) {
           const clipStart = clip.offsetSamples;
@@ -710,15 +738,30 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
               }
             }
 
+            const outTrackL = sL * trackVolLinear * panL;
+            const outTrackR = sR * trackVolLinear * panR;
+
+            if (Math.abs(outTrackL) > tPeakL) tPeakL = Math.abs(outTrackL);
+            if (Math.abs(outTrackR) > tPeakR) tPeakR = Math.abs(outTrackR);
+
             // Применяем панорамирование и громкость трека, микшируем в итоговый блок
-            leftOut[blockOffset] += sL * trackVolLinear * panL;
+            leftOut[blockOffset] += outTrackL;
             if (rightOut !== leftOut) {
-              rightOut[blockOffset] += sR * trackVolLinear * panR;
+              rightOut[blockOffset] += outTrackR;
             } else {
-              leftOut[blockOffset] += sR * trackVolLinear * panR;
+              leftOut[blockOffset] += outTrackR;
             }
           }
         }
+
+        trackTelemetry.push({
+          trackId,
+          peakL: tPeakL,
+          peakR: tPeakR,
+          rmsL: 0,
+          rmsR: 0,
+          clipped: tPeakL >= 0.999 || tPeakR >= 0.999
+        });
       }
 
       // Применяем мастер-громкость и мастер-лимитер
@@ -733,7 +776,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         let outL = leftOut[i] * masterVolLinear;
         let outR = (rightOut !== leftOut ? rightOut[i] : leftOut[i]) * masterVolLinear;
 
-        // Мастер-лимитер (простой мягкий лимитер/клиппер)
+        // Мастер-лимитер (мягкий лимитер)
         if (this.masterLimiterEnabled) {
           const absL = Math.abs(outL);
           const absR = Math.abs(outR);
@@ -769,7 +812,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       // Телеметрия
       this.meterFrameCounter++;
       if (this.meterFrameCounter >= this.meterReportInterval) {
-        this.sendTelemetryMeters([], masterPeakL, masterPeakR, isClipped);
+        this.sendTelemetryMeters(trackTelemetry, masterPeakL, masterPeakR, isClipped);
         this.meterFrameCounter = 0;
       }
 
@@ -804,44 +847,52 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       return true;
     }
 
-    // Процессинг происходит ТОЛЬКО через C++ инстанс микшера
-    this.wasmModule.processMixer(this.mixerPtr, this.outBufferPtr, numFrames);
+    // Процессинг через C++ инстанс микшера с защитой от сбоев
+    try {
+      this.wasmModule.processMixer(this.mixerPtr, this.outBufferPtr, numFrames);
 
-    // Прямое копирование сэмплов из виртуальной кучи C++ WASM в аудиокарту
-    const floatOffset = this.outBufferPtr >> 2;
-    const heapF32 = new Float32Array(this.wasmMemory.buffer);
+      // Прямое копирование сэмплов из виртуальной кучи C++ WASM в аудиокарту
+      const floatOffset = this.outBufferPtr >> 2;
+      const heapF32 = new Float32Array(this.wasmMemory.buffer);
 
-    let masterPeakL = 0;
-    let masterPeakR = 0;
-    let isClipped = false;
+      let masterPeakL = 0;
+      let masterPeakR = 0;
+      let isClipped = false;
 
-    for (let i = 0; i < numFrames; i++) {
-      const sL = heapF32[floatOffset + i * 2];
-      const sR = heapF32[floatOffset + i * 2 + 1];
+      for (let i = 0; i < numFrames; i++) {
+        const sL = heapF32[floatOffset + i * 2];
+        const sR = heapF32[floatOffset + i * 2 + 1];
 
-      leftOut[i] = sL;
-      if (rightOut !== leftOut) {
-        rightOut[i] = sR;
+        leftOut[i] = sL;
+        if (rightOut !== leftOut) {
+          rightOut[i] = sR;
+        }
+
+        const absL = Math.abs(sL);
+        const absR = Math.abs(sR);
+        if (absL > masterPeakL) masterPeakL = absL;
+        if (absR > masterPeakR) masterPeakR = absR;
+        if (absL >= 0.999 || absR >= 0.999) isClipped = true;
       }
 
-      const absL = Math.abs(sL);
-      const absR = Math.abs(sR);
-      if (absL > masterPeakL) masterPeakL = absL;
-      if (absR > masterPeakR) masterPeakR = absR;
-      if (absL >= 0.999 || absR >= 0.999) isClipped = true;
+      // Продвижение таймлайна
+      this.currentTimelineSample += numFrames;
+
+      // Телеметрия индикаторов
+      this.meterFrameCounter++;
+      if (this.meterFrameCounter >= this.meterReportInterval) {
+        this.sendTelemetryMeters([], masterPeakL, masterPeakR, isClipped);
+        this.meterFrameCounter = 0;
+      }
+
+      return true;
+    } catch (wasmErr) {
+      console.warn('[AudioEngineProcessor] Ошибка C++ микшера в process(), переключаемся на JS DSP:', wasmErr);
+      this.useJsMixer = true;
+      leftOut.fill(0);
+      if (rightOut !== leftOut) rightOut.fill(0);
+      return true;
     }
-
-    // Продвижение таймлайна
-    this.currentTimelineSample += numFrames;
-
-    // Телеметрия индикаторов
-    this.meterFrameCounter++;
-    if (this.meterFrameCounter >= this.meterReportInterval) {
-      this.sendTelemetryMeters([], masterPeakL, masterPeakR, isClipped);
-      this.meterFrameCounter = 0;
-    }
-
-    return true;
   }
 
   /**

@@ -1723,6 +1723,11 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                     const fadeInPx = (clip.fadeInSamples / clip.lengthSamples) * clipWidthPx;
                     const fadeOutPx = (clip.fadeOutSamples / clip.lengthSamples) * clipWidthPx;
 
+                    const rawColor = clip.color || track.color || '#06b6d4';
+                    const safeClipColor = (!rawColor || rawColor.toLowerCase() === '#ffffff' || rawColor.toLowerCase() === '#fff' || rawColor.toLowerCase() === 'white')
+                      ? '#06b6d4'
+                      : rawColor;
+
                     return (
                       <div
                         key={clip.id}
@@ -1730,8 +1735,8 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                         style={{
                           left: `${clipLeftPx}px`,
                           width: `${clipWidthPx}px`,
-                          backgroundColor: `${clip.color}18`,
-                          borderColor: isSelected ? '#38bdf8' : `${clip.color}80`
+                          backgroundColor: `${safeClipColor}18`,
+                          borderColor: isSelected ? '#38bdf8' : `${safeClipColor}80`
                         }}
                         className={`absolute top-1 bottom-1 rounded-lg border text-xs overflow-hidden group shadow-lg cursor-grab active:cursor-grabbing transition-all ${
                           isSelected ? 'ring-2 ring-cyan-400 shadow-cyan-950/60 z-20' : 'z-10'
@@ -1743,7 +1748,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                             buffer={clip.buffer}
                             width={clipWidthPx}
                             height={70}
-                            color={clip.color}
+                            color={safeClipColor}
                             gain={clip.gain}
                             fadeInSamples={clip.fadeInSamples}
                             fadeOutSamples={clip.fadeOutSamples}
