@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { TrackState, ClipConfig } from '../audio/dawEngine';
 import { SubtitleCue } from '../services/ProjectManager';
+import { ClipCollisionInfo } from '../utils/collisionDetector';
 import { WaveformCanvas } from './WaveformCanvas';
 import { formatSMPTE, formatCompactTime, getAdaptiveTimeStep } from '../utils/waveformUtils';
 import { globalNativeDAWBridge } from '../services/NativeDAWBridge';
@@ -58,6 +59,8 @@ export interface TimelineViewProps {
   subtitles?: SubtitleCue[];
   onUpdateSubtitles?: (cues: SubtitleCue[]) => void;
   onSelectCue?: (cue: SubtitleCue) => void;
+  // Коллизии для подсветки на таймлайне
+  collisions?: ClipCollisionInfo[];
 }
 
 type DragMode =
@@ -109,7 +112,8 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   onTogglePlay,
   subtitles: externalSubtitles,
   onUpdateSubtitles: externalOnUpdateSubtitles,
-  onSelectCue
+  onSelectCue,
+  collisions = []
 }) => {
   const sampleRate = 48000;
   const tracksRef = useRef<TrackState[]>(tracks);
@@ -1728,6 +1732,8 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                       ? '#06b6d4'
                       : rawColor;
 
+                    const isColliding = collisions.some((c) => c.clipAId === clip.id || c.clipBId === clip.id);
+
                     return (
                       <div
                         key={clip.id}
@@ -1735,11 +1741,15 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                         style={{
                           left: `${clipLeftPx}px`,
                           width: `${clipWidthPx}px`,
-                          backgroundColor: `${safeClipColor}18`,
-                          borderColor: isSelected ? '#38bdf8' : `${safeClipColor}80`
+                          backgroundColor: isColliding ? '#88133740' : `${safeClipColor}18`,
+                          borderColor: isColliding ? '#f43f5e' : isSelected ? '#38bdf8' : `${safeClipColor}80`
                         }}
                         className={`absolute top-1 bottom-1 rounded-lg border text-xs overflow-hidden group shadow-lg cursor-grab active:cursor-grabbing transition-all ${
-                          isSelected ? 'ring-2 ring-cyan-400 shadow-cyan-950/60 z-20' : 'z-10'
+                          isColliding
+                            ? 'ring-2 ring-rose-500 shadow-rose-950/80 z-30 animate-pulse'
+                            : isSelected
+                            ? 'ring-2 ring-cyan-400 shadow-cyan-950/60 z-20'
+                            : 'z-10'
                         } ${activeTool === 'razor' ? 'cursor-crosshair' : ''}`}
                       >
                         {/* Волновой спектр клипа */}
@@ -1763,6 +1773,12 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                           </span>
 
                           <div className="flex items-center gap-1">
+                            {isColliding && (
+                              <span className="bg-rose-600 text-white px-1.5 py-0.2 rounded text-[9px] font-bold flex items-center gap-0.5 animate-bounce shadow-md">
+                                <AlertCircle size={10} />
+                                НАЕЗД
+                              </span>
+                            )}
                             {/* Индикатор Time Stretch (если дорожка подогнана по времени) */}
                             {clip.timeStretchRatio && Math.abs(clip.timeStretchRatio - 1.0) > 0.01 && (
                               <span className="bg-amber-950/80 border border-amber-600/60 text-amber-300 px-1 py-0.2 rounded text-[9px] font-bold">

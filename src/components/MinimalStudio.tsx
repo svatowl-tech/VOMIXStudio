@@ -70,6 +70,8 @@ import { MasterSection } from './MasterSection';
 import { DubbingAIStudio } from './DubbingAIStudio';
 import { SubtitleCue } from '../services/ProjectManager';
 import { formatSMPTE } from '../utils/waveformUtils';
+import { VoiceoverMixWizardModal } from './VoiceoverMixWizardModal';
+import { ClipCollisionInfo } from '../utils/collisionDetector';
 
 export const MinimalStudio: React.FC = () => {
   // --- 1. Аудиодвижок DAW и AudioWorklet ---
@@ -165,6 +167,8 @@ export const MinimalStudio: React.FC = () => {
   const [loudnessMatchReport, setLoudnessMatchReport] = useState<string | null>(null);
   const [showMediaImportModal, setShowMediaImportModal] = useState<boolean>(false);
   const [subtitles, setSubtitles] = useState<SubtitleCue[]>([]);
+  const [isWizardOpen, setIsWizardOpen] = useState<boolean>(false);
+  const [detectedCollisions, setDetectedCollisions] = useState<ClipCollisionInfo[]>([]);
 
   // Refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -1259,7 +1263,7 @@ export const MinimalStudio: React.FC = () => {
     setTimeout(() => setLoudnessMatchReport(null), 8000);
   };
 
-  // --- 11. Сквозной рабочий процесс «Свести и сохранить готовое видео» в один клик ---
+  // --- 11. Сквозной конвейер «Закадровый Мастер Сведения» (Interactive Wizard) ---
   const handleExportAndMuxVideo = async () => {
     // Краевой случай 1: Отсутствие видеофайла
     if (!videoFile) {
@@ -1280,140 +1284,100 @@ export const MinimalStudio: React.FC = () => {
       return;
     }
 
+    // Открываем пошаговый интерактивный конвейер
+    setIsWizardOpen(true);
+  };
+
+  // Коллбэк Шага 1 Wizard: AI Очистка и EBU R128 Нормализация
+  const handleRunAIPipelineAndNorm = async (): Promise<TrackState[]> => {
+    const normResult = performLoudnessMatching(tracks, -18.0, -1.0);
+    const normalizedTracks = normResult.updatedTracks;
+    setTracks(normalizedTracks);
+    const summary = normResult.adjustments
+      .map((a) => `${a.trackName}: ${a.gainChangeDb >= 0 ? '+' : ''}${a.gainChangeDb} dB`)
+      .join(' | ');
+    setLoudnessMatchReport(`C++ выравнивание громкости (-18 dBFS): ${summary}`);
+    return normalizedTracks;
+  };
+
+  // Коллбэк Шага 4 Wizard: Финальный Мастеринг и FFmpeg Muxing
+  const handleRunFinalMasterAndMux = async (
+    updatedTracks: TrackState[],
+    updatedVocalBus: VocalBusState
+  ): Promise<{ videoBlob: Blob | null; videoUrl: string | null; outputFileName: string }> => {
     setIsExporting(true);
     setExportedVideoBlob(null);
     setExportedVideoUrl(null);
-    setStatusMessage('Запуск сквозного C++ конвейера сведения и муксинга...');
-    systemLogger.info('RenderManager', `Старт сквозного процесса сведения (MVP) для ${videoFile ? `[${videoFile.name}]` : 'Мастер-аудио'}...`, {
-      videoSize: videoFile?.size || 0,
-      videoDuration,
-      tracksCount: tracks.length
+
+    const renderDuration = videoDuration > 0 ? videoDuration : undefined;
+    const renderResult = await globalRenderManager.renderMasterMix(
+      updatedTracks,
+      master,
+      48000,
+      24,
+      renderDuration
+    );
+
+    // Сохраняем мастер-микс WAV в папку project/ через File System Access API
+    await globalProjectManager.saveRenderedAsset('master_mix.wav', renderResult.wavBlob, true);
+
+    if (!videoFile) {
+      const audioUrl = URL.createObjectURL(renderResult.wavBlob);
+      setIsExporting(false);
+      return {
+        videoBlob: renderResult.wavBlob,
+        videoUrl: audioUrl,
+        outputFileName: 'master_mix.wav'
+      };
+    }
+
+    const timelineHasOriginalAudio = updatedTracks.some(
+      (t) =>
+        (t.name.toLowerCase().includes('видео') ||
+          t.name.toLowerCase().includes('video') ||
+          t.name.toLowerCase().includes('оригинал')) &&
+        t.clips &&
+        t.clips.length > 0 &&
+        !t.mute
+    );
+
+    const outputFileName = `mixed_${videoFile.name.replace(/\.[^/.]+$/, '')}.mp4`;
+    const finalVideoBlob = await globalRenderManager.muxAudioIntoVideo(
+      videoFile,
+      renderResult.wavBlob,
+      outputFileName,
+      { timelineHasOriginalAudio }
+    );
+
+    if (!finalVideoBlob) {
+      throw new Error('FFmpeg WebAssembly не смог сформировать выходной видеофайл.');
+    }
+
+    setExportedVideoBlob(finalVideoBlob);
+    const finalUrl = URL.createObjectURL(finalVideoBlob);
+    setExportedVideoUrl(finalUrl);
+
+    // Сохраняем готовый MP4 в подпапку project/ и корень
+    await globalProjectManager.saveRenderedAsset(outputFileName, finalVideoBlob, true);
+    await globalProjectManager.saveRenderedAsset(outputFileName, finalVideoBlob, false);
+
+    // Кэшируем ассет в SQL БД
+    await AssetDatabase.getInstance().saveAsset({
+      id: `render_${Date.now()}`,
+      name: outputFileName,
+      type: 'render',
+      mimeType: 'video/mp4',
+      sizeBytes: finalVideoBlob.size,
+      timestamp: Date.now(),
+      blob: finalVideoBlob
     });
 
-    try {
-      // 0% -> 30%: C++ DSP & Loudness Matching
-      setExportProgress({
-        stage: 'rendering_audio',
-        progressPercent: 10,
-        message: 'Шаг 1/4 (0% → 30%): C++ DSP подготовка и нормализация громкости (-18 dBFS)...',
-        logs: ['[Шаг 1] Выравнивание громкости и инициализация WASM SIMD памяти']
-      });
-
-      const normResult = performLoudnessMatching(tracks, -18.0, -1.0);
-      const normalizedTracks = normResult.updatedTracks;
-      setTracks(normalizedTracks);
-
-      setExportProgress({
-        stage: 'rendering_audio',
-        progressPercent: 30,
-        message: 'Шаг 2/4 (30%): C++ BatchOfflineRenderer (100x DSP) & RIFF WAV упаковка...',
-        logs: ['[Шаг 2] Высокоскоростное суммирование клипов, фейдов и оффсетов в C++ ядре']
-      });
-
-      const renderDuration = videoDuration > 0 ? videoDuration : undefined;
-      const renderResult = await globalRenderManager.renderMasterMix(
-        normalizedTracks,
-        master,
-        48000,
-        24,
-        renderDuration
-      );
-
-      // Сохраняем мастер-микс WAV в папку project/ через File System Access API
-      await globalProjectManager.saveRenderedAsset('master_mix.wav', renderResult.wavBlob, true);
-
-      // Если видео нет — отдаем готовый мастер WAV
-      if (!videoFile) {
-        setExportProgress({
-          stage: 'completed',
-          progressPercent: 100,
-          message: 'Готово! Мастер-микс WAV (48 кГц / 24-bit) успешно сведен и сохранен в папку проекта.',
-          logs: ['Мастер-файл master_mix.wav сохранен в project/']
-        });
-        setStatusMessage('Мастер-микс WAV успешно сведен и сохранен в project/!');
-        return;
-      }
-
-      // 30% -> 70%: FFmpeg WASM Muxing
-      setExportProgress({
-        stage: 'muxing_video',
-        progressPercent: 70,
-        message: 'Шаг 3/4 (70%): FFmpeg WASM муксинг (-c:v copy -c:a aac -b:a 320k)...',
-        logs: ['[Шаг 3] Подмена оригинального аудиопотока в видеофайле без перекодирования картинки']
-      });
-
-      const timelineHasOriginalAudio = tracks.some(
-        (t) =>
-          (t.name.toLowerCase().includes('видео') ||
-            t.name.toLowerCase().includes('video') ||
-            t.name.toLowerCase().includes('оригинал')) &&
-          t.clips &&
-          t.clips.length > 0 &&
-          !t.mute
-      );
-
-      const outputFileName = `mixed_${videoFile.name.replace(/\.[^/.]+$/, '')}.mp4`;
-      const finalVideoBlob = await globalRenderManager.muxAudioIntoVideo(
-        videoFile,
-        renderResult.wavBlob,
-        outputFileName,
-        { timelineHasOriginalAudio }
-      );
-
-      if (!finalVideoBlob) {
-        throw new Error('FFmpeg WebAssembly не смог сформировать выходной видеофайл.');
-      }
-
-      setExportedVideoBlob(finalVideoBlob);
-      const finalUrl = URL.createObjectURL(finalVideoBlob);
-      setExportedVideoUrl(finalUrl);
-
-      // 70% -> 100%: Запись в подпапку project/ через File System Access API
-      setExportProgress({
-        stage: 'completed',
-        progressPercent: 95,
-        message: 'Шаг 4/4 (95% → 100%): Запись готового MP4 в подпапку project/ (File System Access API)...',
-        logs: [`[Шаг 4] Прямая запись ${outputFileName} в хранилище проекта`]
-      });
-
-      // Сохраняем в подпапку project/
-      await globalProjectManager.saveRenderedAsset(outputFileName, finalVideoBlob, true);
-      // И в корень для быстрого доступа
-      await globalProjectManager.saveRenderedAsset(outputFileName, finalVideoBlob, false);
-
-      // Кэшируем ассет рендера в локальную SQL базу данных
-      await AssetDatabase.getInstance().saveAsset({
-        id: `render_${Date.now()}`,
-        name: outputFileName,
-        type: 'render',
-        mimeType: 'video/mp4',
-        sizeBytes: finalVideoBlob.size,
-        timestamp: Date.now(),
-        blob: finalVideoBlob
-      });
-      AssetDatabase.getInstance().getStats().then(setDbStats).catch(console.error);
-
-      setExportProgress({
-        stage: 'completed',
-        progressPercent: 100,
-        message: `Готово! Видео успешно сведено и сохранено: ${outputFileName}`,
-        logs: [`Файл ${outputFileName} (${(finalVideoBlob.size / (1024 * 1024)).toFixed(2)} МБ) готов к просмотру.`]
-      });
-      setStatusMessage(`Видео [${outputFileName}] успешно сведено и сохранено в project/!`);
-      systemLogger.info('RenderManager', `Сквозной процесс завершен: ${outputFileName} (${Math.round(finalVideoBlob.size / 1024)} КБ)`);
-    } catch (err: any) {
-      console.error('Ошибка сквозного сведения и муксинга:', err);
-      systemLogger.error('RenderManager', `Сбой сквозного конвейера: ${err?.message || err}`, err, err instanceof Error ? err.stack : undefined);
-      setExportProgress({
-        stage: 'error',
-        progressPercent: 0,
-        message: `Ошибка сведения: ${err.message}`,
-        logs: [`[Error] ${err.message}`]
-      });
-      setStatusMessage(`Сбой сведения: ${err.message}`);
-    } finally {
-      setIsExporting(false);
-    }
+    setIsExporting(false);
+    return {
+      videoBlob: finalVideoBlob,
+      videoUrl: finalUrl,
+      outputFileName
+    };
   };
 
   // Покадровый шаг видео
@@ -1805,6 +1769,7 @@ export const MinimalStudio: React.FC = () => {
           onTogglePlay={togglePlay}
           subtitles={subtitles}
           onUpdateSubtitles={setSubtitles}
+          collisions={detectedCollisions}
         />
       </div>
 
@@ -2231,6 +2196,26 @@ export const MinimalStudio: React.FC = () => {
         onImportVideo={handleModalImportVideo}
         onImportAudioTrack={handleModalImportAudioTrack}
         onImportSubtitles={handleModalImportSubtitles}
+      />
+
+      {/* Пошаговый интерактивный конвейер сведения закадрового дубляжа */}
+      <VoiceoverMixWizardModal
+        isOpen={isWizardOpen}
+        onClose={() => setIsWizardOpen(false)}
+        tracks={tracks}
+        setTracks={setTracks}
+        vocalBus={vocalBus}
+        setVocalBus={setVocalBus}
+        master={master}
+        videoFile={videoFile}
+        videoDuration={videoDuration}
+        currentTimeSec={currentTimeSec}
+        isPlaying={isPlaying}
+        onTogglePlay={togglePlay}
+        onSeek={seek}
+        onRunAIPipelineAndNorm={handleRunAIPipelineAndNorm}
+        onRunFinalMasterAndMux={handleRunFinalMasterAndMux}
+        onCollisionsDetected={setDetectedCollisions}
       />
     </div>
   );
