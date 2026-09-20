@@ -5,6 +5,7 @@ import {
   VSTPluginCategory
 } from '../audio/vstTypes';
 import { globalVSTHostEngine } from '../services/VSTHostEngine';
+import { VSTGraphicalUIWindow } from './VSTGraphicalUIWindow';
 import {
   Layers,
   Plus,
@@ -313,176 +314,55 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
         </div>
       )}
 
-      {/* Floating VST Plugin Parameters GUI Modal */}
+      {/* Floating Dedicated VST Plugin Graphical Window (GUI) Modal */}
       {activePluginModal && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fadeIn">
-          <div className="bg-[#0f1422] border border-cyan-500/30 rounded-2xl max-w-xl w-full max-h-[85vh] flex flex-col shadow-2xl overflow-hidden">
-            {/* Modal Header */}
-            {(() => {
-              const def = globalVSTHostEngine.getPluginById(activePluginModal.pluginId);
-              return (
-                <div className="p-4 border-b border-slate-800 bg-slate-900/80 flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 bg-cyan-500/10 border border-cyan-500/20 rounded-xl text-cyan-400">
-                      <SlidersHorizontal size={18} />
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <h3 className="text-sm font-bold text-slate-100">{def?.name || activePluginModal.pluginId}</h3>
-                        <span className="text-[10px] px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-300 font-mono border border-cyan-500/30">
-                          {def?.format || 'VST3'}
-                        </span>
-                        <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-slate-400 font-mono">
-                          {def?.vendor}
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-slate-400 mt-0.5">{def?.description}</p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => {
-                        onUpdateBypass(activePluginModal.instanceId, !activePluginModal.enabled);
-                        setActivePluginModal({
-                          ...activePluginModal,
-                          enabled: !activePluginModal.enabled
-                        });
-                      }}
-                      className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all ${
-                        activePluginModal.enabled
-                          ? 'bg-emerald-600/20 text-emerald-400 border border-emerald-500/30'
-                          : 'bg-slate-800 text-slate-400 border border-slate-700'
-                      }`}
-                    >
-                      <Power size={12} />
-                      {activePluginModal.enabled ? 'Active' : 'Bypassed'}
-                    </button>
-
-                    <button
-                      onClick={() => setActivePluginModal(null)}
-                      className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800"
-                    >
-                      <X size={18} />
-                    </button>
-                  </div>
-                </div>
-              );
-            })()}
-
-            {/* Modal Body: Wet/Dry & Parameter Sliders */}
-            <div className="p-5 overflow-y-auto space-y-5 custom-scrollbar flex-1">
-              {/* Global Wet/Dry */}
-              <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800/80 space-y-2">
-                <div className="flex justify-between text-xs">
-                  <span className="text-slate-300 font-semibold flex items-center gap-1.5">
-                    <Volume2 size={13} className="text-cyan-400" /> Wet / Dry Mix
-                  </span>
-                  <span className="font-mono text-cyan-400 font-bold">
-                    {Math.round((activePluginModal.wetDry ?? 1.0) * 100)}%
-                  </span>
-                </div>
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.01"
-                  value={activePluginModal.wetDry ?? 1.0}
-                  onChange={(e) => {
-                    const val = parseFloat(e.target.value);
-                    onUpdateWetDry(activePluginModal.instanceId, val);
-                    setActivePluginModal({
-                      ...activePluginModal,
-                      wetDry: val
-                    });
-                  }}
-                  className="w-full accent-cyan-500 h-1.5 bg-slate-800 rounded-lg cursor-pointer"
-                />
-              </div>
-
-              {/* Dynamic Plugin Parameter Knobs/Sliders */}
-              {(() => {
-                const def = globalVSTHostEngine.getPluginById(activePluginModal.pluginId);
-                if (!def || !def.parameters || def.parameters.length === 0) {
-                  return (
-                    <div className="text-center py-6 text-xs text-slate-500">
-                      У данного плагина нет настраиваемых параметров.
-                    </div>
-                  );
-                }
-
-                return (
-                  <div className="space-y-3">
-                    <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
-                      <Sliders size={13} className="text-emerald-400" /> Параметры обработки DSP
-                    </h4>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      {def.parameters.map((param) => {
-                        const currentVal = activePluginModal.parameters?.[param.id] ?? param.defaultValue;
-
-                        return (
-                          <div
-                            key={param.id}
-                            className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-2"
-                          >
-                            <div className="flex justify-between text-xs">
-                              <span className="text-slate-300 font-medium truncate max-w-[140px]" title={param.name}>
-                                {param.name}
-                              </span>
-                              <span className="font-mono text-emerald-400 font-semibold text-[11px]">
-                                {typeof currentVal === 'number' ? currentVal.toFixed(param.step && param.step < 1 ? 1 : 0) : currentVal} {param.unit}
-                              </span>
-                            </div>
-
-                            <input
-                              type="range"
-                              min={param.min}
-                              max={param.max}
-                              step={param.step || (param.max - param.min) / 100}
-                              value={currentVal}
-                              onChange={(e) => {
-                                const val = parseFloat(e.target.value);
-                                onUpdateParam(activePluginModal.instanceId, param.id, val);
-                                setActivePluginModal({
-                                  ...activePluginModal,
-                                  parameters: {
-                                    ...activePluginModal.parameters,
-                                    [param.id]: val
-                                  }
-                                });
-                              }}
-                              className="w-full accent-emerald-500 h-1.5 bg-slate-800 rounded-lg cursor-pointer"
-                            />
-
-                            <div className="flex justify-between text-[9px] text-slate-600 font-mono">
-                              <span>{param.min} {param.unit}</span>
-                              <span>{param.max} {param.unit}</span>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>
-
-            {/* Modal Footer */}
-            <div className="p-4 border-t border-slate-800 bg-slate-900/60 flex justify-between items-center text-xs">
-              <span className="text-slate-400 text-[11px] font-mono">
-                Latency: {globalVSTHostEngine.getPluginById(activePluginModal.pluginId)?.latencySamples || 0} smp
-              </span>
-
-              <button
-                onClick={() => setActivePluginModal(null)}
-                className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white font-bold rounded-xl transition-all cursor-pointer"
-              >
-                Закрыть
-              </button>
-            </div>
-          </div>
-        </div>
+        <VSTGraphicalUIWindow
+          instance={activePluginModal}
+          onClose={() => setActivePluginModal(null)}
+          onUpdateParam={(instId, paramId, val) => {
+            onUpdateParam(instId, paramId, val);
+            setActivePluginModal((prev) =>
+              prev && prev.instanceId === instId
+                ? {
+                    ...prev,
+                    parameters: {
+                      ...prev.parameters,
+                      [paramId]: val
+                    }
+                  }
+                : prev
+            );
+          }}
+          onUpdateBypass={(instId, enabled) => {
+            onUpdateBypass(instId, enabled);
+            setActivePluginModal((prev) =>
+              prev && prev.instanceId === instId
+                ? {
+                    ...prev,
+                    enabled
+                  }
+                : prev
+            );
+          }}
+          onUpdateWetDry={(instId, wetDry) => {
+            onUpdateWetDry(instId, wetDry);
+            setActivePluginModal((prev) =>
+              prev && prev.instanceId === instId
+                ? {
+                    ...prev,
+                    wetDry
+                  }
+                : prev
+            );
+          }}
+          onApplyPreset={(instId, presetId) => {
+            const updated = globalVSTHostEngine.applyPresetToInstance(activePluginModal, presetId);
+            Object.entries(updated.parameters).forEach(([paramId, val]) => {
+              onUpdateParam(instId, paramId, val);
+            });
+            setActivePluginModal(updated);
+          }}
+        />
       )}
     </div>
   );

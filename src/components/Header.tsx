@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Sliders, Cpu, Terminal, Sparkles, Volume2, FolderKanban, PlaySquare, AlertCircle, Upload, Plus, Layers } from 'lucide-react';
+import { Sliders, Sparkles, PlaySquare, Upload, Layers } from 'lucide-react';
 import { systemLogger } from '../services/SystemLogger';
 
 export type NavigationTab = 'minimal' | 'studio' | 'vst' | 'project' | 'video' | 'ai-dubbing' | 'export' | 'cpp' | 'emcc' | 'console';
@@ -56,133 +56,42 @@ export const Header: React.FC<HeaderProps> = ({ activeTab, onSelectTab, onOpenIm
 
           {/* Tab Navigation */}
           <nav className="flex flex-wrap items-center gap-1.5 bg-slate-900 p-1 rounded-xl border border-slate-800">
-          <button
-            onClick={() => onSelectTab('minimal')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
-              activeTab === 'minimal'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <PlaySquare size={14} />
-            MVP Пайплайн
-          </button>
+            <button
+              onClick={() => onSelectTab('minimal')}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
+                activeTab === 'minimal'
+                  ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30 font-bold'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              }`}
+            >
+              <PlaySquare size={14} />
+              MVP Пайплайн
+            </button>
 
-          <button
-            onClick={() => onSelectTab('studio')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
-              activeTab === 'studio'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Volume2 size={14} />
-            DAW Микшер
-          </button>
+            <button
+              onClick={() => onSelectTab('ai-dubbing')}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
+                activeTab === 'ai-dubbing'
+                  ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30 font-bold'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              }`}
+            >
+              <Sparkles size={14} />
+              AI Дубляж & VAD
+            </button>
 
-          <button
-            onClick={() => onSelectTab('vst')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
-              activeTab === 'vst'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Layers size={14} />
-            VST Плагины
-          </button>
-
-          <button
-            onClick={() => onSelectTab('project')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
-              activeTab === 'project'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <FolderKanban size={14} />
-            Проект (FS API)
-          </button>
-
-          <button
-            onClick={() => onSelectTab('video')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
-              activeTab === 'video'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Sliders size={14} />
-            Видео-монитор
-          </button>
-
-          <button
-            onClick={() => onSelectTab('ai-dubbing')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
-              activeTab === 'ai-dubbing'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Sparkles size={14} />
-            AI Дубляж & VAD
-          </button>
-
-          <button
-            onClick={() => onSelectTab('export')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
-              activeTab === 'export'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Cpu size={14} />
-            Экспорт & FFmpeg
-          </button>
-
-          <button
-            onClick={() => onSelectTab('cpp')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
-              activeTab === 'cpp'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Cpu size={14} />
-            C++ Ядро
-          </button>
-
-          <button
-            onClick={() => onSelectTab('emcc')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
-              activeTab === 'emcc'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Terminal size={14} />
-            Скрипт Emcc
-          </button>
-
-          <button
-            onClick={() => onSelectTab('console')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
-              activeTab === 'console'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30'
-                : errorCount > 0
-                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 hover:bg-rose-500/30'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Terminal size={14} className={errorCount > 0 ? 'text-rose-400 animate-pulse' : ''} />
-            Логи & Консоль
-            {errorCount > 0 && (
-              <span className="px-1.5 py-0.2 rounded-full bg-rose-600 text-white text-[10px] font-bold">
-                {errorCount}
-              </span>
-            )}
-          </button>
-        </nav>
+            <button
+              onClick={() => onSelectTab('vst')}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
+                activeTab === 'vst'
+                  ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30 font-bold'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              }`}
+            >
+              <Layers size={14} />
+              VST Плагины
+            </button>
+          </nav>
         </div>
       </div>
     </header>

@@ -25,7 +25,7 @@ import { FULL_CPP_CODE, BUILD_WASM_SCRIPT } from './data/cppCode';
 import { Sparkles, Cpu, Layers, Terminal, Zap, ShieldCheck, Upload, Film, Video, Wand2, Volume2, CheckCircle2 } from 'lucide-react';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<NavigationTab>('studio');
+  const [activeTab, setActiveTab] = useState<NavigationTab>('minimal');
   const [showGlobalImportModal, setShowGlobalImportModal] = useState<boolean>(false);
 
   const {
@@ -377,14 +377,14 @@ export default function App() {
   const handleModalImportVideo = async (videoFile: File, audioPcm?: Float32Array) => {
     setSourceVideoFile(videoFile);
     if (audioPcm && audioPcm.length > 0) {
+      let actualTargetTrackId = 1;
       const totalFrames = audioPcm.length / 2;
-      const targetTrackId = tracks[0]?.id || 1;
       const clipId = Date.now();
 
       setTracks((prev) => {
         const videoClip = {
           id: clipId,
-          name: `Audio_${videoFile.name}`,
+          name: `🎬 Оригинал_${videoFile.name}`,
           offsetSamples: 0,
           lengthSamples: totalFrames,
           gain: 1.0,
@@ -395,25 +395,52 @@ export default function App() {
           color: '#06b6d4'
         };
 
-        const exists = prev.some((t) => t.id === targetTrackId);
-        if (exists) {
+        // 1. Ищем, есть ли уже отдельная видео-дорожка
+        const existingVidTrack = prev.find(
+          (t) =>
+            t.name.includes('Звук видео') ||
+            t.name.includes('Видео-звук') ||
+            t.name.includes('Оригинал') ||
+            t.name.includes('🎬')
+        );
+
+        if (existingVidTrack) {
+          actualTargetTrackId = existingVidTrack.id;
           return prev.map((t) =>
-            t.id === targetTrackId
+            t.id === existingVidTrack.id
               ? {
                   ...t,
-                  name: `Звук видео [${videoFile.name}]`,
+                  name: `🎬 Оригинальный звук [${videoFile.name}]`,
                   clips: [videoClip]
                 }
               : t
           );
-        } else {
-          const newTr = createNewTrack(targetTrackId, `Звук видео [${videoFile.name}]`, '#06b6d4');
-          newTr.clips = [videoClip];
-          return [...prev, newTr];
         }
+
+        // 2. Проверяем, свободна ли Первая дорожка
+        if (prev.length > 0 && prev[0].clips.length === 0 && (prev[0].name.includes('Дорожка') || prev[0].name.includes('Track'))) {
+          actualTargetTrackId = prev[0].id;
+          return prev.map((t, idx) =>
+            idx === 0
+              ? {
+                  ...t,
+                  name: `🎬 Оригинальный звук [${videoFile.name}]`,
+                  color: '#06b6d4',
+                  clips: [videoClip]
+                }
+              : t
+          );
+        }
+
+        // 3. Иначе создаем новую отдельную дорожку
+        const newTrackId = prev.length > 0 ? Math.max(...prev.map((t) => t.id)) + 1 : 1;
+        actualTargetTrackId = newTrackId;
+        const newTr = createNewTrack(newTrackId, `🎬 Оригинальный звук [${videoFile.name}]`, '#06b6d4');
+        newTr.clips = [videoClip];
+        return [newTr, ...prev];
       });
 
-      uploadRawPCMToTrack(audioPcm, targetTrackId, clipId, 0, 1.0, 0.0, true);
+      uploadRawPCMToTrack(audioPcm, actualTargetTrackId, clipId, 0, 1.0, 0.0, true);
     }
   };
 
@@ -629,11 +656,9 @@ export default function App() {
         )}
 
         {/* Tab 0: Minimal Studio MVP Pipeline */}
-        {activeTab === 'minimal' && (
-          <div className="space-y-6 animate-fadeIn">
-            <MinimalStudio />
-          </div>
-        )}
+        <div className={activeTab === 'minimal' ? 'space-y-6 animate-fadeIn' : 'hidden'}>
+          <MinimalStudio />
+        </div>
 
         {/* Tab 1: Interactive Live Studio DAW */}
         {activeTab === 'studio' && (
@@ -778,132 +803,122 @@ export default function App() {
         )}
 
         {/* Tab: Industrial VST & CLAP Plugin Host / Directory Manager */}
-        {activeTab === 'vst' && (
-          <div className="space-y-6 animate-fadeIn">
-            <VSTPluginManager />
-          </div>
-        )}
+        <div className={activeTab === 'vst' ? 'space-y-6 animate-fadeIn' : 'hidden'}>
+          <VSTPluginManager />
+        </div>
 
         {/* Tab: Local Project Manager (File System Access API) */}
-        {activeTab === 'project' && (
-          <div className="space-y-6 animate-fadeIn">
-            <ProjectWorkspace
-              tracks={tracks}
-              master={master}
-              sourceVideoFile={sourceVideoFile}
-              onLoadProjectState={handleLoadProjectState}
-              onImportMediaFiles={handleImportMediaFiles}
-            />
-          </div>
-        )}
+        <div className={activeTab === 'project' ? 'space-y-6 animate-fadeIn' : 'hidden'}>
+          <ProjectWorkspace
+            tracks={tracks}
+            master={master}
+            sourceVideoFile={sourceVideoFile}
+            onLoadProjectState={handleLoadProjectState}
+            onImportMediaFiles={handleImportMediaFiles}
+          />
+        </div>
 
         {/* Tab 2: Video Monitor & Frame Sync */}
-        {activeTab === 'video' && (
-          <div className="space-y-6 animate-fadeIn">
-            {/* Top Info Banner */}
-            <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-xl flex flex-wrap items-center justify-between gap-4 shadow-lg">
-              <div className="flex items-center gap-3">
-                <div className="p-2.5 bg-cyan-500/10 border border-cyan-500/20 rounded-xl text-cyan-400">
-                  <Video size={20} />
-                </div>
-                <div>
-                  <h2 className="text-xs sm:text-sm font-bold text-slate-200 flex items-center gap-2">
-                    Frame-Accurate Video Monitor
-                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 font-mono">
-                      Subtitles & Timecode Drift Auto-Correction
-                    </span>
-                  </h2>
-                  <p className="text-xs text-slate-400">
-                    Покадровая синхронизация видеоряда с аудиоядром DAW, просмотр субтитров в реальном времени и покадровый шаг.
-                  </p>
-                </div>
+        <div className={activeTab === 'video' ? 'space-y-6 animate-fadeIn' : 'hidden'}>
+          {/* Top Info Banner */}
+          <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-xl flex flex-wrap items-center justify-between gap-4 shadow-lg">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-cyan-500/10 border border-cyan-500/20 rounded-xl text-cyan-400">
+                <Video size={20} />
+              </div>
+              <div>
+                <h2 className="text-xs sm:text-sm font-bold text-slate-200 flex items-center gap-2">
+                  Frame-Accurate Video Monitor
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 font-mono">
+                    Subtitles & Timecode Drift Auto-Correction
+                  </span>
+                </h2>
+                <p className="text-xs text-slate-400">
+                  Покадровая синхронизация видеоряда с аудиоядром DAW, просмотр субтитров в реальном времени и покадровый шаг.
+                </p>
               </div>
             </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              <div className="lg:col-span-8">
-                <VideoMonitor
-                  currentTimeSec={currentTimeSec}
-                  isPlaying={isPlaying}
-                  onSeek={seek}
-                  onTogglePlay={togglePlay}
-                  subtitles={subtitles}
-                  onVideoLoaded={(file) => setSourceVideoFile(file)}
-                />
-              </div>
-
-              {/* Subtitles & Cue List */}
-              <div className="lg:col-span-4 bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3 flex flex-col max-h-[500px]">
-                <h3 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center justify-between border-b border-slate-800 pb-2">
-                  <span>Реплики субтитров (SRT)</span>
-                  <span className="text-[10px] font-mono text-cyan-400">{subtitles.length} реплик</span>
-                </h3>
-
-                <div className="flex-1 overflow-y-auto space-y-2 pr-1 scrollbar-thin scrollbar-thumb-slate-800">
-                  {subtitles.map((cue) => {
-                    const isActive = currentTimeSec >= cue.startSec && currentTimeSec <= cue.endSec;
-                    return (
-                      <div
-                        key={cue.index}
-                        onClick={() => seek(cue.startSec)}
-                        className={`p-3 rounded-lg border text-xs cursor-pointer transition-all ${
-                          isActive
-                            ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-200 shadow-md'
-                            : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-200'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between font-mono text-[10px] mb-1">
-                          <span className={isActive ? 'text-emerald-400 font-bold' : 'text-slate-500'}>
-                            {cue.speaker || 'Голос'}
-                          </span>
-                          <span className="text-slate-500">
-                            {cue.startSec.toFixed(2)}s - {cue.endSec.toFixed(2)}s
-                          </span>
-                        </div>
-                        <p className={`font-sans leading-snug ${isActive ? 'text-white font-medium' : ''}`}>
-                          {cue.text}
-                        </p>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-
-            {/* Quick Timeline underneath Video */}
-            <TimelineView
-              tracks={tracks}
-              currentTimeSec={currentTimeSec}
-              isPlaying={isPlaying}
-              onSeek={seek}
-              onUpdateTrack={handleUpdateTrack}
-            />
           </div>
-        )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <div className="lg:col-span-8">
+              <VideoMonitor
+                currentTimeSec={currentTimeSec}
+                isPlaying={isPlaying}
+                onSeek={seek}
+                onTogglePlay={togglePlay}
+                subtitles={subtitles}
+                onVideoLoaded={(file) => setSourceVideoFile(file)}
+              />
+            </div>
+
+            {/* Subtitles & Cue List */}
+            <div className="lg:col-span-4 bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3 flex flex-col max-h-[500px]">
+              <h3 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center justify-between border-b border-slate-800 pb-2">
+                <span>Реплики субтитров (SRT)</span>
+                <span className="text-[10px] font-mono text-cyan-400">{subtitles.length} реплик</span>
+              </h3>
+
+              <div className="flex-1 overflow-y-auto space-y-2 pr-1 scrollbar-thin scrollbar-thumb-slate-800">
+                {subtitles.map((cue) => {
+                  const isActive = currentTimeSec >= cue.startSec && currentTimeSec <= cue.endSec;
+                  return (
+                    <div
+                      key={cue.index}
+                      onClick={() => seek(cue.startSec)}
+                      className={`p-3 rounded-lg border text-xs cursor-pointer transition-all ${
+                        isActive
+                          ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-200 shadow-md'
+                          : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-200'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between font-mono text-[10px] mb-1">
+                        <span className={isActive ? 'text-emerald-400 font-bold' : 'text-slate-500'}>
+                          {cue.speaker || 'Голос'}
+                        </span>
+                        <span className="text-slate-500">
+                          {cue.startSec.toFixed(2)}s - {cue.endSec.toFixed(2)}s
+                        </span>
+                      </div>
+                      <p className={`font-sans leading-snug ${isActive ? 'text-white font-medium' : ''}`}>
+                        {cue.text}
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          {/* Quick Timeline underneath Video */}
+          <TimelineView
+            tracks={tracks}
+            currentTimeSec={currentTimeSec}
+            isPlaying={isPlaying}
+            onSeek={seek}
+            onUpdateTrack={handleUpdateTrack}
+          />
+        </div>
 
         {/* Tab 3: AI Dubbing, Silero VAD & Smart Alignment */}
-        {activeTab === 'ai-dubbing' && (
-          <div className="space-y-6 animate-fadeIn">
-            <DubbingAIStudio
-              tracks={tracks}
-              currentTimeSec={currentTimeSec}
-              onSeek={seek}
-              onAddStemTracks={handleAddStemTracks}
-              onApplyProcessedAudioToTrack={handleApplyProcessedAudioToTrack}
-            />
-          </div>
-        )}
+        <div className={activeTab === 'ai-dubbing' ? 'space-y-6 animate-fadeIn' : 'hidden'}>
+          <DubbingAIStudio
+            tracks={tracks}
+            currentTimeSec={currentTimeSec}
+            onSeek={seek}
+            onAddStemTracks={handleAddStemTracks}
+            onApplyProcessedAudioToTrack={handleApplyProcessedAudioToTrack}
+          />
+        </div>
 
         {/* Tab 4: Export Studio & FFmpeg WASM Video Muxer */}
-        {activeTab === 'export' && (
-          <div className="space-y-6 animate-fadeIn">
-            <ExportStudio
-              tracks={tracks}
-              master={master}
-              sourceVideoFile={sourceVideoFile}
-            />
-          </div>
-        )}
+        <div className={activeTab === 'export' ? 'space-y-6 animate-fadeIn' : 'hidden'}>
+          <ExportStudio
+            tracks={tracks}
+            master={master}
+            sourceVideoFile={sourceVideoFile}
+          />
+        </div>
 
         {/* Tab 5 & 6: C++ Source Code & Emscripten Build Guide */}
         {(activeTab === 'cpp' || activeTab === 'emcc') && (

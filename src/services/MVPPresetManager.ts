@@ -473,7 +473,7 @@ export const BUILT_IN_MVP_PRESETS: MVPPreset[] = [
 export class MVPPresetManager {
   private static instance: MVPPresetManager | null = null;
   private userPresets: MVPPreset[] = [];
-  private activePresetId: string = 'preset-dublyazh';
+  private activePresetId: string = 'preset-zakadr';
   private listeners: Set<() => void> = new Set();
 
   private constructor() {

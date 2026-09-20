@@ -1191,11 +1191,11 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     };
   }, [activeDrag, pxPerSec, sampleRate, snapToGrid, tracks, onUpdateTrack, setSubtitles]);
 
-  const getTrackIcon = (id: number) => {
-    if (id === 1) return <Disc size={13} className="text-cyan-400" />;
-    if (id === 2) return <Music size={13} className="text-blue-400" />;
-    if (id === 3) return <Mic size={13} className="text-emerald-400" />;
-    return <Volume2 size={13} className="text-purple-400" />;
+  const getTrackIcon = (track: TrackState) => {
+    if (track.isOriginalAudio || /видео|video|оригинал|original/i.test(track.name)) {
+      return <Disc size={13} className="text-amber-400" />;
+    }
+    return <Mic size={13} className="text-emerald-400" />;
   };
 
   const selectedClip = useMemo(() => {
@@ -1514,7 +1514,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                 {/* Top Row: Icon, Track Name, CH Badge */}
                 <div className="flex items-center justify-between gap-1.5">
                   <div className="flex items-center gap-2 min-w-0">
-                    {getTrackIcon(track.id)}
+                    {getTrackIcon(track)}
                     <span className="text-xs font-semibold text-slate-200 truncate" title={track.name}>
                       {track.name}
                     </span>

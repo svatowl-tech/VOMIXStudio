@@ -49,9 +49,9 @@ export const OFFICIAL_AUDIO_AI_MODELS: ModelCatalogItem[] = [
       'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/UVR-MDX-NET-Voc_FT.onnx',
       'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-MDX-NET-Voc_FT.onnx'
     ],
-    is_installed: true,
-    installed_bytes: 63442944,
-    local_path: 'indexeddb://models/UVR-MDX-NET-Voc_FT.onnx',
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
     format: 'onnx',
     engineArchitecture: 'MDX-Net Frequency-Domain Spectrogram'
   },
@@ -68,9 +68,9 @@ export const OFFICIAL_AUDIO_AI_MODELS: ModelCatalogItem[] = [
       'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/UVR-MDX-NET-Inst_HQ_3.onnx',
       'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-MDX-NET-Inst_HQ_3.onnx'
     ],
-    is_installed: true,
-    installed_bytes: 63442944,
-    local_path: 'indexeddb://models/UVR-MDX-NET-Inst_HQ_3.onnx',
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
     format: 'onnx',
     engineArchitecture: 'MDX-Net High-Quality Instrumental Extractor'
   },
@@ -234,9 +234,9 @@ export const OFFICIAL_AUDIO_AI_MODELS: ModelCatalogItem[] = [
       'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Reverb_HQ_By_FoxJoy.onnx',
       'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/Reverb_HQ_By_FoxJoy.onnx'
     ],
-    is_installed: true,
-    installed_bytes: 67947724,
-    local_path: 'indexeddb://models/Reverb_HQ_By_FoxJoy.onnx',
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
     format: 'onnx',
     engineArchitecture: 'MDX-Net DeReverb Spatial Inversion'
   },

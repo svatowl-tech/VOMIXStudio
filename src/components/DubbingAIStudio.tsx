@@ -78,6 +78,16 @@ export type AIPurposeType =
   | 'whisper_vad'
   | 'vocal_chain';
 
+const PURPOSE_TO_CATEGORY_MAP: Record<AIPurposeType, ModelCategory> = {
+  stem_separation: 'separation',
+  denoise: 'denoise',
+  dereverb: 'dereverb',
+  spectral_match: 'vocal_match',
+  voicefixer: 'vocal_match',
+  whisper_vad: 'whisper',
+  vocal_chain: 'denoise'
+};
+
 export interface AIStepNode {
   id: string;
   enabled: boolean;
@@ -119,16 +129,18 @@ export interface DubbingAIStudioProps {
   onSeek: (timeSec: number) => void;
   onAddStemTracks?: (vocalsPcm: Float32Array, karaokePcm: Float32Array, vocalsName?: string, karaokeName?: string) => void;
   onApplyProcessedAudioToTrack?: (trackId: number, newPcm: Float32Array, clipName?: string) => void;
+  mode?: 'full' | 'matrix-only';
+  initialTab?: AITab;
 }
 
 export type AITab =
   | 'matrix'
+  | 'models'
   | 'separation'
   | 'cleanup'
   | 'spectral'
   | 'voicefixer'
   | 'whisper'
-  | 'models'
   | 'settings';
 
 export const PURPOSE_DESCRIPTIONS: Record<
@@ -213,9 +225,13 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
   currentTimeSec,
   onSeek,
   onAddStemTracks,
-  onApplyProcessedAudioToTrack
+  onApplyProcessedAudioToTrack,
+  mode = 'full',
+  initialTab
 }) => {
-  const [activeTab, setActiveTab] = useState<AITab>('matrix');
+  const [activeTab, setActiveTab] = useState<AITab>(
+    mode === 'matrix-only' ? 'matrix' : (initialTab || 'models')
+  );
   const [models, setModels] = useState<ModelCatalogItem[]>([]);
   const [downloadProgress, setDownloadProgress] = useState<Record<string, ModelDownloadProgress>>({});
 
@@ -1067,138 +1083,142 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
         className="hidden"
       />
 
-      {/* Top Main Banner */}
-      <div className="bg-slate-900/95 border border-emerald-500/30 p-5 rounded-2xl flex flex-wrap items-center justify-between gap-4 shadow-xl">
-        <div className="flex items-center gap-3.5">
-          <div className="p-2.5 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-emerald-400">
-            <BrainCircuit size={24} />
-          </div>
-          <div>
-            <h2 className="text-base font-bold text-slate-100 flex items-center gap-2">
-              Студийный AI Аудио-Конвейер (AI Audio Studio)
-              <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
-                25 моделей • ONNX / C++ / WebGPU
+      {/* Top Banner & Sub-Tabs Navigation (Hidden in matrix-only mode) */}
+      {mode !== 'matrix-only' && (
+        <>
+          {/* Top Main Banner */}
+          <div className="bg-slate-900/95 border border-emerald-500/30 p-5 rounded-2xl flex flex-wrap items-center justify-between gap-4 shadow-xl">
+            <div className="flex items-center gap-3.5">
+              <div className="p-2.5 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-emerald-400">
+                <BrainCircuit size={24} />
+              </div>
+              <div>
+                <h2 className="text-base font-bold text-slate-100 flex items-center gap-2">
+                  Студийный AI Аудио-Конвейер (AI Audio Studio)
+                  <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
+                    25 моделей • ONNX / C++ / WebGPU
+                  </span>
+                </h2>
+                <p className="text-xs text-slate-400">
+                  Гибкая маршрутизация дорожек, разделение стемов, нейро-денойзинг, устранение эха, спектральная подгонка и VoiceFixer.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-slate-400">
+              <span className="px-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg flex items-center gap-1.5 text-emerald-400">
+                <Zap size={14} /> 100% On-Device
               </span>
-            </h2>
-            <p className="text-xs text-slate-400">
-              Гибкая маршрутизация дорожек, разделение стемов, нейро-денойзинг, устранение эха, спектральная подгонка и VoiceFixer.
-            </p>
+              <span className="px-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg flex items-center gap-1.5 text-cyan-400">
+                <Gauge size={14} /> VRAM: ~{vramUsageMb} MB
+              </span>
+            </div>
           </div>
-        </div>
 
-        <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-slate-400">
-          <span className="px-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg flex items-center gap-1.5 text-emerald-400">
-            <Zap size={14} /> 100% On-Device
-          </span>
-          <span className="px-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg flex items-center gap-1.5 text-cyan-400">
-            <Gauge size={14} /> VRAM: ~{vramUsageMb} MB
-          </span>
-        </div>
-      </div>
+          {/* Navigation Sub-Tabs */}
+          <div className="flex items-center gap-1.5 bg-slate-900/80 p-1.5 border border-slate-800 rounded-xl overflow-x-auto scrollbar-none">
+            <button
+              onClick={() => setActiveTab('models')}
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap cursor-pointer ${
+                activeTab === 'models'
+                  ? 'bg-emerald-500 text-slate-950 shadow-md font-bold'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              }`}
+            >
+              <Database size={14} />
+              Каталог & Загрузка AI Моделей в память
+            </button>
 
-      {/* Navigation Sub-Tabs */}
-      <div className="flex items-center gap-1.5 bg-slate-900/80 p-1.5 border border-slate-800 rounded-xl overflow-x-auto scrollbar-none">
-        <button
-          onClick={() => setActiveTab('matrix')}
-          className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap cursor-pointer ${
-            activeTab === 'matrix'
-              ? 'bg-emerald-500 text-slate-950 shadow-md font-bold'
-              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-          }`}
-        >
-          <Workflow size={14} />
-          Матрица обработки дорожек (AI Router)
-        </button>
+            <button
+              onClick={() => setActiveTab('matrix')}
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap cursor-pointer ${
+                activeTab === 'matrix'
+                  ? 'bg-emerald-500 text-slate-950 shadow-md font-bold'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              }`}
+            >
+              <Workflow size={14} />
+              Матрица маршрутизации
+            </button>
 
-        <button
-          onClick={() => setActiveTab('separation')}
-          className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap cursor-pointer ${
-            activeTab === 'separation'
-              ? 'bg-emerald-500 text-slate-950 shadow-md font-bold'
-              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-          }`}
-        >
-          <Scissors size={14} />
-          Изоляция стемов
-        </button>
+            <button
+              onClick={() => setActiveTab('separation')}
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap cursor-pointer ${
+                activeTab === 'separation'
+                  ? 'bg-emerald-500 text-slate-950 shadow-md font-bold'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              }`}
+            >
+              <Scissors size={14} />
+              Изоляция стемов
+            </button>
 
-        <button
-          onClick={() => setActiveTab('cleanup')}
-          className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap cursor-pointer ${
-            activeTab === 'cleanup'
-              ? 'bg-emerald-500 text-slate-950 shadow-md font-bold'
-              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-          }`}
-        >
-          <Volume2 size={14} />
-          Денойзинг & Дереверберация
-        </button>
+            <button
+              onClick={() => setActiveTab('cleanup')}
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap cursor-pointer ${
+                activeTab === 'cleanup'
+                  ? 'bg-emerald-500 text-slate-950 shadow-md font-bold'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              }`}
+            >
+              <Volume2 size={14} />
+              Денойзинг & Дереверберация
+            </button>
 
-        <button
-          onClick={() => setActiveTab('spectral')}
-          className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap cursor-pointer ${
-            activeTab === 'spectral'
-              ? 'bg-emerald-500 text-slate-950 shadow-md font-bold'
-              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-          }`}
-        >
-          <SlidersHorizontal size={14} />
-          Спектральная подгонка
-        </button>
+            <button
+              onClick={() => setActiveTab('spectral')}
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap cursor-pointer ${
+                activeTab === 'spectral'
+                  ? 'bg-emerald-500 text-slate-950 shadow-md font-bold'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              }`}
+            >
+              <SlidersHorizontal size={14} />
+              Спектральная подгонка
+            </button>
 
-        <button
-          onClick={() => setActiveTab('voicefixer')}
-          className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap cursor-pointer ${
-            activeTab === 'voicefixer'
-              ? 'bg-emerald-500 text-slate-950 shadow-md font-bold'
-              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-          }`}
-        >
-          <Wand2 size={14} />
-          Реставрация VoiceFixer
-        </button>
+            <button
+              onClick={() => setActiveTab('voicefixer')}
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap cursor-pointer ${
+                activeTab === 'voicefixer'
+                  ? 'bg-emerald-500 text-slate-950 shadow-md font-bold'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              }`}
+            >
+              <Wand2 size={14} />
+              Реставрация VoiceFixer
+            </button>
 
-        <button
-          onClick={() => setActiveTab('whisper')}
-          className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap cursor-pointer ${
-            activeTab === 'whisper'
-              ? 'bg-emerald-500 text-slate-950 shadow-md font-bold'
-              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-          }`}
-        >
-          <Activity size={14} />
-          Whisper & VAD
-        </button>
+            <button
+              onClick={() => setActiveTab('whisper')}
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap cursor-pointer ${
+                activeTab === 'whisper'
+                  ? 'bg-emerald-500 text-slate-950 shadow-md font-bold'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              }`}
+            >
+              <Activity size={14} />
+              Whisper & VAD
+            </button>
 
-        <button
-          onClick={() => setActiveTab('models')}
-          className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap cursor-pointer ${
-            activeTab === 'models'
-              ? 'bg-emerald-500 text-slate-950 shadow-md font-bold'
-              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-          }`}
-        >
-          <Database size={14} />
-          Менеджер моделей (25)
-        </button>
-
-        <button
-          onClick={() => setActiveTab('settings')}
-          className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap cursor-pointer ${
-            activeTab === 'settings'
-              ? 'bg-emerald-500 text-slate-950 shadow-md font-bold'
-              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-          }`}
-        >
-          <Settings2 size={14} />
-          Настройки AI
-        </button>
-      </div>
+            <button
+              onClick={() => setActiveTab('settings')}
+              className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap cursor-pointer ${
+                activeTab === 'settings'
+                  ? 'bg-emerald-500 text-slate-950 shadow-md font-bold'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              }`}
+            >
+              <Settings2 size={14} />
+              Настройки AI
+            </button>
+          </div>
+        </>
+      )}
 
       {/* ===================================================================== */}
       {/* TAB 0: MATRIX / TRACK ROUTING & NEURAL PROCESSING */}
-      {/* ===================================================================== */}
-      {activeTab === 'matrix' && (
+      {(mode === 'matrix-only' || activeTab === 'matrix') && (
         <div className="space-y-6 animate-fadeIn">
           {/* Top Matrix Control Bar */}
           <div className="bg-[#0f1422] border border-[#1e293b] p-4 sm:p-5 rounded-2xl shadow-xl flex flex-wrap items-center justify-between gap-4">
@@ -1329,7 +1349,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                           <span className="text-xs font-bold text-slate-100 font-mono">
                             CH #{track.id}: {track.name}
                           </span>
-                          {(track.id === 1 ||
+                          {(track.isOriginalAudio ||
                             track.name.toLowerCase().includes('видео') ||
                             track.name.toLowerCase().includes('video') ||
                             track.name.toLowerCase().includes('оригинал') ||
@@ -1453,7 +1473,10 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                         ]
                     ).map((step, stepIdx) => {
                       const stepPurposeInfo = PURPOSE_DESCRIPTIONS[step.purpose] || PURPOSE_DESCRIPTIONS['denoise'];
-                      const modelList = installedModels.length > 0 ? installedModels : models;
+                      const targetCategory = PURPOSE_TO_CATEGORY_MAP[step.purpose] || 'denoise';
+                      const installedCategoryModels = installedModels.filter(
+                        (m) => m.category === targetCategory
+                      );
 
                       return (
                         <div
@@ -1517,11 +1540,17 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                                 onChange={(e) => handleUpdateAIStep(track.id, step.id, { modelId: e.target.value })}
                                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 font-mono"
                               >
-                                {modelList.map((m) => (
-                                  <option key={m.id} value={m.id}>
-                                    {m.name} ({m.size_mb} MB) [Готова]
+                                {installedCategoryModels.length === 0 ? (
+                                  <option value="" disabled className="text-amber-400 font-sans">
+                                    ⚠️ Модель не загружена (DSP C++ WebAssembly)
                                   </option>
-                                ))}
+                                ) : (
+                                  installedCategoryModels.map((m) => (
+                                    <option key={m.id} value={m.id}>
+                                      {m.name} ({m.size_mb} MB) [В памяти]
+                                    </option>
+                                  ))
+                                )}
                               </select>
                             </div>
 

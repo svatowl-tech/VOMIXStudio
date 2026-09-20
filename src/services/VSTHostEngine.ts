@@ -115,7 +115,17 @@ export class VSTHostEngine {
 
       if (savedCatalog) {
         const parsed: VSTPluginDefinition[] = JSON.parse(savedCatalog);
-        parsed.forEach((p) => this.catalog.set(p.id, p));
+        // Фильтруем закешированные фейковые плагины, если они были сохранены ранее
+        const legacyDummyIds = new Set([
+          'waves_cla_76', 'waves_vocal_rider', 'waves_rvox', 'waves_l2_limiter',
+          'izotope_ozone_maximizer', 'izotope_rx_denoise', 'izotope_nectar_vocal',
+          'fabfilter_pro_q3', 'fabfilter_pro_c2', 'valhalla_vintage_verb', 'xfer_ott'
+        ]);
+        parsed.forEach((p) => {
+          if (!legacyDummyIds.has(p.id)) {
+            this.catalog.set(p.id, p);
+          }
+        });
       }
 
       // 3. Загрузка отключенных плагинов

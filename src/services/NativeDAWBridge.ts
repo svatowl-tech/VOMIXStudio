@@ -1110,7 +1110,7 @@ export class NativeDAWBridge {
         }
       }
 
-      const isOriginal = track.isOriginalAudio || track.id === 1 || /видео|video|оригинал|original/i.test(track.name || '');
+      const isOriginal = !!track.isOriginalAudio || /видео|video|оригинал|original/i.test(track.name || '');
       const trackTargetRms = isOriginal ? (targetRmsDb - 6.0) : targetRmsDb;
 
       const stats = NativeDAWBridge.calculateSpeechGatedLoudness(

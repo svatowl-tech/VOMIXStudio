@@ -1773,17 +1773,6 @@ export const MinimalStudio: React.FC = () => {
         />
       </div>
 
-      {/* 2.75. ОБРАБОТКА С ПОМОЩЬЮ НЕЙРОСЕТЕЙ (AI DUBBING & AUDIO CLEANUP PIPELINE) */}
-      <div className="bg-[#0f1422] border border-[#1e293b] p-5 rounded-2xl shadow-xl space-y-4">
-        <DubbingAIStudio
-          tracks={tracks}
-          currentTimeSec={currentTimeSec}
-          onSeek={seek}
-          onAddStemTracks={handleAddStemTracks}
-          onApplyProcessedAudioToTrack={handleApplyProcessedAudioToTrack}
-        />
-      </div>
-
       {/* 3. КОНСОЛЬ СВЕДЕНИЯ МИКШЕРА */}
       <div className="bg-[#0f1422] border border-[#1e293b] p-5 rounded-2xl shadow-xl space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-800">
@@ -2138,6 +2127,18 @@ export const MinimalStudio: React.FC = () => {
             onUpdateVstWetDry={(instId, wetDry) => handleUpdateVstWetDry('master', instId, wetDry)}
           />
         </div>
+      </div>
+
+      {/* 4. МАТРИЦА МАРШРУТИЗАЦИИ НЕЙРОСЕТЕВОЙ ОБРАБОТКИ (Track AI Matrix Pipeline) */}
+      <div className="pt-2">
+        <DubbingAIStudio
+          mode="matrix-only"
+          tracks={tracks}
+          currentTimeSec={currentTimeSec}
+          onSeek={seek}
+          onAddStemTracks={handleAddStemTracks}
+          onApplyProcessedAudioToTrack={handleApplyProcessedAudioToTrack}
+        />
       </div>
 
       {/* Модальное окно VST Рэка выбранного трека */}
