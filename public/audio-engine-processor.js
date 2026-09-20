@@ -195,7 +195,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       case 'LOAD_TRACK_CLIP': {
         const trackId = msg.trackId;
         const clipId = msg.clipId || Date.now();
-        const pcmBuffer = msg.audioData || new Float32Array(0);
+        const pcmBuffer = msg.audioData || msg.pcmBuffer || msg.pcm || new Float32Array(0);
         const offsetSamples = typeof msg.offsetSamples === 'number'
           ? msg.offsetSamples
           : Math.floor((msg.offsetSec || 0) * this.sampleRate);

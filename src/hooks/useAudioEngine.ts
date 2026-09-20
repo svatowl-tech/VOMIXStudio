@@ -415,37 +415,11 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
 
   const syncTrackClips = useCallback((trackId: number, clips: ClipConfig[]) => {
     if (workletNodeRef.current) {
-      workletNodeRef.current.port.postMessage({
-        type: 'SET_TRACK_CLIPS',
-        trackId,
-        clips: clips.map((c) => ({
-          id: c.id,
-          name: c.name,
-          offsetSamples: c.offsetSamples,
-          lengthSamples: c.lengthSamples,
-          gain: typeof c.gain === 'number' ? c.gain : 1.0,
-          pan: typeof c.pan === 'number' ? c.pan : 0.0,
-          fadeInSamples: c.fadeInSamples || 0,
-          fadeOutSamples: c.fadeOutSamples || 0,
-          buffer: c.buffer,
-          isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true
-        }))
-      });
-    }
-  }, []);
-
-  const syncAllTracks = useCallback((tracks: TrackState[]) => {
-    if (workletNodeRef.current) {
-      workletNodeRef.current.port.postMessage({
-        type: 'SET_ALL_TRACKS',
-        tracks: tracks.map((t) => ({
-          id: t.id,
-          name: t.name,
-          volumeDb: t.volumeDb,
-          pan: t.pan,
-          solo: t.solo,
-          mute: t.mute,
-          clips: t.clips.map((c) => ({
+      try {
+        workletNodeRef.current.port.postMessage({
+          type: 'SET_TRACK_CLIPS',
+          trackId,
+          clips: clips.map((c) => ({
             id: c.id,
             name: c.name,
             offsetSamples: c.offsetSamples,
@@ -454,11 +428,43 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             pan: typeof c.pan === 'number' ? c.pan : 0.0,
             fadeInSamples: c.fadeInSamples || 0,
             fadeOutSamples: c.fadeOutSamples || 0,
-            buffer: c.buffer,
             isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true
           }))
-        }))
-      });
+        });
+      } catch (err) {
+        console.warn('[useAudioEngine] syncTrackClips postMessage ignored:', err);
+      }
+    }
+  }, []);
+
+  const syncAllTracks = useCallback((tracks: TrackState[]) => {
+    if (workletNodeRef.current) {
+      try {
+        workletNodeRef.current.port.postMessage({
+          type: 'SET_ALL_TRACKS',
+          tracks: tracks.map((t) => ({
+            id: t.id,
+            name: t.name,
+            volumeDb: t.volumeDb,
+            pan: t.pan,
+            solo: t.solo,
+            mute: t.mute,
+            clips: t.clips.map((c) => ({
+              id: c.id,
+              name: c.name,
+              offsetSamples: c.offsetSamples,
+              lengthSamples: c.lengthSamples,
+              gain: typeof c.gain === 'number' ? c.gain : 1.0,
+              pan: typeof c.pan === 'number' ? c.pan : 0.0,
+              fadeInSamples: c.fadeInSamples || 0,
+              fadeOutSamples: c.fadeOutSamples || 0,
+              isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true
+            }))
+          }))
+        });
+      } catch (err) {
+        console.warn('[useAudioEngine] syncAllTracks postMessage ignored:', err);
+      }
     }
   }, []);
 
