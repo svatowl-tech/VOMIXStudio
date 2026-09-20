@@ -227,7 +227,10 @@ export class RenderManager {
   public async muxAudioIntoVideo(
     sourceVideoFile: File,
     masterWavBlob: Blob,
-    outputFileName: string = 'final_dubbed_video.mp4'
+    outputFileName: string = 'final_dubbed_video.mp4',
+    options?: {
+      timelineHasOriginalAudio?: boolean;
+    }
   ): Promise<Blob | null> {
     this.logs = [];
     this.addLog('Начало процесса вшивания аудиодорожки в видеофайл...');
@@ -259,21 +262,66 @@ export class RenderManager {
       await this.ffmpeg.writeFile('audio_mix.wav', await fetchFile(masterWavBlob));
 
       this.notifyProgress('muxing_video', 35, 'Выполнение FFmpeg команды муксинга (-c:v copy -c:a aac)...');
-      this.addLog('Запуск FFmpeg: ffmpeg -i input_video.mp4 -i audio_mix.wav -c:v copy -c:a aac -b:a 320k -shortest output.mp4');
+      this.addLog('Запуск FFmpeg: объединение видеопотока, сведенного аудио и оригинальной аудиодорожки...');
 
-      // Быстрый стрим-копирование видео + кодирование аудио в высококачественный AAC 320k
-      await this.ffmpeg.exec([
-        '-i', 'input_video.mp4',
-        '-i', 'audio_mix.wav',
-        '-map', '0:v:0',
-        '-map', '1:a:0',
-        '-c:v', 'copy',
-        '-c:a', 'aac',
-        '-b:a', '320k',
-        '-shortest',
-        '-movflags', '+faststart',
-        'output.mp4'
-      ]);
+      const hasTimelineOriginal = options?.timelineHasOriginalAudio ?? true;
+
+      if (!hasTimelineOriginal) {
+        // Если на таймлайне не было оригинального звука видео, подмешиваем его как фон к голосам дабберов
+        try {
+          this.addLog('Подмешивание оригинального звука видео к сведенным дорожкам дабберов...');
+          await this.ffmpeg.exec([
+            '-i', 'input_video.mp4',
+            '-i', 'audio_mix.wav',
+            '-filter_complex', '[0:a:0]volume=0.75[aorig];[1:a:0]volume=1.0[adub];[aorig][adub]amix=inputs=2:duration=first:dropout_transition=0[aout]',
+            '-map', '0:v:0',
+            '-map', '[aout]',
+            '-map', '0:a:0?',
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            '-b:a', '320k',
+            '-metadata:s:a:0', 'title=Дубляж + Оригинал',
+            '-metadata:s:a:1', 'title=Оригинал (Чистый)',
+            '-shortest',
+            '-movflags', '+faststart',
+            'output.mp4'
+          ]);
+        } catch (filterErr) {
+          this.addLog('Резервный муксинг с сохранением двух аудиодорожек...');
+          await this.ffmpeg.exec([
+            '-i', 'input_video.mp4',
+            '-i', 'audio_mix.wav',
+            '-map', '0:v:0',
+            '-map', '1:a:0',
+            '-map', '0:a:0?',
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            '-b:a', '320k',
+            '-metadata:s:a:0', 'title=Дубляж / Dubbed Mix',
+            '-metadata:s:a:1', 'title=Оригинал / Original Audio',
+            '-shortest',
+            '-movflags', '+faststart',
+            'output.mp4'
+          ]);
+        }
+      } else {
+        // На таймлайне уже есть оригинальный звук: дорожка 1 - сведенный мастер-микс, дорожка 2 - чистый оригинал
+        await this.ffmpeg.exec([
+          '-i', 'input_video.mp4',
+          '-i', 'audio_mix.wav',
+          '-map', '0:v:0',
+          '-map', '1:a:0',
+          '-map', '0:a:0?',
+          '-c:v', 'copy',
+          '-c:a', 'aac',
+          '-b:a', '320k',
+          '-metadata:s:a:0', 'title=Дубляж / Dubbed Mix',
+          '-metadata:s:a:1', 'title=Оригинал / Original Audio',
+          '-shortest',
+          '-movflags', '+faststart',
+          'output.mp4'
+        ]);
+      }
 
       this.notifyProgress('muxing_video', 90, 'Чтение готового MP4 файла из виртуальной памяти...');
       this.addLog('Чтение результата output.mp4...');

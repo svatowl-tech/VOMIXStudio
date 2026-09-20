@@ -207,6 +207,13 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         const fadeOut = msg.fadeOutSamples || 0;
 
         // Всегда обновляем состояние в JS-коллекции для полной поддержки горячего резерва DSP
+        if (!this.clipBufferCache) {
+          this.clipBufferCache = new Map();
+        }
+        if (pcmBuffer && pcmBuffer.length > 0) {
+          this.clipBufferCache.set(clipId, pcmBuffer);
+        }
+
         if (!this.jsTracks.has(trackId)) {
           this.jsTracks.set(trackId, { volumeDb: 0.0, pan: 0.0, solo: false, mute: false, clips: new Map() });
         }
@@ -305,7 +312,11 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         for (const c of clips) {
           const clipId = c.id;
           const oldClip = oldClips.get(clipId);
-          const pcmBuffer = c.buffer || (oldClip ? oldClip.pcm : new Float32Array(0));
+          const cached = this.clipBufferCache ? this.clipBufferCache.get(clipId) : null;
+          const pcmBuffer = (c.buffer && c.buffer.length > 0) ? c.buffer : (oldClip ? oldClip.pcm : (cached || new Float32Array(0)));
+          if (c.buffer && c.buffer.length > 0 && this.clipBufferCache) {
+            this.clipBufferCache.set(clipId, c.buffer);
+          }
           
           if (pcmBuffer.length === 0) continue;
 
@@ -413,7 +424,11 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           if (Array.isArray(t.clips)) {
             for (const c of t.clips) {
               const oldClip = oldTrack ? oldTrack.clips.get(c.id) : null;
-              const pcmBuffer = c.buffer || (oldClip ? oldClip.pcm : new Float32Array(0));
+              const cached = this.clipBufferCache ? this.clipBufferCache.get(c.id) : null;
+              const pcmBuffer = (c.buffer && c.buffer.length > 0) ? c.buffer : (oldClip ? oldClip.pcm : (cached || new Float32Array(0)));
+              if (c.buffer && c.buffer.length > 0 && this.clipBufferCache) {
+                this.clipBufferCache.set(c.id, c.buffer);
+              }
               
               if (pcmBuffer.length === 0) continue;
               

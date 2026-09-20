@@ -130,10 +130,16 @@ export class MediaNormalizer {
     const numChannels = decodedBuffer.numberOfChannels;
     const inSampleRate = decodedBuffer.sampleRate;
 
-    // Подготовка плоского массива сэмплов для C++ кучи
+    // Подготовка плоского массива сэмплов (всегда 2-канальное стерео для исключения сбоев шага сэмплов)
     let rawInputPcm: Float32Array | null = null;
     if (numChannels === 1) {
-      rawInputPcm = decodedBuffer.getChannelData(0);
+      const ch0 = decodedBuffer.getChannelData(0);
+      rawInputPcm = new Float32Array(numFrames * 2);
+      for (let i = 0; i < numFrames; i++) {
+        const s = isFinite(ch0[i]) ? ch0[i] : 0.0;
+        rawInputPcm[i * 2] = s;
+        rawInputPcm[i * 2 + 1] = s;
+      }
     } else {
       const leftData = decodedBuffer.getChannelData(0);
       const rightData = decodedBuffer.getChannelData(1);
@@ -151,7 +157,7 @@ export class MediaNormalizer {
       const resampled = globalNativeDAWBridge.resampleCatmullRom(
         rawInputPcm,
         inSampleRate,
-        numChannels === 1 ? 1 : 2
+        2
       );
       
       // Подсказка GC: очищаем промежуточные буферы ПОСЛЕ завершения работы C++ ядра

@@ -427,7 +427,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
           pan: typeof c.pan === 'number' ? c.pan : 0.0,
           fadeInSamples: c.fadeInSamples || 0,
           fadeOutSamples: c.fadeOutSamples || 0,
-          // Опускаем buffer, так как он уже должен быть загружен в ворклер через LOAD_TRACK_CLIP
+          buffer: c.buffer,
           isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true
         }))
       });
@@ -454,7 +454,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             pan: typeof c.pan === 'number' ? c.pan : 0.0,
             fadeInSamples: c.fadeInSamples || 0,
             fadeOutSamples: c.fadeOutSamples || 0,
-            // Опускаем buffer, так как он уже должен быть загружен в ворклер через LOAD_TRACK_CLIP
+            buffer: c.buffer,
             isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true
           }))
         }))

@@ -329,7 +329,8 @@ export const MinimalStudio: React.FC = () => {
           if (audioFile) {
             try {
               const track = workingTracks[i];
-              const uploadRes = await uploadAudioFileToTrack(audioFile, track.id, Date.now() + i, 0);
+              const clipId = Date.now() + i;
+              const uploadRes = await uploadAudioFileToTrack(audioFile, track.id, clipId, 0);
 
               // Сохраняем ассет дорожки в SQL базу данных
               AssetDatabase.getInstance().saveAsset({
@@ -350,7 +351,7 @@ export const MinimalStudio: React.FC = () => {
                 name: audioFile.name.replace(/\.[^/.]+$/, ''),
                 clips: [
                   {
-                    id: Date.now() + i,
+                    id: clipId,
                     name: audioFile.name,
                     offsetSamples: 0,
                     lengthSamples: uploadRes.samplesCount,
@@ -450,7 +451,8 @@ export const MinimalStudio: React.FC = () => {
           const audioFile = audioFiles[i].fileObj;
           if (audioFile) {
             const track = workingTracks[i];
-            const uploadRes = await uploadAudioFileToTrack(audioFile, track.id, Date.now() + i, 0);
+            const clipId = Date.now() + i;
+            const uploadRes = await uploadAudioFileToTrack(audioFile, track.id, clipId, 0);
 
             AssetDatabase.getInstance().saveAsset({
               id: `asset_ch${track.id}_${Date.now()}`,
@@ -470,7 +472,7 @@ export const MinimalStudio: React.FC = () => {
               name: audioFile.name.replace(/\.[^/.]+$/, ''),
               clips: [
                 {
-                  id: Date.now() + i,
+                  id: clipId,
                   name: audioFile.name,
                   offsetSamples: 0,
                   lengthSamples: uploadRes.samplesCount,
@@ -496,6 +498,73 @@ export const MinimalStudio: React.FC = () => {
     }
   };
 
+  // Извлечение звука оригинала на Дорожку №1 (C++ resample)
+  const extractAndLoadVideoAudio = async (file: File) => {
+    setIsExtractingAudio(true);
+    setStatusMessage(`Извлечение звуковой дорожки из видео [${file.name}] (48 кГц)...`);
+
+    try {
+      if (!isInitialized) {
+        await initAudioEngine();
+      }
+
+      const pcmFloat32 = await MediaNormalizer.extractAudioFromVideo(file, 48000);
+      if (!pcmFloat32 || pcmFloat32.length === 0) {
+        setStatusMessage(`Видео [${file.name}] загружено (звуковая дорожка не найдена).`);
+        return;
+      }
+
+      const totalFrames = pcmFloat32.length / 2;
+      const calcDur = totalFrames / 48000;
+      setVideoDuration((prev) => (prev > 0 ? prev : calcDur));
+
+      const targetTrackId = tracks.length > 0 ? tracks[0].id : 1;
+      const clipId = Date.now();
+
+      setTracks((prev) => {
+        const tid = prev.length > 0 ? prev[0].id : 1;
+        const videoClip = {
+          id: clipId,
+          name: `Оригинал: ${file.name}`,
+          offsetSamples: 0,
+          lengthSamples: totalFrames,
+          gain: 1.0,
+          pan: 0,
+          fadeInSamples: 0,
+          fadeOutSamples: 0,
+          buffer: pcmFloat32,
+          color: '#06b6d4'
+        };
+
+        const exists = prev.some((t) => t.id === tid);
+        if (exists) {
+          return prev.map((t) =>
+            t.id === tid
+              ? {
+                  ...t,
+                  name: `Оригинал [${file.name}]`,
+                  clips: [videoClip]
+                }
+              : t
+          );
+        } else {
+          const newTr = createNewTrack(tid, `Оригинал [${file.name}]`, '#06b6d4');
+          newTr.clips = [videoClip];
+          return [...prev, newTr];
+        }
+      });
+
+      uploadRawPCMToTrack(pcmFloat32, targetTrackId, clipId, 0, 1.0, 0.0, true);
+      setStatusMessage(`Оригинальный звук видео [${file.name}] загружен на Дорожку 1!`);
+      triggerAutoSave();
+    } catch (err: any) {
+      console.warn('Ошибка извлечения звука видео:', err);
+      setStatusMessage(`Ошибка извлечения звука: ${err?.message || err}`);
+    } finally {
+      setIsExtractingAudio(false);
+    }
+  };
+
   // Ручной выбор видео
   const handleManualVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -515,58 +584,15 @@ export const MinimalStudio: React.FC = () => {
       timestamp: Date.now(),
       blob: file
     }).then(() => AssetDatabase.getInstance().getStats().then(setDbStats)).catch(console.error);
+
+    // Автоматически извлекаем оригинальный звук на Дорожку 1
+    extractAndLoadVideoAudio(file);
   };
 
-  // Извлечение звука оригинала на Дорожку №1 (C++ resample)
+  // Извлечение звука оригинала по кнопке на панели
   const handleExtractVideoAudio = async () => {
     if (!videoFile) return;
-
-    setIsExtractingAudio(true);
-    setStatusMessage('Извлечение и C++ ресемплинг звука видеофайла (48 кГц)...');
-
-    try {
-      if (!isInitialized) {
-        await initAudioEngine();
-      }
-
-      const pcmFloat32 = await MediaNormalizer.extractAudioFromVideo(videoFile, 48000);
-      const totalFrames = pcmFloat32.length / 2;
-
-      const targetTrackId = tracks[0]?.id || 1;
-      uploadRawPCMToTrack(pcmFloat32, targetTrackId, Date.now(), 0, 1.0, 0.0, true);
-
-      setTracks((prev) =>
-        prev.map((t) =>
-          t.id === targetTrackId
-            ? {
-                ...t,
-                name: `Звук видео [${videoFile.name}]`,
-                clips: [
-                  {
-                    id: Date.now(),
-                    name: `VideoAudio_${videoFile.name}`,
-                    offsetSamples: 0,
-                    lengthSamples: totalFrames,
-                    gain: 1.0,
-                    pan: 0,
-                    fadeInSamples: 0,
-                    fadeOutSamples: 0,
-                    buffer: pcmFloat32,
-                    color: '#06b6d4'
-                  }
-                ]
-              }
-            : t
-        )
-      );
-
-      setStatusMessage('Оригинальный звук видео загружен на Дорожку 1!');
-      triggerAutoSave();
-    } catch (err: any) {
-      setStatusMessage(`Ошибка извлечения звука: ${err.message}`);
-    } finally {
-      setIsExtractingAudio(false);
-    }
+    await extractAndLoadVideoAudio(videoFile);
   };
 
   // --- 9. Изменение параметров микшера ---
@@ -631,7 +657,8 @@ export const MinimalStudio: React.FC = () => {
     }
     setStatusMessage(`Загрузка и ресемплинг "${file.name}" в CH ${trackId}...`);
     try {
-      const uploadRes = await uploadAudioFileToTrack(file, trackId, Date.now(), 0);
+      const clipId = Date.now();
+      const uploadRes = await uploadAudioFileToTrack(file, trackId, clipId, 0);
 
       // Кэшируем ассет в SQL/IndexedDB базу данных
       await AssetDatabase.getInstance().saveAsset({
@@ -657,7 +684,7 @@ export const MinimalStudio: React.FC = () => {
                 name: file.name.replace(/\.[^/.]+$/, ''),
                 clips: [
                   {
-                    id: Date.now(),
+                    id: clipId,
                     name: file.name,
                     offsetSamples: 0,
                     lengthSamples: uploadRes.samplesCount,
@@ -693,11 +720,13 @@ export const MinimalStudio: React.FC = () => {
       const totalFrames = audioPcm.length / 2;
       const calcDur = totalFrames / 48000;
       setVideoDuration((prev) => (prev > 0 ? prev : calcDur));
+      const clipId = Date.now();
+      const targetId = tracks.length > 0 ? tracks[0].id : 1;
 
       setTracks((prev) => {
-        const targetId = prev.length > 0 ? prev[0].id : 1;
+        const tid = prev.length > 0 ? prev[0].id : 1;
         const videoClip = {
-          id: Date.now(),
+          id: clipId,
           name: `Audio_${file.name}`,
           offsetSamples: 0,
           lengthSamples: totalFrames,
@@ -709,10 +738,10 @@ export const MinimalStudio: React.FC = () => {
           color: '#06b6d4'
         };
 
-        const exists = prev.some((t) => t.id === targetId);
+        const exists = prev.some((t) => t.id === tid);
         if (exists) {
           return prev.map((t) =>
-            t.id === targetId
+            t.id === tid
               ? {
                   ...t,
                   name: `Видео-звук [${file.name}]`,
@@ -721,13 +750,13 @@ export const MinimalStudio: React.FC = () => {
               : t
           );
         } else {
-          const newTr = createNewTrack(targetId, `Видео-звук [${file.name}]`, '#06b6d4');
+          const newTr = createNewTrack(tid, `Видео-звук [${file.name}]`, '#06b6d4');
           newTr.clips = [videoClip];
           return [...prev, newTr];
         }
       });
 
-      uploadRawPCMToTrack(audioPcm, 1, Date.now(), 0, 1.0, 0.0, true);
+      uploadRawPCMToTrack(audioPcm, targetId, clipId, 0, 1.0, 0.0, true);
     }
 
     triggerAutoSave();
@@ -742,13 +771,12 @@ export const MinimalStudio: React.FC = () => {
     const totalFrames = pcmBuffer.length / 2;
     const clipId = Date.now();
 
-    let effectiveTrackId = config.trackId;
+    const targetTrackId = config.trackId || (tracks.length > 0 ? Math.max(...tracks.map((t) => t.id)) + 1 : 1);
 
     setTracks((prev) => {
-      if (!effectiveTrackId || !config.replaceExisting) {
-        const nextId = effectiveTrackId || (prev.length > 0 ? Math.max(...prev.map((t) => t.id)) + 1 : 1);
-        effectiveTrackId = nextId;
-        const newTrack = createNewTrack(nextId, config.name, config.color);
+      const existing = prev.find((t) => t.id === targetTrackId);
+      if (!existing || !config.replaceExisting) {
+        const newTrack = createNewTrack(targetTrackId, config.name, config.color);
         newTrack.clips = [
           {
             id: clipId,
@@ -766,7 +794,7 @@ export const MinimalStudio: React.FC = () => {
         return [...prev, newTrack];
       } else {
         return prev.map((t) =>
-          t.id === effectiveTrackId
+          t.id === targetTrackId
             ? {
                 ...t,
                 name: config.name || t.name,
@@ -791,9 +819,7 @@ export const MinimalStudio: React.FC = () => {
       }
     });
 
-    if (effectiveTrackId) {
-      uploadRawPCMToTrack(pcmBuffer, effectiveTrackId, clipId, 0, 1.0, 0.0, true);
-    }
+    uploadRawPCMToTrack(pcmBuffer, targetTrackId, clipId, 0, 1.0, 0.0, true);
 
     triggerAutoSave();
   };
@@ -964,11 +990,22 @@ export const MinimalStudio: React.FC = () => {
         logs: ['[Шаг 3] Подмена оригинального аудиопотока в видеофайле без перекодирования картинки']
       });
 
+      const timelineHasOriginalAudio = tracks.some(
+        (t) =>
+          (t.name.toLowerCase().includes('видео') ||
+            t.name.toLowerCase().includes('video') ||
+            t.name.toLowerCase().includes('оригинал')) &&
+          t.clips &&
+          t.clips.length > 0 &&
+          !t.mute
+      );
+
       const outputFileName = `mixed_${videoFile.name.replace(/\.[^/.]+$/, '')}.mp4`;
       const finalVideoBlob = await globalRenderManager.muxAudioIntoVideo(
         videoFile,
         renderResult.wavBlob,
-        outputFileName
+        outputFileName,
+        { timelineHasOriginalAudio }
       );
 
       if (!finalVideoBlob) {

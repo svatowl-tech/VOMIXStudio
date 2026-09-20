@@ -566,10 +566,18 @@ export class NativeDAWBridge {
               const index1 = Math.floor(srcIndex);
               const index2 = Math.min(inFrames - 1, index1 + 1);
               const t = srcIndex - index1;
-              for (let ch = 0; ch < channels; ch++) {
-                const val1 = heapF32[inOffset + index1 * channels + ch] || 0;
-                const val2 = heapF32[inOffset + index2 * channels + ch] || 0;
-                heapF32[outOffset + i * channels + ch] = val1 + (val2 - val1) * t;
+              if (channels === 1) {
+                const val1 = heapF32[inOffset + index1] || 0;
+                const val2 = heapF32[inOffset + index2] || 0;
+                const s = val1 + (val2 - val1) * t;
+                heapF32[outOffset + i * 2] = s;
+                heapF32[outOffset + i * 2 + 1] = s;
+              } else {
+                for (let ch = 0; ch < 2; ch++) {
+                  const val1 = heapF32[inOffset + index1 * channels + ch] || 0;
+                  const val2 = heapF32[inOffset + index2 * channels + ch] || 0;
+                  heapF32[outOffset + i * 2 + ch] = val1 + (val2 - val1) * t;
+                }
               }
             }
             return outFrames;
@@ -1493,6 +1501,15 @@ export class NativeDAWBridge {
     }
     if (inSampleRate === NativeDAWBridge.TARGET_SAMPLE_RATE && channels === 2) {
       return inputPcm;
+    }
+    if (inSampleRate === NativeDAWBridge.TARGET_SAMPLE_RATE && channels === 1) {
+      const out = new Float32Array(inputPcm.length * 2);
+      for (let i = 0; i < inputPcm.length; i++) {
+        const s = inputPcm[i];
+        out[i * 2] = s;
+        out[i * 2 + 1] = s;
+      }
+      return out;
     }
 
     const mod = this.getModule();
