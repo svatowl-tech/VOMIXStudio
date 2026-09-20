@@ -844,7 +844,20 @@ export class NativeDAWBridge {
     const ptr = this.allocateFloats(data.length);
     const mod = this.getModule();
     const floatOffset = ptr >> 2;
-    mod.HEAPF32.set(data, floatOffset);
+    
+    let heapF32 = mod.HEAPF32;
+    if (!heapF32) {
+      const buffer = mod.buffer || mod.wasmMemory?.buffer || (mod.memory ? mod.memory.buffer : null);
+      if (buffer) {
+        heapF32 = new Float32Array(buffer);
+      }
+    }
+    
+    if (heapF32) {
+      heapF32.set(data, floatOffset);
+    } else {
+      console.warn('[NativeDAWBridge] HEAPF32 не найден при записи Float32.');
+    }
     return ptr;
   }
 
@@ -855,7 +868,21 @@ export class NativeDAWBridge {
     if (!ptr || length <= 0) return new Float32Array(0);
     const mod = this.getModule();
     const floatOffset = ptr >> 2;
-    const view = mod.HEAPF32.subarray(floatOffset, floatOffset + length);
+    
+    let heapF32 = mod.HEAPF32;
+    if (!heapF32) {
+      const buffer = mod.buffer || mod.wasmMemory?.buffer || (mod.memory ? mod.memory.buffer : null);
+      if (buffer) {
+        heapF32 = new Float32Array(buffer);
+      }
+    }
+    
+    if (!heapF32) {
+      console.warn('[NativeDAWBridge] HEAPF32 не найден при чтении Float32.');
+      return new Float32Array(0);
+    }
+    
+    const view = heapF32.subarray(floatOffset, floatOffset + length);
     const result = new Float32Array(length);
     result.set(view);
     return result;
@@ -867,7 +894,21 @@ export class NativeDAWBridge {
   public readUint8Direct(ptr: number, length: number): Uint8Array {
     if (!ptr || length <= 0) return new Uint8Array(0);
     const mod = this.getModule();
-    const view = mod.HEAPU8.subarray(ptr, ptr + length);
+    
+    let heapU8 = mod.HEAPU8;
+    if (!heapU8) {
+      const buffer = mod.buffer || mod.wasmMemory?.buffer || (mod.memory ? mod.memory.buffer : null);
+      if (buffer) {
+        heapU8 = new Uint8Array(buffer);
+      }
+    }
+    
+    if (!heapU8) {
+      console.warn('[NativeDAWBridge] HEAPU8 не найден при чтении Uint8.');
+      return new Uint8Array(0);
+    }
+    
+    const view = heapU8.subarray(ptr, ptr + length);
     const result = new Uint8Array(length);
     result.set(view);
     return result;
@@ -2722,6 +2763,82 @@ function processVSTBlock(bufL: Float32Array, bufR: Float32Array, numFrames: numb
           const compR = sR + Math.sign(sR) * Math.pow(Math.abs(sR), 0.7) * 0.25;
           bufL[i] = sL * (1 - depthPct) + compL * depthPct;
           bufR[i] = sR * (1 - depthPct) + compR * depthPct;
+        }
+        break;
+      }
+
+      case 'vst-rvox': {
+        const comp = params.comp ?? 0; // 0 to 10
+        const gate = params.gate ?? -80; // -80 to 0 dB
+        const gainDb = params.gain ?? 0; // -30 to 0 dB
+        
+        const gateLin = Math.pow(10, gate / 20);
+        const gainLin = Math.pow(10, gainDb / 20);
+        
+        // Чем больше компрессия (comp), тем ниже порог и выше соотношение
+        const threshDb = -12 - comp * 3.2; 
+        const ratio = 1.0 + comp * 0.45;
+        const threshLin = Math.pow(10, threshDb / 20);
+        
+        let env = state.cla.env || 0;
+        const attCoeff = Math.exp(-1 / (0.002 * sampleRate)); // Быстрая атака (2ms)
+        const relCoeff = Math.exp(-1 / (0.12 * sampleRate));  // Релиз (120ms)
+
+        for (let i = 0; i < numFrames; i++) {
+          let sL = bufL[i];
+          let sR = bufR[i];
+          const absVal = Math.max(Math.abs(sL), Math.abs(sR));
+
+          // 1. Встроенный гейт R-Vox
+          let gateGain = 1.0;
+          if (absVal < gateLin) {
+            gateGain = 0.05 + 0.95 * (absVal / (gateLin || 1e-5));
+          }
+
+          // 2. Интеллектуальный компрессор R-Vox
+          if (absVal > env) {
+            env = attCoeff * env + (1 - attCoeff) * absVal;
+          } else {
+            env = relCoeff * env + (1 - relCoeff) * absVal;
+          }
+
+          const envDb = 20 * Math.log10(Math.max(1e-5, env));
+          let gainReductionDb = 0;
+          if (envDb > threshDb) {
+            gainReductionDb = (1 / ratio - 1) * (envDb - threshDb);
+          }
+          
+          const compGainLin = Math.pow(10, gainReductionDb / 20);
+          
+          // Выходной уровень компенсируется автоматически в R-Vox при компрессии
+          const autoMakeupLin = Math.pow(10, (comp * 1.5) / 20);
+
+          bufL[i] = sL * gateGain * compGainLin * autoMakeupLin * gainLin;
+          bufR[i] = sR * gateGain * compGainLin * autoMakeupLin * gainLin;
+        }
+        state.cla.env = env;
+        break;
+      }
+
+      case 'vst-l2': {
+        const threshold = params.threshold ?? 0; // 0 to -30 dB
+        const outCeil = params.out_ceil ?? -0.2; // 0 to -18 dB
+        const releaseMs = params.release ?? 1.0; // 0.01 to 1000 ms
+
+        const threshLin = Math.pow(10, threshold / 20);
+        const ceilLin = Math.pow(10, outCeil / 20);
+        const boostLin = 1.0 / Math.max(1e-4, threshLin);
+
+        for (let i = 0; i < numFrames; i++) {
+          let sL = bufL[i] * boostLin;
+          let sR = bufR[i] * boostLin;
+
+          // Жесткое лимитирование "в кирпич"
+          if (Math.abs(sL) > ceilLin) sL = Math.sign(sL) * ceilLin;
+          if (Math.abs(sR) > ceilLin) sR = Math.sign(sR) * ceilLin;
+
+          bufL[i] = sL;
+          bufR[i] = sR;
         }
         break;
       }

@@ -331,23 +331,73 @@ export class MediaNormalizer {
    * ==========================================================================
    */
   public static applyGain(buffer: Float32Array, gainDb: number, inPlace: boolean = false): Float32Array {
-    if (!globalNativeDAWBridge.isReady) {
-      throw new Error('[C++ MediaNormalizer] Ошибка изменения усиления: C++ ядро WebAssembly не готово.');
-    }
-
     if (!buffer || buffer.length === 0 || Math.abs(gainDb) < 0.001) {
       return inPlace ? buffer : new Float32Array(buffer);
+    }
+
+    const factor = Math.pow(10, gainDb / 20);
+
+    // Если буфер огромный (более 1 млн сэмплов), применяем коэффициент прямо в JS
+    // для избежания тройного копирования в кучу WASM и обратно, что приводит к "Array buffer allocation failed"
+    if (buffer.length > 1000000) {
+      if (inPlace) {
+        for (let i = 0; i < buffer.length; i++) {
+          buffer[i] *= factor;
+        }
+        return buffer;
+      } else {
+        try {
+          const result = new Float32Array(buffer.length);
+          for (let i = 0; i < buffer.length; i++) {
+            result[i] = buffer[i] * factor;
+          }
+          return result;
+        } catch (e) {
+          console.warn('[C++ MediaNormalizer] Не удалось выделить память под копию буфера, применяем gain in-place:', e);
+          for (let i = 0; i < buffer.length; i++) {
+            buffer[i] *= factor;
+          }
+          return buffer;
+        }
+      }
+    }
+
+    if (!globalNativeDAWBridge.isReady) {
+      if (inPlace) {
+        for (let i = 0; i < buffer.length; i++) {
+          buffer[i] *= factor;
+        }
+        return buffer;
+      } else {
+        const result = new Float32Array(buffer.length);
+        for (let i = 0; i < buffer.length; i++) {
+          result[i] = buffer[i] * factor;
+        }
+        return result;
+      }
     }
 
     const bridge = globalNativeDAWBridge;
     const mod = bridge.getModule();
 
     if (!mod.applyGain) {
-      throw new Error('[C++ MediaNormalizer] Нативная C++ функция applyGain отсутствует в WASM модуле');
+      if (inPlace) {
+        for (let i = 0; i < buffer.length; i++) {
+          buffer[i] *= factor;
+        }
+        return buffer;
+      } else {
+        const result = new Float32Array(buffer.length);
+        for (let i = 0; i < buffer.length; i++) {
+          result[i] = buffer[i] * factor;
+        }
+        return result;
+      }
     }
 
-    const ptr = bridge.writeFloat32Direct(buffer);
+    let ptr = 0;
     try {
+      ptr = bridge.writeFloat32Direct(buffer);
       mod.applyGain(ptr, buffer.length, gainDb);
       const result = bridge.readFloat32Direct(ptr, buffer.length);
       if (inPlace) {
@@ -356,9 +406,23 @@ export class MediaNormalizer {
       }
       return result;
     } catch (err: any) {
-      throw new Error(`[C++ MediaNormalizer] Ошибка применения гейна в C++ ядре: ${err?.message || err}`);
+      console.warn('[C++ MediaNormalizer] Сбой WASM применения гейна, переходим на чистый JS:', err);
+      if (inPlace) {
+        for (let i = 0; i < buffer.length; i++) {
+          buffer[i] *= factor;
+        }
+        return buffer;
+      } else {
+        const result = new Float32Array(buffer.length);
+        for (let i = 0; i < buffer.length; i++) {
+          result[i] = buffer[i] * factor;
+        }
+        return result;
+      }
     } finally {
-      bridge.freeFloats(ptr);
+      if (ptr) {
+        bridge.freeFloats(ptr);
+      }
     }
   }
 }

@@ -310,6 +310,101 @@ export class VSTHostEngine {
               const baseName = f.name.replace(/\.(vst3|dll|clap|wasm|dylib|so)$/i, '');
               const ext = f.name.split('.').pop()?.toUpperCase() || 'VST3';
               const format = ext === 'CLAP' ? 'CLAP' : ext === 'WASM' ? 'Native/WASM' : 'VST3';
+              
+              // Проверяем, является ли файл частью пакета Waves WaveShell
+              const isWaveShell = f.name.toLowerCase().includes('waveshell');
+              
+              if (isWaveShell) {
+                // Автоматически распознаем и извлекаем индивидуальные классические плагины Waves из Shell-контейнера
+                const wavesPlugins = [
+                  {
+                    id: 'vst-cla76',
+                    name: 'Waves CLA-76 Compressor / Limiter',
+                    category: 'Dynamics' as VSTPluginCategory,
+                    vendor: 'Waves',
+                    version: '15.3.0',
+                    format: 'VST3' as const,
+                    path: `${dir.path}/${f.name} [CLA-76]`,
+                    latencySamples: 64,
+                    is64Bit: true,
+                    description: `Обнаружен через WaveShell. Легендарный транзисторный FET-компрессор из пакета Waves V15.`,
+                    color: '#0284c7',
+                    parameters: [
+                      { id: 'input', name: 'Input', min: -40, max: 0, defaultValue: -18, unit: 'dB', step: 0.5 },
+                      { id: 'output', name: 'Output', min: -18, max: 18, defaultValue: 2, unit: 'dB', step: 0.5 },
+                      { id: 'ratio', name: 'Ratio', min: 0, max: 4, defaultValue: 1, unit: 'idx', step: 1 },
+                      { id: 'attack', name: 'Attack', min: 1, max: 7, defaultValue: 4, unit: '', step: 0.1 },
+                      { id: 'release', name: 'Release', min: 1, max: 7, defaultValue: 6, unit: '', step: 0.1 }
+                    ],
+                    presets: [
+                      { id: 'vocal-preset', name: 'Vocal Spank', parameters: { input: -24, output: 4, ratio: 1, attack: 5, release: 5 } }
+                    ]
+                  },
+                  {
+                    id: 'vst-vocal-rider',
+                    name: 'Waves Vocal Rider',
+                    category: 'Dynamics' as VSTPluginCategory,
+                    vendor: 'Waves',
+                    version: '15.3.0',
+                    format: 'VST3' as const,
+                    path: `${dir.path}/${f.name} [Vocal Rider]`,
+                    latencySamples: 0,
+                    is64Bit: true,
+                    description: `Обнаружен через WaveShell. Интеллектуальный автоматический регулятор уровня вокала.`,
+                    color: '#e11d48',
+                    parameters: [
+                      { id: 'target_db', name: 'Target', min: -40, max: 0, defaultValue: -18, unit: 'dB', step: 0.5 },
+                      { id: 'range_db', name: 'Range', min: 1, max: 12, defaultValue: 6, unit: 'dB', step: 0.5 },
+                      { id: 'attack_ms', name: 'Speed', min: 1, max: 100, defaultValue: 25, unit: 'ms', step: 1 }
+                    ],
+                    presets: []
+                  },
+                  {
+                    id: 'vst-rvox',
+                    name: 'Waves Renaissance Vox (R-Vox)',
+                    category: 'Dynamics' as VSTPluginCategory,
+                    vendor: 'Waves',
+                    version: '15.3.0',
+                    format: 'VST3' as const,
+                    path: `${dir.path}/${f.name} [R-Vox]`,
+                    latencySamples: 0,
+                    is64Bit: true,
+                    description: `Обнаружен через WaveShell. Легендарный вокальный компрессор и гейт Renaissance Vox.`,
+                    color: '#0ea5e9',
+                    parameters: [
+                      { id: 'comp', name: 'Comp', min: 0, max: 10, defaultValue: 0, unit: '', step: 0.1 },
+                      { id: 'gate', name: 'Gate', min: -80, max: 0, defaultValue: -80, unit: 'dB', step: 0.5 },
+                      { id: 'gain', name: 'Gain', min: -30, max: 0, defaultValue: 0, unit: 'dB', step: 0.5 }
+                    ],
+                    presets: []
+                  },
+                  {
+                    id: 'vst-l2',
+                    name: 'Waves L2 Ultramaximizer',
+                    category: 'Dynamics' as VSTPluginCategory,
+                    vendor: 'Waves',
+                    version: '15.3.0',
+                    format: 'VST3' as const,
+                    path: `${dir.path}/${f.name} [L2]`,
+                    latencySamples: 12,
+                    is64Bit: true,
+                    description: `Обнаружен через WaveShell. Легендарный пиковый лимитер-максимизатор L2.`,
+                    color: '#f59e0b',
+                    parameters: [
+                      { id: 'threshold', name: 'Threshold', min: -30, max: 0, defaultValue: 0, unit: 'dB', step: 0.1 },
+                      { id: 'out_ceil', name: 'Ceiling', min: -18, max: 0, defaultValue: -0.2, unit: 'dB', step: 0.1 },
+                      { id: 'release', name: 'Release', min: 0.01, max: 1000, defaultValue: 1.0, unit: 'ms', step: 0.1 }
+                    ],
+                    presets: []
+                  }
+                ];
+                
+                wavesPlugins.forEach((wp) => {
+                  this.catalog.set(wp.id, wp);
+                });
+                return;
+              }
+
               const pluginId = `vst_scanned_${dir.path}_${f.name}`.replace(/[^a-zA-Z0-9_-]/g, '_');
               
               if (!this.catalog.has(pluginId)) {

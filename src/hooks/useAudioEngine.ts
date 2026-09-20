@@ -450,7 +450,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             fadeInSamples: c.fadeInSamples || 0,
             fadeOutSamples: c.fadeOutSamples || 0,
             isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true,
-            buffer: c.buffer
+            buffer: undefined // Оптимизация: исключаем огромные Float32Array для предотвращения DataCloneError / OOM!
           }))
         });
       } catch (err) {
@@ -490,7 +490,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
               fadeInSamples: c.fadeInSamples || 0,
               fadeOutSamples: c.fadeOutSamples || 0,
               isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true,
-              buffer: c.buffer
+              buffer: undefined // Оптимизация: исключаем огромные Float32Array для предотвращения DataCloneError / OOM!
             }))
           }))
         });
