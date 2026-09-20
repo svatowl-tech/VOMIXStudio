@@ -68,15 +68,12 @@ import {
 import { globalStemSeparationService } from '../services/StemSeparationService';
 import { TrackState } from '../audio/dawEngine';
 import { formatSMPTE } from '../utils/waveformUtils';
-
-export type AIPurposeType =
-  | 'stem_separation'
-  | 'denoise'
-  | 'dereverb'
-  | 'spectral_match'
-  | 'voicefixer'
-  | 'whisper_vad'
-  | 'vocal_chain';
+import {
+  globalAIPipelineStore,
+  AIPurposeType,
+  AIStepNode,
+  TrackAIConfig
+} from '../services/AIPipelineStore';
 
 const PURPOSE_TO_CATEGORY_MAP: Record<AIPurposeType, ModelCategory> = {
   stem_separation: 'separation',
@@ -87,41 +84,6 @@ const PURPOSE_TO_CATEGORY_MAP: Record<AIPurposeType, ModelCategory> = {
   whisper_vad: 'whisper',
   vocal_chain: 'denoise'
 };
-
-export interface AIStepNode {
-  id: string;
-  enabled: boolean;
-  purpose: AIPurposeType;
-  modelId: string;
-  intensity: number; // 0..100
-  dereverbAmount: number; // 0..100
-  enableLowCut: boolean;
-  warmthSat: number; // 0..100
-  airBandBoost: number; // 0..6 dB
-}
-
-export interface TrackAIConfig {
-  trackId: number;
-  enabled: boolean;
-  outputMode: 'replace' | 'new_track' | 'stems';
-  steps: AIStepNode[];
-  status: 'idle' | 'processing' | 'done' | 'error';
-  progressPercent: number;
-  statusMessage?: string;
-  lastProcessedPcm?: Float32Array;
-  lastProcessedName?: string;
-  abOriginalUrl?: string;
-  abProcessedUrl?: string;
-
-  // Convenience fields for step 0
-  purpose?: AIPurposeType;
-  modelId?: string;
-  intensity?: number;
-  dereverbAmount?: number;
-  enableLowCut?: boolean;
-  warmthSat?: number;
-  airBandBoost?: number;
-}
 
 export interface DubbingAIStudioProps {
   tracks: TrackState[];
@@ -236,7 +198,13 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
   const [downloadProgress, setDownloadProgress] = useState<Record<string, ModelDownloadProgress>>({});
 
   // --- 0. MATRIX / ROUTER STATE ---
-  const [trackConfigs, setTrackConfigs] = useState<Record<number, TrackAIConfig>>({});
+  const [trackConfigs, setTrackConfigs] = useState<Record<number, TrackAIConfig>>(() => {
+    return globalAIPipelineStore.getConfigs();
+  });
+
+  useEffect(() => {
+    globalAIPipelineStore.setConfigs(trackConfigs);
+  }, [trackConfigs]);
   const [isBatchProcessing, setIsBatchProcessing] = useState<boolean>(false);
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number; message: string }>({
     current: 0,
@@ -338,55 +306,60 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
     setTrackConfigs((prev) => {
       const updated: Record<number, TrackAIConfig> = { ...prev };
       tracks.forEach((track, index) => {
+        const isFirst = index === 0 || track.id === 1;
+        const nameLower = (track.name || '').toLowerCase();
+        const isVideoOrOrig =
+          track.isOriginalAudio ||
+          nameLower.includes('видео') ||
+          nameLower.includes('video') ||
+          nameLower.includes('оригинал') ||
+          nameLower.includes('отригал') ||
+          nameLower.includes('отригала') ||
+          nameLower.includes('orig') ||
+          nameLower.includes('original');
+
+        const initialPurpose: AIPurposeType = isVideoOrOrig || isFirst ? 'stem_separation' : 'denoise';
+
+        const initialSteps: AIStepNode[] = isVideoOrOrig || isFirst
+          ? [
+              {
+                id: `step_${Date.now()}_1`,
+                enabled: true,
+                purpose: 'stem_separation',
+                modelId: 'uvr_mdx_voc_ft',
+                intensity: 75,
+                dereverbAmount: 60,
+                enableLowCut: true,
+                warmthSat: 40,
+                airBandBoost: 3.5
+              }
+            ]
+          : [
+              {
+                id: `step_${Date.now()}_1`,
+                enabled: true,
+                purpose: 'denoise',
+                modelId: 'deepfilternet3',
+                intensity: 75,
+                dereverbAmount: 60,
+                enableLowCut: true,
+                warmthSat: 40,
+                airBandBoost: 3.5
+              },
+              {
+                id: `step_${Date.now()}_2`,
+                enabled: true,
+                purpose: 'dereverb',
+                modelId: 'reverb_foxjoy',
+                intensity: 60,
+                dereverbAmount: 60,
+                enableLowCut: true,
+                warmthSat: 40,
+                airBandBoost: 3.5
+              }
+            ];
+
         if (!updated[track.id]) {
-          const isFirst = index === 0;
-          const isVideoOrOrig =
-            track.name.toLowerCase().includes('видео') ||
-            track.name.toLowerCase().includes('video') ||
-            track.name.toLowerCase().includes('оригинал') ||
-            track.name.toLowerCase().includes('original');
-
-          const initialPurpose: AIPurposeType = isVideoOrOrig || isFirst ? 'stem_separation' : 'denoise';
-
-          const initialSteps: AIStepNode[] = isVideoOrOrig || isFirst
-            ? [
-                {
-                  id: `step_${Date.now()}_1`,
-                  enabled: true,
-                  purpose: 'stem_separation',
-                  modelId: 'uvr_mdx_voc_ft',
-                  intensity: 75,
-                  dereverbAmount: 60,
-                  enableLowCut: true,
-                  warmthSat: 40,
-                  airBandBoost: 3.5
-                }
-              ]
-            : [
-                {
-                  id: `step_${Date.now()}_1`,
-                  enabled: true,
-                  purpose: 'denoise',
-                  modelId: 'deepfilternet3',
-                  intensity: 75,
-                  dereverbAmount: 60,
-                  enableLowCut: true,
-                  warmthSat: 40,
-                  airBandBoost: 3.5
-                },
-                {
-                  id: `step_${Date.now()}_2`,
-                  enabled: true,
-                  purpose: 'dereverb',
-                  modelId: 'reverb_foxjoy',
-                  intensity: 60,
-                  dereverbAmount: 60,
-                  enableLowCut: true,
-                  warmthSat: 40,
-                  airBandBoost: 3.5
-                }
-              ];
-
           updated[track.id] = {
             trackId: track.id,
             enabled: true,
@@ -401,6 +374,15 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
             outputMode: initialPurpose === 'stem_separation' ? 'stems' : 'replace',
             status: 'idle',
             progressPercent: 0
+          };
+        } else if ((isVideoOrOrig || isFirst) && updated[track.id].purpose === 'denoise' && updated[track.id].status === 'idle') {
+          // Auto-upgrade empty/default track config if it was subsequently identified as the original video/audio track
+          updated[track.id] = {
+            ...updated[track.id],
+            purpose: 'stem_separation',
+            modelId: 'uvr_mdx_voc_ft',
+            steps: initialSteps,
+            outputMode: 'stems'
           };
         }
       });
@@ -1350,9 +1332,13 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                             CH #{track.id}: {track.name}
                           </span>
                           {(track.isOriginalAudio ||
+                            track.id === 1 ||
                             track.name.toLowerCase().includes('видео') ||
                             track.name.toLowerCase().includes('video') ||
                             track.name.toLowerCase().includes('оригинал') ||
+                            track.name.toLowerCase().includes('отригал') ||
+                            track.name.toLowerCase().includes('отригала') ||
+                            track.name.toLowerCase().includes('orig') ||
                             track.name.toLowerCase().includes('original')) && (
                             <span className="text-[10px] px-2 py-0.5 rounded-full font-mono font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30 flex items-center gap-1 shadow-sm">
                               🎬 [Аудиодорожка Видеофайла]

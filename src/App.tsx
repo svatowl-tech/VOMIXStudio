@@ -411,6 +411,7 @@ export default function App() {
               ? {
                   ...t,
                   name: `🎬 Оригинальный звук [${videoFile.name}]`,
+                  isOriginalAudio: true,
                   clips: [videoClip]
                 }
               : t
@@ -426,6 +427,7 @@ export default function App() {
                   ...t,
                   name: `🎬 Оригинальный звук [${videoFile.name}]`,
                   color: '#06b6d4',
+                  isOriginalAudio: true,
                   clips: [videoClip]
                 }
               : t
@@ -436,6 +438,7 @@ export default function App() {
         const newTrackId = prev.length > 0 ? Math.max(...prev.map((t) => t.id)) + 1 : 1;
         actualTargetTrackId = newTrackId;
         const newTr = createNewTrack(newTrackId, `🎬 Оригинальный звук [${videoFile.name}]`, '#06b6d4');
+        newTr.isOriginalAudio = true;
         newTr.clips = [videoClip];
         return [newTr, ...prev];
       });
@@ -456,11 +459,15 @@ export default function App() {
     const clipId = Date.now();
     let effectiveTrackId = config.trackId;
 
+    const isOriginal = effectiveTrackId === 1 ||
+      /оригинал|original|видео|video|отригал|orig/i.test(config.name || file.name);
+
     setTracks((prev) => {
       if (!effectiveTrackId || !config.replaceExisting) {
         const nextId = effectiveTrackId || (prev.length > 0 ? Math.max(...prev.map((t) => t.id)) + 1 : 1);
         effectiveTrackId = nextId;
         const newTrack = createNewTrack(nextId, config.name, config.color);
+        newTrack.isOriginalAudio = isOriginal;
         newTrack.clips = [
           {
             id: clipId,
@@ -483,6 +490,7 @@ export default function App() {
                 ...t,
                 name: config.name || t.name,
                 color: config.color || t.color,
+                isOriginalAudio: isOriginal || t.isOriginalAudio,
                 clips: [
                   {
                     id: clipId,

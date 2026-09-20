@@ -92,6 +92,9 @@ interface ActiveDragState {
   initialCueEndSec?: number;
   currentCueStartSec?: number;
   currentCueEndSec?: number;
+  initialBuffer?: Float32Array;
+  initialUntrimmedBuffer?: Float32Array;
+  initialTrimStartSamples?: number;
 }
 
 export const TimelineView: React.FC<TimelineViewProps> = ({
@@ -1003,6 +1006,9 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     const effectiveMode =
       activeTool === 'stretch' && (mode === 'move' || mode === 'trim-end') ? 'time-stretch' : mode;
 
+    const untrimmed = clip.untrimmedBuffer || clip.buffer;
+    const trimStart = typeof clip.trimStartSamples === 'number' ? clip.trimStartSamples : 0;
+
     setActiveDrag({
       trackId,
       clipId: clip.id,
@@ -1012,7 +1018,10 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       initialLengthSamples: clip.lengthSamples,
       initialFadeInSamples: clip.fadeInSamples,
       initialFadeOutSamples: clip.fadeOutSamples,
-      currentLengthSamples: clip.lengthSamples
+      currentLengthSamples: clip.lengthSamples,
+      initialBuffer: clip.buffer,
+      initialUntrimmedBuffer: untrimmed,
+      initialTrimStartSamples: trimStart
     });
   };
 
@@ -1116,20 +1125,66 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
         }
 
         if (activeDrag.mode === 'trim-start') {
-          const newOffset = Math.max(0, (activeDrag.initialOffsetSamples || 0) + deltaSamples);
-          const newLength = Math.max(
-            sampleRate * 0.1,
-            (activeDrag.initialLengthSamples || 0) - deltaSamples
+          const untrimmed = activeDrag.initialUntrimmedBuffer || clip.buffer;
+          const isStereo = untrimmed.length >= (activeDrag.initialLengthSamples || clip.lengthSamples) * 2;
+          const channels = isStereo ? 2 : 1;
+
+          const minLength = Math.round(sampleRate * 0.1);
+          const minDelta = Math.max(
+            -(activeDrag.initialOffsetSamples || 0),
+            -(activeDrag.initialTrimStartSamples || 0)
           );
-          return { ...clip, offsetSamples: newOffset, lengthSamples: newLength };
+          const maxDelta = (activeDrag.initialLengthSamples || 0) - minLength;
+
+          const actualDelta = Math.max(minDelta, Math.min(maxDelta, deltaSamples));
+
+          const newOffset = (activeDrag.initialOffsetSamples || 0) + actualDelta;
+          const newLength = (activeDrag.initialLengthSamples || 0) - actualDelta;
+          const newTrimStart = (activeDrag.initialTrimStartSamples || 0) + actualDelta;
+
+          const newBuffer = untrimmed.subarray(
+            newTrimStart * channels,
+            (newTrimStart + newLength) * channels
+          );
+
+          return {
+            ...clip,
+            offsetSamples: newOffset,
+            lengthSamples: newLength,
+            untrimmedBuffer: untrimmed,
+            trimStartSamples: newTrimStart,
+            buffer: newBuffer
+          };
         }
 
         if (activeDrag.mode === 'trim-end') {
-          const newLength = Math.max(
-            sampleRate * 0.1,
-            (activeDrag.initialLengthSamples || 0) + deltaSamples
+          const untrimmed = activeDrag.initialUntrimmedBuffer || clip.buffer;
+          const isStereo = untrimmed.length >= (activeDrag.initialLengthSamples || clip.lengthSamples) * 2;
+          const channels = isStereo ? 2 : 1;
+          const totalFrames = untrimmed.length / channels;
+
+          const minLength = Math.round(sampleRate * 0.1);
+          const initialTrimStart = activeDrag.initialTrimStartSamples || 0;
+          const initialLength = activeDrag.initialLengthSamples || 0;
+
+          const minDelta = minLength - initialLength;
+          const maxDelta = totalFrames - initialTrimStart - initialLength;
+
+          const actualDelta = Math.max(minDelta, Math.min(maxDelta, deltaSamples));
+          const newLength = initialLength + actualDelta;
+
+          const newBuffer = untrimmed.subarray(
+            initialTrimStart * channels,
+            (initialTrimStart + newLength) * channels
           );
-          return { ...clip, lengthSamples: newLength };
+
+          return {
+            ...clip,
+            lengthSamples: newLength,
+            untrimmedBuffer: untrimmed,
+            trimStartSamples: initialTrimStart,
+            buffer: newBuffer
+          };
         }
 
         if (activeDrag.mode === 'fade-in') {

@@ -32,6 +32,8 @@ export interface ClipConfig {
   originalBuffer?: Float32Array; // Исходный несжатый буфер для неразрушающего стретча
   originalLengthSamples?: number;
   wasmBufferPtr?: number; // Прямой указатель на Float32Array в куче C++ WebAssembly
+  untrimmedBuffer?: Float32Array; // Полный несжатый буфер для неразрушающей обрезки
+  trimStartSamples?: number; // Начальное смещение обрезки внутри untrimmedBuffer
 }
 
 export interface BiquadParams {

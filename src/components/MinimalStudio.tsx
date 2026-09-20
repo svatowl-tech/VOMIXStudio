@@ -72,6 +72,9 @@ import { SubtitleCue } from '../services/ProjectManager';
 import { formatSMPTE } from '../utils/waveformUtils';
 import { VoiceoverMixWizardModal } from './VoiceoverMixWizardModal';
 import { ClipCollisionInfo } from '../utils/collisionDetector';
+import { globalAIPipelineStore } from '../services/AIPipelineStore';
+import { globalStemSeparationService } from '../services/StemSeparationService';
+import { globalAudioAICleanupEngine } from '../services/AudioAICleanupEngine';
 
 export const MinimalStudio: React.FC = () => {
   // --- 1. Аудиодвижок DAW и AudioWorklet ---
@@ -579,12 +582,14 @@ export const MinimalStudio: React.FC = () => {
               ? {
                   ...t,
                   name: `Оригинал [${file.name}]`,
+                  isOriginalAudio: true,
                   clips: [videoClip]
                 }
               : t
           );
         } else {
           const newTr = createNewTrack(tid, `Оригинал [${file.name}]`, '#06b6d4');
+          newTr.isOriginalAudio = true;
           newTr.clips = [videoClip];
           return [...prev, newTr];
         }
@@ -869,13 +874,15 @@ export const MinimalStudio: React.FC = () => {
             t.id === tid
               ? {
                   ...t,
-                  name: `Видео-звук [${file.name}]`,
+                  name: `Оригинал [${file.name}]`,
+                  isOriginalAudio: true,
                   clips: [videoClip]
                 }
               : t
           );
         } else {
-          const newTr = createNewTrack(tid, `Видео-звук [${file.name}]`, '#06b6d4');
+          const newTr = createNewTrack(tid, `Оригинал [${file.name}]`, '#06b6d4');
+          newTr.isOriginalAudio = true;
           newTr.clips = [videoClip];
           return [...prev, newTr];
         }
@@ -897,11 +904,14 @@ export const MinimalStudio: React.FC = () => {
     const clipId = Date.now();
 
     const targetTrackId = config.trackId || (tracks.length > 0 ? Math.max(...tracks.map((t) => t.id)) + 1 : 1);
+    const isOriginal = targetTrackId === 1 ||
+      /оригинал|original|видео|video|отригал|orig/i.test(config.name || file.name);
 
     setTracks((prev) => {
       const existing = prev.find((t) => t.id === targetTrackId);
       if (!existing || !config.replaceExisting) {
         const newTrack = createNewTrack(targetTrackId, config.name, config.color);
+        newTrack.isOriginalAudio = isOriginal;
         newTrack.clips = [
           {
             id: clipId,
@@ -924,6 +934,7 @@ export const MinimalStudio: React.FC = () => {
                 ...t,
                 name: config.name || t.name,
                 color: config.color || t.color,
+                isOriginalAudio: isOriginal || t.isOriginalAudio,
                 clips: [
                   {
                     id: clipId,
@@ -1289,15 +1300,280 @@ export const MinimalStudio: React.FC = () => {
   };
 
   // Коллбэк Шага 1 Wizard: AI Очистка и EBU R128 Нормализация
-  const handleRunAIPipelineAndNorm = async (): Promise<TrackState[]> => {
-    const normResult = performLoudnessMatching(tracks, -18.0, -1.0);
-    const normalizedTracks = normResult.updatedTracks;
-    setTracks(normalizedTracks);
-    const summary = normResult.adjustments
-      .map((a) => `${a.trackName}: ${a.gainChangeDb >= 0 ? '+' : ''}${a.gainChangeDb} dB`)
-      .join(' | ');
-    setLoudnessMatchReport(`C++ выравнивание громкости (-18 dBFS): ${summary}`);
-    return normalizedTracks;
+  const handleRunAIPipelineAndNorm = async (
+    onProgress?: (msg: string, percent: number) => void
+  ): Promise<TrackState[]> => {
+    let currentTracks = [...tracks];
+    const configs = globalAIPipelineStore.getConfigs();
+    
+    // Сбор дорожек при разделении
+    const newTracksToAdd: TrackState[] = [];
+    
+    const activeConfigs = Object.values(configs).filter(
+      (c) => c.enabled && (c.steps || []).filter((s) => s.enabled).length > 0
+    );
+    
+    const totalStepsToRun = activeConfigs.reduce(
+      (acc, c) => acc + (c.steps || []).filter((s) => s.enabled).length,
+      0
+    );
+    
+    let processedStepsCount = 0;
+    
+    if (onProgress) {
+      onProgress('Запуск EBU R128 нормализации громкости на всех дорожках перед ИИ-обработкой...', 2);
+    }
+    
+    // Шаг 1. Нормализуем громкость на всех дорожках на уровне файлов/буферов
+    try {
+      const normResult = MediaNormalizer.autoMatchTrackVolumes(currentTracks, -18.0, -1.0);
+      const normalizedTracks = await Promise.all(currentTracks.map(async (track) => {
+        const adj = normResult.adjustments.find((a) => a.trackId === track.id);
+        if (!adj || adj.isSilent || Math.abs(adj.gainChangeDb) < 0.01) {
+          return { ...track, volumeDb: 0.0 }; // Сбрасываем фейдер в 0 дБ, так как дорожка нормализована (или тихая)
+        }
+        
+        const updatedClips = await Promise.all((track.clips || []).map(async (clip) => {
+          let newBuf = clip.buffer;
+          let newUntrimmed = clip.untrimmedBuffer;
+          
+          if (clip.buffer && clip.buffer.length > 0) {
+            newBuf = MediaNormalizer.applyGain(clip.buffer, adj.gainChangeDb, false);
+            // Загружаем нормализованный буфер в C++ аудио ядро
+            await uploadRawPCMToTrack(
+              newBuf,
+              track.id,
+              clip.id,
+              clip.offsetSamples || 0,
+              1.0, // Сбрасываем коэффициент усиления клипа в 1.0, так как гейн уже применен в буфер
+              clip.trimStartSamples || 0,
+              true
+            );
+          }
+          if (clip.untrimmedBuffer && clip.untrimmedBuffer.length > 0) {
+            newUntrimmed = MediaNormalizer.applyGain(clip.untrimmedBuffer, adj.gainChangeDb, false);
+          }
+          
+          return {
+            ...clip,
+            gain: 1.0, // Гейн клипа также сбрасываем в 1.0
+            buffer: newBuf,
+            untrimmedBuffer: newUntrimmed
+          };
+        }));
+        
+        return {
+          ...track,
+          clips: updatedClips,
+          volumeDb: 0.0 // fader сбрасывается в 0, так как гейн уже в файлах
+        };
+      }));
+      
+      currentTracks = normalizedTracks;
+      setTracks(currentTracks);
+      syncAllTracks(currentTracks);
+      
+      const summary = normResult.adjustments
+        .map((a) => `${a.trackName}: ${a.gainChangeDb >= 0 ? '+' : ''}${a.gainChangeDb.toFixed(1)} dB`)
+        .join(' | ');
+      setLoudnessMatchReport(`C++ выравнивание громкости (-18 dBFS): ${summary}`);
+    } catch (normErr: any) {
+      console.error('[Normalizer Error]', normErr);
+    }
+    
+    if (onProgress) {
+      onProgress(`Начало AI-обработки для ${activeConfigs.length} дорожек на основе нормализованных файлов...`, 5);
+    }
+    
+    for (const track of currentTracks) {
+      const config = configs[track.id];
+      if (!config || !config.enabled) continue;
+      
+      const activeSteps = (config.steps || []).filter((s) => s.enabled);
+      if (activeSteps.length === 0) continue;
+      
+      // Получаем буфер клипа
+      if (!track.clips || track.clips.length === 0) continue;
+      const clip = track.clips[0];
+      const pcm = clip.buffer;
+      if (!pcm || pcm.length === 0) continue;
+      
+      // Последовательное выполнение AI шагов
+      let currentPcm: any = new Float32Array(pcm);
+      let vocalsPcm: any = null;
+      let karaokePcm: any = null;
+      const trackName = track.name || `Дорожка ${track.id}`;
+      
+      for (let idx = 0; idx < activeSteps.length; idx++) {
+        const step = activeSteps[idx];
+        const stepName = step.purpose === 'stem_separation' ? 'Разделение дорожек'
+                        : step.purpose === 'denoise' ? 'Шумоподавление'
+                        : step.purpose === 'dereverb' ? 'Устранение эха'
+                        : step.purpose === 'spectral_match' ? 'Спектральное выравнивание'
+                        : step.purpose === 'voicefixer' ? 'Восстановление Air-Band'
+                        : step.purpose === 'vocal_chain' ? 'Голосовая AI-цепочка'
+                        : step.purpose;
+        
+        processedStepsCount++;
+        const percent = Math.min(95, Math.round(5 + (processedStepsCount / (totalStepsToRun || 1)) * 90));
+        
+        if (onProgress) {
+          onProgress(`[${trackName}] Выполняется ${stepName}...`, percent);
+        }
+        
+        if (step.purpose === 'stem_separation') {
+          const totalFrames = Math.floor((currentPcm as Float32Array).length / 2);
+          const left = new Float32Array(totalFrames);
+          const right = new Float32Array(totalFrames);
+          for (let i = 0; i < totalFrames; i++) {
+            left[i] = currentPcm[i * 2];
+            right[i] = currentPcm[i * 2 + 1];
+          }
+          
+          const sepRes = await globalStemSeparationService.separateStereoBuffer(left, right, {
+            sampleRate: 48000
+          });
+          
+          vocalsPcm = new Float32Array(totalFrames * 2);
+          karaokePcm = new Float32Array(totalFrames * 2);
+          for (let i = 0; i < totalFrames; i++) {
+            vocalsPcm[i * 2] = sepRes.vocalsStereo[0][i];
+            vocalsPcm[i * 2 + 1] = sepRes.vocalsStereo[1][i];
+            karaokePcm[i * 2] = sepRes.vocalsStereo[0][i]; // Backup
+            karaokePcm[i * 2 + 1] = sepRes.karaokeStereo[1][i];
+          }
+          currentPcm = vocalsPcm;
+        } else if (step.purpose === 'denoise') {
+          currentPcm = await globalAudioAICleanupEngine.processDenoise(currentPcm, {
+            modelId: step.modelId,
+            intensityPercent: step.intensity,
+            lowCutHz: step.enableLowCut ? 80 : 0,
+            sampleRate: 48000
+          });
+        } else if (step.purpose === 'dereverb') {
+          currentPcm = await globalAudioAICleanupEngine.processDereverb(currentPcm, {
+            modelId: step.modelId,
+            reductionAmountPercent: step.dereverbAmount,
+            sampleRate: 48000
+          });
+        } else if (step.purpose === 'spectral_match') {
+          const refTrack = currentTracks[0] || track;
+          const refClip = refTrack.clips?.[0];
+          const refPcm = refClip?.buffer || pcm;
+          const specRes = await globalAudioAICleanupEngine.matchVocalCurves(
+            refPcm,
+            currentPcm,
+            {
+              matchIntensity: step.intensity,
+              smoothingBands: 3,
+              formantWeight: 0.75
+            }
+          );
+          currentPcm = specRes.processedBuffer;
+        } else if (step.purpose === 'voicefixer') {
+          currentPcm = await globalAudioAICleanupEngine.processVoiceFixer(currentPcm, {
+            airBandBoostDb: step.airBandBoost,
+            declipSensitivity: 0.8,
+            warmthSaturation: step.warmthSat / 100,
+            subBassTuning: step.enableLowCut,
+            sampleRate: 48000
+          });
+        } else if (step.purpose === 'vocal_chain') {
+          const denoised = await globalAudioAICleanupEngine.processDenoise(currentPcm, {
+            modelId: step.modelId,
+            intensityPercent: step.intensity,
+            lowCutHz: step.enableLowCut ? 80 : 0,
+            sampleRate: 48000
+          });
+          const dereverbed = await globalAudioAICleanupEngine.processDereverb(denoised, {
+            modelId: 'reverb_foxjoy',
+            reductionAmountPercent: step.dereverbAmount,
+            sampleRate: 48000
+          });
+          currentPcm = await globalAudioAICleanupEngine.processVoiceFixer(dereverbed, {
+            airBandBoostDb: step.airBandBoost,
+            declipSensitivity: 0.85,
+            warmthSaturation: step.warmthSat / 100,
+            sampleRate: 48000
+          });
+        }
+      }
+      
+      if (config.outputMode === 'replace') {
+        currentTracks = currentTracks.map((t) => {
+          if (t.id === track.id) {
+            const updatedClip = {
+              ...t.clips[0],
+              name: `${clip.name} [AI Processed]`,
+              buffer: currentPcm,
+              lengthSamples: Math.floor(currentPcm.length / 2)
+            };
+            return {
+              ...t,
+              clips: [updatedClip]
+            };
+          }
+          return t;
+        });
+        
+        await uploadRawPCMToTrack(currentPcm, track.id, clip.id, 0, 1.0, 0, true);
+      } else if (config.outputMode === 'stems' && vocalsPcm && karaokePcm) {
+        const lengthSamples = Math.floor(vocalsPcm.length / 2);
+        const vocalsTrackId = Date.now() + Math.floor(Math.random() * 1000);
+        const karaokeTrackId = vocalsTrackId + 1;
+        
+        const newVocalsTrack: TrackState = {
+          ...createNewTrack(vocalsTrackId, `[Вокал] ${trackName}`, '#10b981'),
+          clips: [
+            {
+              id: Date.now() + 2,
+              name: `[Вокал] ${clip.name}`,
+              offsetSamples: 0,
+              lengthSamples: lengthSamples,
+              gain: 1.0,
+              pan: 0,
+              fadeInSamples: 2400,
+              fadeOutSamples: 2400,
+              buffer: vocalsPcm,
+              color: '#10b981'
+            }
+          ]
+        };
+        
+        const newKaraokeTrack: TrackState = {
+          ...createNewTrack(karaokeTrackId, `[Фонограмма M&E] ${trackName}`, '#3b82f6'),
+          clips: [
+            {
+              id: Date.now() + 3,
+              name: `[Фонограмма M&E] ${clip.name}`,
+              offsetSamples: 0,
+              lengthSamples: lengthSamples,
+              gain: 1.0,
+              pan: 0,
+              fadeInSamples: 2400,
+              fadeOutSamples: 2400,
+              buffer: karaokePcm,
+              color: '#3b82f6'
+            }
+          ]
+        };
+        
+        newTracksToAdd.push(newVocalsTrack, newKaraokeTrack);
+        
+        await uploadRawPCMToTrack(vocalsPcm, vocalsTrackId, newVocalsTrack.clips[0].id, 0, 1.0, 0, true);
+        await uploadRawPCMToTrack(karaokePcm, karaokeTrackId, newKaraokeTrack.clips[0].id, 0, 1.0, 0, true);
+      }
+    }
+    
+    const finalTracksList = [...currentTracks, ...newTracksToAdd];
+    setTracks(finalTracksList);
+    syncAllTracks(finalTracksList);
+    
+    if (onProgress) {
+      onProgress('AI обработка и нормализация успешно завершены!', 100);
+    }
+    
+    return finalTracksList;
   };
 
   // Коллбэк Шага 4 Wizard: Финальный Мастеринг и FFmpeg Muxing
@@ -1315,7 +1591,8 @@ export const MinimalStudio: React.FC = () => {
       master,
       48000,
       24,
-      renderDuration
+      renderDuration,
+      updatedVocalBus
     );
 
     // Сохраняем мастер-микс WAV в папку project/ через File System Access API

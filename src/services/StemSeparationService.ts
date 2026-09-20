@@ -235,7 +235,7 @@ export class StemSeparationService {
     options: SeparationOptions = {}
   ): Promise<SeparationResult> {
     const startTime = performance.now();
-    const sampleRate = options.sampleRate || 44100;
+    const sampleRate = options.sampleRate || 48000;
     const numSamples = leftChannel.length;
     const durationSec = numSamples / sampleRate;
 

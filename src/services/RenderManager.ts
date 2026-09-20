@@ -15,7 +15,7 @@
 
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
-import { TrackState, MasterState } from '../audio/dawEngine';
+import { TrackState, MasterState, VocalBusState } from '../audio/dawEngine';
 import {
   NativeDAWBridge,
   globalNativeDAWBridge,
@@ -163,7 +163,8 @@ export class RenderManager {
     master: MasterState,
     sampleRate: number = NativeDAWBridge.TARGET_SAMPLE_RATE,
     bitDepth: WavBitDepth = 16,
-    customDurationSec?: number
+    customDurationSec?: number,
+    vocalBus?: VocalBusState
   ): Promise<RenderAudioResult> {
     this.logs = [];
     this.addLog('Запуск нативного C++ офлайн-рендеринга мастер-микса...');
@@ -180,7 +181,8 @@ export class RenderManager {
       (percent, message) => {
         this.notifyProgress('rendering_audio', percent, message);
         this.addLog(message);
-      }
+      },
+      vocalBus
     );
 
     this.addLog(`Мастер-микс успешно собран в C++ ядре: ${Math.round(result.wavBlob.size / 1024)} КБ (${result.durationSec.toFixed(2)} сек)`);

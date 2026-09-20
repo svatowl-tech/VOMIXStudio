@@ -288,6 +288,9 @@ export class VSTHostEngine {
     systemLogger.info('VSTHost', 'Начало сканирования VST-папок и библиотек плагинов...');
 
     try {
+      // Очищаем весь список VST-плагинов перед началом глубокого сканирования, чтобы собрать его заново
+      this.catalog.clear();
+
       const activeDirs = this.scanDirectories.filter((d) => d.enabled);
       let scannedCount = 0;
 
@@ -334,7 +337,73 @@ export class VSTHostEngine {
             dir.pluginCount = 0;
           }
         } else {
-          dir.pluginCount = Array.from(this.catalog.values()).filter(p => p.path?.startsWith(dir.path)).length;
+          // В веб-браузере имитируем обнаружение реальных встроенных VOMIX DSP плагинов в активных VST3-путях
+          const isVst3Dir = dir.path.includes('VST3') || dir.path.includes('vst3');
+          if (isVst3Dir) {
+            const browserPlugins = [
+              {
+                id: `vst_scanned_${dir.path}_VOMIX_EQ3_vst3`.replace(/[^a-zA-Z0-9_-]/g, '_'),
+                name: 'VOMIX Parametric EQ (EQ-3)',
+                category: 'EQ' as VSTPluginCategory,
+                vendor: 'VOMIX Audio',
+                version: '1.0.0',
+                format: 'VST3' as const,
+                path: `${dir.path}/VOMIX_EQ3.vst3`,
+                latencySamples: 0,
+                is64Bit: true,
+                description: '3-полосный параметрический эквалайзер высокого разрешения.',
+                color: '#10b981',
+                parameters: [
+                  { id: 'gain', name: 'Gain', min: -24, max: 24, defaultValue: 0, unit: 'dB', step: 0.5 },
+                  { id: 'mix', name: 'Mix', min: 0, max: 100, defaultValue: 100, unit: '%', step: 1 }
+                ],
+                presets: []
+              },
+              {
+                id: `vst_scanned_${dir.path}_VOMIX_Comp1_vst3`.replace(/[^a-zA-Z0-9_-]/g, '_'),
+                name: 'VOMIX Dynamic Compressor (Comp-1)',
+                category: 'Dynamics' as VSTPluginCategory,
+                vendor: 'VOMIX Audio',
+                version: '1.1.0',
+                format: 'VST3' as const,
+                path: `${dir.path}/VOMIX_Comp1.vst3`,
+                latencySamples: 0,
+                is64Bit: true,
+                description: 'Классический студийный компрессор с мягким коленом (Soft-Knee).',
+                color: '#3b82f6',
+                parameters: [
+                  { id: 'gain', name: 'Gain', min: -24, max: 24, defaultValue: 0, unit: 'dB', step: 0.5 },
+                  { id: 'mix', name: 'Mix', min: 0, max: 100, defaultValue: 100, unit: '%', step: 1 }
+                ],
+                presets: []
+              },
+              {
+                id: `vst_scanned_${dir.path}_VOMIX_ReverbS_vst3`.replace(/[^a-zA-Z0-9_-]/g, '_'),
+                name: 'VOMIX Vintage Reverb (Reverb-S)',
+                category: 'Reverb' as VSTPluginCategory,
+                vendor: 'VOMIX Audio',
+                version: '1.0.2',
+                format: 'VST3' as const,
+                path: `${dir.path}/VOMIX_ReverbS.vst3`,
+                latencySamples: 12,
+                is64Bit: true,
+                description: 'Винтажный пространственный ревербератор с регулировкой рассеяния.',
+                color: '#8b5cf6',
+                parameters: [
+                  { id: 'gain', name: 'Gain', min: -24, max: 24, defaultValue: 0, unit: 'dB', step: 0.5 },
+                  { id: 'mix', name: 'Mix', min: 0, max: 100, defaultValue: 40, unit: '%', step: 1 }
+                ],
+                presets: []
+              }
+            ];
+
+            browserPlugins.forEach((p) => {
+              this.catalog.set(p.id, p);
+            });
+            dir.pluginCount = browserPlugins.length;
+          } else {
+            dir.pluginCount = 0;
+          }
         }
 
         dir.lastScannedAt = new Date().toLocaleTimeString();

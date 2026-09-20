@@ -22,7 +22,7 @@
  * ============================================================================
  */
 
-import { TrackState, MasterState, ClipConfig } from '../audio/dawEngine';
+import { TrackState, MasterState, ClipConfig, VocalBusState } from '../audio/dawEngine';
 import { EMBEDDED_WASM_CORE_BASE64 } from '../data/embeddedWasmCore';
 
 export type WavBitDepth = 16 | 24 | 32;
@@ -1184,16 +1184,15 @@ export class NativeDAWBridge {
     sampleRate: number = NativeDAWBridge.TARGET_SAMPLE_RATE,
     bitDepth: WavBitDepth = 24,
     customDurationSec?: number,
-    onProgress?: (progressPercent: number, message: string) => void
+    onProgress?: (progressPercent: number, message: string) => void,
+    vocalBus?: VocalBusState
   ): Promise<NativeRenderAudioResult> {
     // Расчет длительности в сэмплах
     let maxFrames = 0;
-    let totalClipSamples = 0;
     for (const track of tracks) {
       for (const clip of track.clips || []) {
         const endFrame = clip.offsetSamples + clip.lengthSamples;
         if (endFrame > maxFrames) maxFrames = endFrame;
-        if (clip.buffer) totalClipSamples += clip.buffer.length;
       }
     }
 
@@ -1202,195 +1201,8 @@ export class NativeDAWBridge {
     }
     if (maxFrames === 0) maxFrames = sampleRate * 2;
 
-    const totalDurationSec = maxFrames / sampleRate;
-
-    // Защита от переполнения 32-битной WASM кучи (>15M сэмплов = >60MB)
-    // При длинных файлах (>10-20 минут) сразу переключаемся на параллельный DSP рендерер
-    const shouldUseJsDsp = totalClipSamples > 12_000_000 || (maxFrames * 2) > 8_000_000;
-
-    if (shouldUseJsDsp) {
-      console.info(`[NativeDAWBridge] Большой проект (${(totalClipSamples / 1000000).toFixed(1)}M сэмплов). Используем высокоскоростной DSP офлайн-микшер.`);
-      return this.renderMasterMixDirect(tracks, master, sampleRate, bitDepth, maxFrames, onProgress);
-    }
-
-    let mod: any = null;
-    try {
-      mod = this.getModule();
-    } catch {
-      return this.renderMasterMixDirect(tracks, master, sampleRate, bitDepth, maxFrames, onProgress);
-    }
-
-    if (onProgress) onProgress(5, 'Подготовка C++ WASM аудиомикшера для офлайн-рендеринга...');
-
-    // Создаем экземпляр C++ Mixer (предпочитаем класс, если он доступен через Embind)
-    let mixerInstance: any = null;
-    const allocatedPcmPtrs: number[] = [];
-
-    try {
-      if (mod.Mixer) {
-        mixerInstance = new mod.Mixer(sampleRate);
-      } else {
-        const createMixerFn = mod.createMixerInstance || mod._createMixerInstance;
-        if (createMixerFn) {
-          mixerInstance = createMixerFn(sampleRate);
-        }
-      }
-
-      if (!mixerInstance) {
-        throw new Error('C++ экземпляр Mixer недоступен');
-      }
-
-      const isObject = typeof mixerInstance === 'object';
-      const callNative = (fnName: string, ...args: any[]) => {
-        if (isObject && typeof mixerInstance[fnName] === 'function') {
-          return mixerInstance[fnName](...args);
-        }
-        if (typeof mod[fnName] === 'function') {
-          return mod[fnName](mixerInstance, ...args);
-        }
-        const rawFnName = '_' + fnName;
-        if (typeof mod[rawFnName] === 'function') {
-          return mod[rawFnName](isObject ? (mixerInstance as any).ptr : mixerInstance, ...args);
-        }
-        return null;
-      };
-
-      if (onProgress) onProgress(15, 'Загрузка треков и клипов в C++ микшер...');
-
-      callNative('setMasterVolume', master.volumeDb);
-      callNative('setMasterLimiter', master.limiterEnabled, master.limiterCeilingDb);
-
-      for (const t of tracks) {
-        callNative('setTrackVolume', t.id, t.volumeDb);
-        callNative('setTrackPan', t.id, t.pan);
-        callNative('setTrackSolo', t.id, !!t.solo);
-        callNative('setTrackMute', t.id, !!t.mute);
-
-        for (const c of t.clips || []) {
-          const pcmBuffer = c.buffer || new Float32Array(0);
-          if (pcmBuffer.length === 0) continue;
-
-          const pcmPtr = this.writeFloat32Direct(pcmBuffer);
-          allocatedPcmPtrs.push(pcmPtr);
-
-          const isStereo = c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true;
-          const lengthSamples = c.lengthSamples || (isStereo ? Math.floor(pcmBuffer.length / 2) : pcmBuffer.length);
-          const offsetSamples = c.offsetSamples || 0;
-          const gain = typeof c.gain === 'number' ? c.gain : 1.0;
-          const pan = typeof c.pan === 'number' ? c.pan : 0.0;
-          const fadeIn = c.fadeInSamples || 0;
-          const fadeOut = c.fadeOutSamples || 0;
-
-          callNative(
-            'addClipToTrack',
-            t.id,
-            c.id,
-            pcmPtr,
-            pcmBuffer.length,
-            offsetSamples,
-            lengthSamples,
-            gain,
-            pan,
-            fadeIn,
-            fadeOut,
-            isStereo
-          );
-        }
-      }
-
-      if (onProgress) onProgress(30, 'Выполнение C++ блочного микширования и DSP обработки...');
-
-      const totalOutFloats = maxFrames * 2; // Стерео
-      const outPcmPtr = this.allocateFloats(totalOutFloats);
-      allocatedPcmPtrs.push(outPcmPtr);
-
-      const BLOCK_SIZE = 1024;
-      const totalBlocks = Math.ceil(maxFrames / BLOCK_SIZE);
-
-      for (let b = 0; b < totalBlocks; b++) {
-        const frameOffset = b * BLOCK_SIZE;
-        const currentBlockFrames = Math.min(BLOCK_SIZE, maxFrames - frameOffset);
-        const blockByteOffset = outPcmPtr + (frameOffset * 2 * 4);
-
-        callNative('processMixer', blockByteOffset, currentBlockFrames);
-
-        if (b % 50 === 0 || b === totalBlocks - 1) {
-          const pct = 30 + Math.round((b / totalBlocks) * 50);
-          if (onProgress) onProgress(pct, `C++ рендеринг: ${pct}%`);
-        }
-      }
-
-      const interleavedBuffer = this.readFloat32Direct(outPcmPtr, totalOutFloats);
-
-      const leftChannel = new Float32Array(maxFrames);
-      const rightChannel = new Float32Array(maxFrames);
-      for (let i = 0; i < maxFrames; i++) {
-        leftChannel[i] = interleavedBuffer[i * 2];
-        rightChannel[i] = interleavedBuffer[i * 2 + 1];
-      }
-
-      if (onProgress) onProgress(85, 'Бинарная упаковка WAV файла...');
-
-      let wavArrayBuffer: ArrayBuffer;
-      let wavBlob: Blob;
-
-      try {
-        if (typeof mod.packWav === 'function') {
-          const bytesPerSample = Math.floor(bitDepth / 8);
-          const maxOutBytes = 44 + maxFrames * 2 * bytesPerSample + 1024;
-          const outBytePtr = this.allocateBytes(maxOutBytes);
-          try {
-            const actualBytes = mod.packWav(outPcmPtr, maxFrames, bitDepth, outBytePtr, maxOutBytes, sampleRate);
-            if (actualBytes > 0) {
-              const rawBytes = this.readUint8Direct(outBytePtr, actualBytes);
-              const ab = new ArrayBuffer(actualBytes);
-              new Uint8Array(ab).set(rawBytes);
-              wavArrayBuffer = ab;
-              wavBlob = new Blob([ab], { type: 'audio/wav' });
-            } else {
-              throw new Error('C++ packWav 0 bytes');
-            }
-          } finally {
-            this.freeBytes(outBytePtr);
-          }
-        } else {
-          wavBlob = NativeDAWBridge.createWavBlobDirect(leftChannel, rightChannel, sampleRate, bitDepth);
-          wavArrayBuffer = await wavBlob.arrayBuffer();
-        }
-      } catch {
-        wavBlob = NativeDAWBridge.createWavBlobDirect(leftChannel, rightChannel, sampleRate, bitDepth);
-        wavArrayBuffer = await wavBlob.arrayBuffer();
-      }
-
-      if (onProgress) onProgress(100, 'Мастер-микс успешно создан!');
-
-      return {
-        leftChannel,
-        rightChannel,
-        interleavedBuffer,
-        sampleRate,
-        durationSec: totalDurationSec,
-        wavArrayBuffer,
-        wavBlob
-      };
-    } catch (wasmErr) {
-      console.warn('[NativeDAWBridge] Сбой рендеринга через WASM, переключаемся на DSP микшер:', wasmErr);
-      return this.renderMasterMixDirect(tracks, master, sampleRate, bitDepth, maxFrames, onProgress);
-    } finally {
-      for (const ptr of allocatedPcmPtrs) {
-        try { this.freeFloats(ptr); } catch {}
-      }
-      if (mixerInstance) {
-        try {
-          if (typeof mixerInstance.delete === 'function') {
-            mixerInstance.delete();
-          } else if (mod?._freeMixerInstance || mod?.freeMixerInstance) {
-            const freeMixFn = mod._freeMixerInstance || mod.freeMixerInstance;
-            freeMixFn(typeof mixerInstance === 'object' ? (mixerInstance as any).ptr : mixerInstance);
-          }
-        } catch {}
-      }
-    }
+    // Всегда используем полнофункциональный DSP офлайн-микшер для поддержки вокальных рэков и VST
+    return this.renderMasterMixDirect(tracks, master, sampleRate, bitDepth, maxFrames, onProgress, vocalBus);
   }
 
   /**
@@ -1403,7 +1215,8 @@ export class NativeDAWBridge {
     sampleRate: number = NativeDAWBridge.TARGET_SAMPLE_RATE,
     bitDepth: WavBitDepth = 24,
     maxFrames: number,
-    onProgress?: (progressPercent: number, message: string) => void
+    onProgress?: (progressPercent: number, message: string) => void,
+    vocalBus?: VocalBusState
   ): Promise<NativeRenderAudioResult> {
     const totalDurationSec = maxFrames / sampleRate;
     if (onProgress) onProgress(10, 'Подготовка DSP буферов микширования...');
@@ -1412,60 +1225,244 @@ export class NativeDAWBridge {
     const rightChannel = new Float32Array(maxFrames);
 
     const hasSolo = tracks.some((t) => !!t.solo);
+    const activeTracks = tracks.filter((t) => !t.mute && (!hasSolo || t.solo));
 
-    for (let tIdx = 0; tIdx < tracks.length; tIdx++) {
-      const t = tracks[tIdx];
-      if (t.mute) continue;
-      if (hasSolo && !t.solo) continue;
+    // Инициализируем DSP-состояния для каждой дорожки
+    const trackStates = activeTracks.map((t) => ({
+      trackId: t.id,
+      eqState: {} as any,
+      compState: { env: 0 } as any,
+      gateState: { gain: 1.0, env: 0 } as any,
+      deEssState: { env: 0 } as any,
+      vstStates: {} as any
+    }));
 
-      const trackVolLinear = Math.pow(10, (t.volumeDb || 0) / 20);
-      const pan = Math.max(-1, Math.min(1, t.pan || 0));
-      const panL = Math.min(1.0, 1.0 - pan);
-      const panR = Math.min(1.0, 1.0 + pan);
+    // Инициализируем DSP-состояние для Шины Вокала (Vocal Bus)
+    const vocalBusState = {
+      eqState: {} as any,
+      compState: { env: 0 } as any,
+      duckerState: { duckGain: 1.0, env: 0 } as any,
+      vstStates: {} as any
+    };
 
-      const clips = t.clips || [];
-      for (const c of clips) {
-        const pcm = c.buffer;
-        if (!pcm || pcm.length === 0) continue;
+    // Блочная обработка для высокой точности динамических эффектов
+    const BLOCK_SIZE = 1024;
+    const totalBlocks = Math.ceil(maxFrames / BLOCK_SIZE);
 
-        const isStereo = pcm.length >= (c.lengthSamples || 0) * 2;
-        const clipLen = c.lengthSamples || (isStereo ? Math.floor(pcm.length / 2) : pcm.length);
-        const offsetSamples = c.offsetSamples || 0;
-        const gain = (typeof c.gain === 'number' ? c.gain : 1.0) * trackVolLinear;
-        const fadeIn = c.fadeInSamples || 0;
-        const fadeOut = c.fadeOutSamples || 0;
+    for (let b = 0; b < totalBlocks; b++) {
+      const frameOffset = b * BLOCK_SIZE;
+      const currentBlockFrames = Math.min(BLOCK_SIZE, maxFrames - frameOffset);
 
-        const startFrame = Math.max(0, offsetSamples);
-        const endFrame = Math.min(maxFrames, offsetSamples + clipLen);
+      // Временные шины сведения блока
+      const vocalBusBlockL = new Float32Array(BLOCK_SIZE);
+      const vocalBusBlockR = new Float32Array(BLOCK_SIZE);
+      const origBusBlockL = new Float32Array(BLOCK_SIZE);
+      const origBusBlockR = new Float32Array(BLOCK_SIZE);
 
-        for (let f = startFrame; f < endFrame; f++) {
-          const clipFrame = f - offsetSamples;
-          let sL = isStereo ? pcm[clipFrame * 2] : pcm[clipFrame];
-          let sR = isStereo ? pcm[clipFrame * 2 + 1] : sL;
+      for (let tIdx = 0; tIdx < activeTracks.length; tIdx++) {
+        const t = activeTracks[tIdx];
+        const tState = trackStates[tIdx];
 
-          if (fadeIn > 0 && clipFrame < fadeIn) {
-            const factor = clipFrame / fadeIn;
-            sL *= factor;
-            sR *= factor;
+        // 1. Создаем локальные буферы для трека в рамках текущего блока
+        const trackBlockL = new Float32Array(BLOCK_SIZE);
+        const trackBlockR = new Float32Array(BLOCK_SIZE);
+
+        const isOriginal = !!t.isOriginalAudio || /видео|video|оригинал|original/i.test(t.name || '');
+
+        // 2. Сэмплируем клипы дорожки, которые пересекаются с блоком
+        const clips = t.clips || [];
+        for (const c of clips) {
+          const pcm = c.buffer;
+          if (!pcm || pcm.length === 0) continue;
+
+          const isStereo = pcm.length >= (c.lengthSamples || 0) * 2;
+          const clipLen = c.lengthSamples || (isStereo ? Math.floor(pcm.length / 2) : pcm.length);
+          const offsetSamples = c.offsetSamples || 0;
+          const clipGain = typeof c.gain === 'number' ? c.gain : 1.0;
+          const fadeIn = c.fadeInSamples || 0;
+          const fadeOut = c.fadeOutSamples || 0;
+
+          const clipStart = offsetSamples;
+          const clipEnd = offsetSamples + clipLen;
+
+          const blockStart = frameOffset;
+          const blockEnd = frameOffset + currentBlockFrames;
+
+          const intersectStart = Math.max(clipStart, blockStart);
+          const intersectEnd = Math.min(clipEnd, blockEnd);
+
+          if (intersectStart < intersectEnd) {
+            for (let f = intersectStart; f < intersectEnd; f++) {
+              const clipFrame = f - offsetSamples;
+              const blockFrame = f - frameOffset;
+
+              let sL = isStereo ? pcm[clipFrame * 2] : pcm[clipFrame];
+              let sR = isStereo ? pcm[clipFrame * 2 + 1] : sL;
+
+              // Применяем кроссфейды / фейды клипа
+              if (fadeIn > 0 && clipFrame < fadeIn) {
+                const factor = clipFrame / fadeIn;
+                sL *= factor;
+                sR *= factor;
+              }
+              if (fadeOut > 0 && clipLen - clipFrame < fadeOut) {
+                const factor = Math.max(0, (clipLen - clipFrame) / fadeOut);
+                sL *= factor;
+                sR *= factor;
+              }
+
+              // Добавляем к общему сигналу трека
+              trackBlockL[blockFrame] += sL * clipGain;
+              trackBlockR[blockFrame] += sR * clipGain;
+            }
           }
-          if (fadeOut > 0 && clipLen - clipFrame < fadeOut) {
-            const factor = Math.max(0, (clipLen - clipFrame) / fadeOut);
-            sL *= factor;
-            sR *= factor;
-          }
+        }
 
-          leftChannel[f] += sL * gain * panL;
-          rightChannel[f] += sR * gain * panR;
+        // 3. Применяем вокальный рэк (DSP) к сумме трека в блоке
+        const dspEq = t.eq;
+        const dspGate = t.noiseGate;
+        const dspComp = t.compressor;
+        const dspDeEss = t.deEsser;
+
+        if (dspEq && dspEq.enabled) {
+          processEQBlock(trackBlockL, trackBlockR, currentBlockFrames, dspEq, tState.eqState, sampleRate);
+        }
+        if (dspGate && dspGate.enabled) {
+          processNoiseGateBlock(trackBlockL, trackBlockR, currentBlockFrames, dspGate, tState.gateState, sampleRate);
+        }
+        if (dspComp && dspComp.enabled) {
+          processCompressorBlock(trackBlockL, trackBlockR, currentBlockFrames, dspComp, tState.compState, sampleRate);
+        }
+        if (dspDeEss && dspDeEss.enabled) {
+          processDeEsserBlock(trackBlockL, trackBlockR, currentBlockFrames, dspDeEss, tState.deEssState, sampleRate);
+        }
+
+        // 4. Применяем VST инсерты на дорожке
+        if (t.vstPlugins && t.vstPlugins.length > 0) {
+          processVSTBlock(trackBlockL, trackBlockR, currentBlockFrames, t.vstPlugins, tState.vstStates, sampleRate);
+        }
+
+        // 5. Применяем фейдер громкости и панорамы дорожки
+        const trackVolLinear = Math.pow(10, (t.volumeDb || 0) / 20);
+        const pan = Math.max(-1, Math.min(1, t.pan || 0));
+        const panL = Math.min(1.0, 1.0 - pan);
+        const panR = Math.min(1.0, 1.0 + pan);
+
+        for (let i = 0; i < currentBlockFrames; i++) {
+          trackBlockL[i] *= trackVolLinear * panL;
+          trackBlockR[i] *= trackVolLinear * panR;
+        }
+
+        // 6. Маршрутизируем во временную шину
+        if (isOriginal) {
+          for (let i = 0; i < currentBlockFrames; i++) {
+            origBusBlockL[i] += trackBlockL[i];
+            origBusBlockR[i] += trackBlockR[i];
+          }
+        } else {
+          for (let i = 0; i < currentBlockFrames; i++) {
+            vocalBusBlockL[i] += trackBlockL[i];
+            vocalBusBlockR[i] += trackBlockR[i];
+          }
         }
       }
 
-      if (onProgress) {
-        const pct = 10 + Math.round(((tIdx + 1) / tracks.length) * 65);
-        onProgress(pct, `DSP сведение дорожки [${t.name || `#${t.id}`}] (${tIdx + 1}/${tracks.length})...`);
+      // 7. Обработка шины вокала (Vocal Bus Master)
+      if (vocalBus && !vocalBus.mute) {
+        // Применяем эквалайзер и компрессор шины вокала
+        const busDsp = vocalBus.dsp;
+        if (busDsp) {
+          if (busDsp.eq && busDsp.eq.enabled) {
+            processEQBlock(vocalBusBlockL, vocalBusBlockR, currentBlockFrames, busDsp.eq, vocalBusState.eqState, sampleRate);
+          }
+          if (busDsp.compressor && busDsp.compressor.enabled) {
+            processCompressorBlock(vocalBusBlockL, vocalBusBlockR, currentBlockFrames, busDsp.compressor, vocalBusState.compState, sampleRate);
+          }
+        }
+
+        // Применяем VST инсерты шины вокала
+        if (vocalBus.vstPlugins && vocalBus.vstPlugins.length > 0) {
+          processVSTBlock(vocalBusBlockL, vocalBusBlockR, currentBlockFrames, vocalBus.vstPlugins, vocalBusState.vstStates, sampleRate);
+        }
+
+        // Применяем фейдер и панораму шины вокала
+        const vocalVolLinear = Math.pow(10, (vocalBus.volumeDb || 0) / 20);
+        const vocalPan = Math.max(-1, Math.min(1, vocalBus.pan || 0));
+        const vPanL = Math.min(1.0, 1.0 - vocalPan);
+        const vPanR = Math.min(1.0, 1.0 + vocalPan);
+
+        for (let i = 0; i < currentBlockFrames; i++) {
+          vocalBusBlockL[i] *= vocalVolLinear * vPanL;
+          vocalBusBlockR[i] *= vocalVolLinear * vPanR;
+        }
+      }
+
+      // 8. Авто-даккинг оригинального звука при наличии вокала
+      const ducker = vocalBus?.dsp?.autoDucker;
+      if (ducker && ducker.enabled) {
+        const duckThresh = ducker.thresholdDb ?? -26.0;
+        const duckDepthLin = Math.pow(10, (ducker.duckDepthDb ?? -8.0) / 20);
+        const attTime = Math.max(0.001, (ducker.attackMs || 15) / 1000);
+        const relTime = Math.max(0.01, (ducker.releaseMs || 250) / 1000);
+        const attCoeff = Math.exp(-1 / (attTime * sampleRate));
+        const relCoeff = Math.exp(-1 / (relTime * sampleRate));
+
+        let duckGain = vocalBusState.duckerState.duckGain !== undefined ? vocalBusState.duckerState.duckGain : 1.0;
+        let duckEnv = vocalBusState.duckerState.env || 0;
+
+        for (let i = 0; i < currentBlockFrames; i++) {
+          const vMax = Math.max(Math.abs(vocalBusBlockL[i]), Math.abs(vocalBusBlockR[i]));
+          duckEnv = 0.9 * duckEnv + 0.1 * vMax;
+          const vDb = 20 * Math.log10(Math.max(1e-5, duckEnv));
+          const targetGain = vDb > duckThresh ? duckDepthLin : 1.0;
+
+          if (targetGain < duckGain) {
+            duckGain = attCoeff * duckGain + (1 - attCoeff) * targetGain;
+          } else {
+            duckGain = relCoeff * duckGain + (1 - relCoeff) * targetGain;
+          }
+
+          origBusBlockL[i] *= duckGain;
+          origBusBlockR[i] *= duckGain;
+        }
+
+        vocalBusState.duckerState.duckGain = duckGain;
+        vocalBusState.duckerState.env = duckEnv;
+      }
+
+      // 9. Суммируем вокал и оригинал в мастер-шину
+      for (let i = 0; i < currentBlockFrames; i++) {
+        const frameIdx = frameOffset + i;
+        leftChannel[frameIdx] = origBusBlockL[i] + vocalBusBlockL[i];
+        rightChannel[frameIdx] = origBusBlockR[i] + vocalBusBlockR[i];
+      }
+
+      // Прогресс рендеринга
+      if (b % 100 === 0 || b === totalBlocks - 1) {
+        const pct = 10 + Math.round((b / totalBlocks) * 70);
+        if (onProgress) {
+          onProgress(pct, `DSP офлайн-рендеринг проекта: ${pct}%`);
+        }
       }
     }
 
-    if (onProgress) onProgress(80, 'Применение мастер-эффектов и лимитера...');
+    if (onProgress) onProgress(80, 'Применение мастер-эффектов, VST инсертов и лимитера...');
+
+    // Применяем Master VST цепочку (если есть)
+    if (master.vstPlugins && master.vstPlugins.length > 0) {
+      const masterVstState = {};
+      const totalBlocksMaster = Math.ceil(maxFrames / BLOCK_SIZE);
+      for (let b = 0; b < totalBlocksMaster; b++) {
+        const frameOffset = b * BLOCK_SIZE;
+        const currentBlockFrames = Math.min(BLOCK_SIZE, maxFrames - frameOffset);
+        
+        // Создаем локальные ссылки на поддиапазоны
+        const subL = leftChannel.subarray(frameOffset, frameOffset + currentBlockFrames);
+        const subR = rightChannel.subarray(frameOffset, frameOffset + currentBlockFrames);
+        
+        processVSTBlock(subL, subR, currentBlockFrames, master.vstPlugins, masterVstState, sampleRate);
+      }
+    }
 
     const masterVolLinear = Math.pow(10, (master.volumeDb || 0) / 20);
     const limitCeiling = Math.pow(10, (master.limiterCeilingDb || 0) / 20);
@@ -1712,8 +1709,15 @@ export class NativeDAWBridge {
       const leftPtr = this.writeFloat32Direct(leftChannel);
       const rightPtr = this.writeFloat32Direct(rightChannel);
 
+      let formatInt = 1; // Default to 1 (PCM24)
+      if (bitDepth === 16) {
+        formatInt = 0; // PCM16
+      } else if (bitDepth === 32) {
+        formatInt = 2; // Float32
+      }
+
       try {
-        const actualBytes = mod.buildWav(leftPtr, rightPtr, maxFrames, sampleRate, bitDepth, outBytePtr, maxOutBytes);
+        const actualBytes = mod.buildWav(leftPtr, rightPtr, maxFrames, sampleRate, formatInt, outBytePtr, maxOutBytes);
         if (actualBytes > 0) {
           const rawBytes = this.readUint8Direct(outBytePtr, actualBytes);
           const ab = new ArrayBuffer(actualBytes);
@@ -2213,6 +2217,525 @@ export class NativeDAWBridge {
     }
 
     return result;
+  }
+}
+
+// ============================================================================
+// ОФЛАЙН DSP ПОМОЩНИКИ (ДЛЯ ПОДДЕРЖКИ ВОКАЛЬНЫХ РЭКОВ И VST)
+// ============================================================================
+
+function computeBiquadCoeffs(type: string, freq: number, gainDb: number, Q: number, sampleRate: number) {
+  const safeSr = sampleRate || 48000;
+  const clampedFreq = Math.max(10, Math.min(safeSr * 0.49, freq || 1000));
+  const w0 = (2 * Math.PI * clampedFreq) / safeSr;
+  const cosW = Math.cos(w0);
+  const sinW = Math.sin(w0);
+  const A = Math.pow(10, (gainDb || 0) / 40);
+  const safeQ = Math.max(0.1, Q || 0.7071);
+
+  let b0 = 1, b1 = 0, b2 = 0, a0 = 1, a1 = 0, a2 = 0;
+
+  if (type === 'lowshelf') {
+    const alpha = (sinW / 2) * Math.sqrt((A + 1 / A) * (1 / safeQ - 1) + 2);
+    const twoSqrtAAlpha = 2 * Math.sqrt(A) * alpha;
+    b0 = A * ((A + 1) - (A - 1) * cosW + twoSqrtAAlpha);
+    b1 = 2 * A * ((A - 1) - (A + 1) * cosW);
+    b2 = A * ((A + 1) - (A - 1) * cosW - twoSqrtAAlpha);
+    a0 = (A + 1) + (A - 1) * cosW + twoSqrtAAlpha;
+    a1 = -2 * ((A - 1) + (A + 1) * cosW);
+    a2 = (A + 1) + (A - 1) * cosW - twoSqrtAAlpha;
+  } else if (type === 'highshelf') {
+    const alpha = (sinW / 2) * Math.sqrt((A + 1 / A) * (1 / safeQ - 1) + 2);
+    const twoSqrtAAlpha = 2 * Math.sqrt(A) * alpha;
+    b0 = A * ((A + 1) + (A - 1) * cosW + twoSqrtAAlpha);
+    b1 = -2 * A * ((A - 1) + (A + 1) * cosW);
+    b2 = A * ((A + 1) + (A - 1) * cosW - twoSqrtAAlpha);
+    a0 = (A + 1) - (A - 1) * cosW + twoSqrtAAlpha;
+    a1 = 2 * ((A - 1) - (A + 1) * cosW);
+    a2 = (A + 1) - (A - 1) * cosW - twoSqrtAAlpha;
+  } else { // peaking / bell
+    const alpha = sinW / (2 * safeQ);
+    b0 = 1 + alpha * A;
+    b1 = -2 * cosW;
+    b2 = 1 - alpha * A;
+    a0 = 1 + alpha / A;
+    a1 = -2 * cosW;
+    a2 = 1 - alpha / A;
+  }
+
+  const invA0 = 1 / (a0 || 1);
+  return {
+    b0: b0 * invA0,
+    b1: b1 * invA0,
+    b2: b2 * invA0,
+    a1: a1 * invA0,
+    a2: a2 * invA0
+  };
+}
+
+function processBiquadSample(sample: number, coeffs: any, state: any) {
+  const out = coeffs.b0 * sample + (state.z1 || 0);
+  state.z1 = coeffs.b1 * sample - coeffs.a1 * out + (state.z2 || 0);
+  state.z2 = coeffs.b2 * sample - coeffs.a2 * out;
+  return out;
+}
+
+function processEQBlock(bufL: Float32Array, bufR: Float32Array, numFrames: number, eq: any, eqState: any, sampleRate: number) {
+  if (!eq || !eq.enabled) return;
+
+  const ls = eq.lowShelf;
+  const pk = eq.peaking;
+  const hs = eq.highShelf;
+
+  if (ls && ls.enabled && ls.gainDb !== 0) {
+    if (!eqState.lsCoeffs || eqState.lastLsGain !== ls.gainDb || eqState.lastLsFreq !== ls.frequency) {
+      eqState.lsCoeffs = computeBiquadCoeffs('lowshelf', ls.frequency || 120, ls.gainDb, ls.Q || 0.7071, sampleRate);
+      eqState.lastLsGain = ls.gainDb;
+      eqState.lastLsFreq = ls.frequency || 120;
+    }
+    if (!eqState.stLsL) eqState.stLsL = { z1: 0, z2: 0 };
+    if (!eqState.stLsR) eqState.stLsR = { z1: 0, z2: 0 };
+    for (let i = 0; i < numFrames; i++) {
+      bufL[i] = processBiquadSample(bufL[i], eqState.lsCoeffs, eqState.stLsL);
+      bufR[i] = processBiquadSample(bufR[i], eqState.lsCoeffs, eqState.stLsR);
+    }
+  }
+
+  if (pk && pk.enabled && pk.gainDb !== 0) {
+    if (!eqState.pkCoeffs || eqState.lastPkGain !== pk.gainDb || eqState.lastPkFreq !== pk.frequency) {
+      eqState.pkCoeffs = computeBiquadCoeffs('peaking', pk.frequency || 2500, pk.gainDb, pk.Q || 1.0, sampleRate);
+      eqState.lastPkGain = pk.gainDb;
+      eqState.lastPkFreq = pk.frequency || 2500;
+    }
+    if (!eqState.stPkL) eqState.stPkL = { z1: 0, z2: 0 };
+    if (!eqState.stPkR) eqState.stPkR = { z1: 0, z2: 0 };
+    for (let i = 0; i < numFrames; i++) {
+      bufL[i] = processBiquadSample(bufL[i], eqState.pkCoeffs, eqState.stPkL);
+      bufR[i] = processBiquadSample(bufR[i], eqState.pkCoeffs, eqState.stPkR);
+    }
+  }
+
+  if (hs && hs.enabled && hs.gainDb !== 0) {
+    if (!eqState.hsCoeffs || eqState.lastHsGain !== hs.gainDb || eqState.lastHsFreq !== hs.frequency) {
+      eqState.hsCoeffs = computeBiquadCoeffs('highshelf', hs.frequency || 8000, hs.gainDb, hs.Q || 0.7071, sampleRate);
+      eqState.lastHsGain = hs.gainDb;
+      eqState.lastHsFreq = hs.frequency || 8000;
+    }
+    if (!eqState.stHsL) eqState.stHsL = { z1: 0, z2: 0 };
+    if (!eqState.stHsR) eqState.stHsR = { z1: 0, z2: 0 };
+    for (let i = 0; i < numFrames; i++) {
+      bufL[i] = processBiquadSample(bufL[i], eqState.hsCoeffs, eqState.stHsL);
+      bufR[i] = processBiquadSample(bufR[i], eqState.hsCoeffs, eqState.stHsR);
+    }
+  }
+}
+
+function processCompressorBlock(bufL: Float32Array, bufR: Float32Array, numFrames: number, comp: any, compState: any, sampleRate: number) {
+  if (!comp || !comp.enabled) return;
+
+  const thresh = comp.thresholdDb !== undefined ? comp.thresholdDb : -18;
+  const ratio = Math.max(1, comp.ratio || 4);
+  const knee = Math.max(0, comp.kneeDb || 6);
+  const makeupLin = Math.pow(10, (comp.makeupGainDb || 0) / 20);
+
+  const attTime = Math.max(0.0005, (comp.attackMs || 15) / 1000);
+  const relTime = Math.max(0.005, (comp.releaseMs || 120) / 1000);
+  const attCoeff = Math.exp(-1 / (attTime * sampleRate));
+  const relCoeff = Math.exp(-1 / (relTime * sampleRate));
+
+  let env = compState.env || 0;
+  const halfKnee = knee / 2;
+
+  for (let i = 0; i < numFrames; i++) {
+    const sL = bufL[i];
+    const sR = bufR[i];
+    const absVal = Math.max(Math.abs(sL), Math.abs(sR));
+
+    if (absVal > env) {
+      env = attCoeff * env + (1 - attCoeff) * absVal;
+    } else {
+      env = relCoeff * env + (1 - relCoeff) * absVal;
+    }
+
+    const envDb = 20 * Math.log10(Math.max(1e-5, env));
+    let gainReductionDb = 0;
+
+    if (knee > 0 && envDb > thresh - halfKnee && envDb < thresh + halfKnee) {
+      const delta = envDb - thresh + halfKnee;
+      gainReductionDb = ((1 / ratio - 1) * (delta * delta)) / (2 * knee);
+    } else if (envDb >= thresh + halfKnee) {
+      gainReductionDb = (1 / ratio - 1) * (envDb - thresh);
+    }
+
+    const gainLin = Math.pow(10, gainReductionDb / 20) * makeupLin;
+    bufL[i] = sL * gainLin;
+    bufR[i] = sR * gainLin;
+  }
+
+  compState.env = env;
+}
+
+function processNoiseGateBlock(bufL: Float32Array, bufR: Float32Array, numFrames: number, gate: any, gateState: any, sampleRate: number) {
+  if (!gate || !gate.enabled) return;
+
+  const thresh = gate.thresholdDb !== undefined ? gate.thresholdDb : -48;
+  const floorLin = Math.pow(10, (gate.floorDb || -60) / 20);
+  const attTime = Math.max(0.0005, (gate.attackMs || 2) / 1000);
+  const relTime = Math.max(0.005, (gate.releaseMs || 100) / 1000);
+  const attCoeff = Math.exp(-1 / (attTime * sampleRate));
+  const relCoeff = Math.exp(-1 / (relTime * sampleRate));
+
+  let gain = gateState.gain !== undefined ? gateState.gain : 1.0;
+  let env = gateState.env || 0;
+
+  for (let i = 0; i < numFrames; i++) {
+    const absVal = Math.max(Math.abs(bufL[i]), Math.abs(bufR[i]));
+    env = 0.95 * env + 0.05 * absVal;
+    const envDb = 20 * Math.log10(Math.max(1e-5, env));
+    const targetGain = envDb >= thresh ? 1.0 : floorLin;
+
+    if (targetGain > gain) {
+      gain = attCoeff * gain + (1 - attCoeff) * targetGain;
+    } else {
+      gain = relCoeff * gain + (1 - relCoeff) * targetGain;
+    }
+
+    bufL[i] *= gain;
+    bufR[i] *= gain;
+  }
+
+  gateState.gain = gain;
+  gateState.env = env;
+}
+
+function processDeEsserBlock(bufL: Float32Array, bufR: Float32Array, numFrames: number, deEsser: any, deEssState: any, sampleRate: number) {
+  if (!deEsser || !deEsser.enabled) return;
+
+  const thresh = deEsser.thresholdDb !== undefined ? deEsser.thresholdDb : -22;
+  const freq = deEsser.frequency || 6000;
+  const ratio = Math.max(1, deEsser.ratio || 4);
+  const attTime = Math.max(0.0005, (deEsser.attackMs || 1) / 1000);
+  const relTime = Math.max(0.005, (deEsser.releaseMs || 40) / 1000);
+  const attCoeff = Math.exp(-1 / (attTime * sampleRate));
+  const relCoeff = Math.exp(-1 / (relTime * sampleRate));
+
+  if (!deEssState.bpCoeffs || deEssState.lastFreq !== freq) {
+    deEssState.bpCoeffs = computeBiquadCoeffs('peaking', freq, 6.0, 2.0, sampleRate);
+    deEssState.lastFreq = freq;
+    deEssState.stL = { z1: 0, z2: 0 };
+    deEssState.stR = { z1: 0, z2: 0 };
+    deEssState.env = 0;
+  }
+
+  if (!deEssState.stL) deEssState.stL = { z1: 0, z2: 0 };
+  if (!deEssState.stR) deEssState.stR = { z1: 0, z2: 0 };
+
+  let env = deEssState.env || 0;
+
+  for (let i = 0; i < numFrames; i++) {
+    const sL = bufL[i];
+    const sR = bufR[i];
+    const sideL = processBiquadSample(sL, deEssState.bpCoeffs, deEssState.stL);
+    const sideR = processBiquadSample(sR, deEssState.bpCoeffs, deEssState.stR);
+    const sideMax = Math.max(Math.abs(sideL), Math.abs(sideR));
+
+    if (sideMax > env) {
+      env = attCoeff * env + (1 - attCoeff) * sideMax;
+    } else {
+      env = relCoeff * env + (1 - relCoeff) * sideMax;
+    }
+
+    const envDb = 20 * Math.log10(Math.max(1e-5, env));
+    let reductionDb = 0;
+    if (envDb > thresh) {
+      reductionDb = (1 / ratio - 1) * (envDb - thresh);
+      if (reductionDb < -18) reductionDb = -18;
+    }
+
+    const gainLin = Math.pow(10, reductionDb / 20);
+    bufL[i] = sL * gainLin;
+    bufR[i] = sR * gainLin;
+  }
+
+  deEssState.env = env;
+}
+
+function processVSTBlock(bufL: Float32Array, bufR: Float32Array, numFrames: number, vstChain: any[], vstStates: any, sampleRate: number) {
+  if (!vstChain || !Array.isArray(vstChain) || vstChain.length === 0) return;
+
+  for (let slotIdx = 0; slotIdx < vstChain.length; slotIdx++) {
+    const inst = vstChain[slotIdx];
+    if (!inst || !inst.enabled) continue;
+
+    const instId = inst.instanceId || `slot_${slotIdx}`;
+    if (!vstStates[instId]) {
+      vstStates[instId] = {
+        reverb: { preRingL: new Float32Array(4800), preRingR: new Float32Array(4800), ringIdx: 0, c1: 0, c2: 0, c3: 0, c4: 0 },
+        rider: { env: 0, currentGainDb: 0 },
+        cla: { env: 0 },
+        ott: { lowEnv: 0, midEnv: 0, highEnv: 0 },
+        eq: {},
+        saturation: { dc: 0 }
+      };
+    }
+    const state = vstStates[instId];
+    const params = inst.parameters || {};
+    const wetDry = typeof inst.wetDry === 'number' ? Math.max(0, Math.min(1, inst.wetDry)) : 1.0;
+
+    const dryL = new Float32Array(numFrames);
+    const dryR = new Float32Array(numFrames);
+    dryL.set(bufL);
+    dryR.set(bufR);
+
+    switch (inst.pluginId) {
+      case 'vst-pro-q3': {
+        const hpFreq = params.hp_freq || 80;
+        const lowFreq = params.low_freq || 150;
+        const lowGain = params.low_gain || 0;
+        const midFreq = params.mid_freq || 3200;
+        const midGain = params.mid_gain || 0;
+        const midQ = params.mid_q || 1.2;
+        const highFreq = params.high_freq || 12000;
+        const highGain = params.high_gain || 0;
+
+        if (!state.eq.hpCoeffs || state.eq.lastHp !== hpFreq) {
+          state.eq.hpCoeffs = computeBiquadCoeffs('highshelf', hpFreq, -18, 0.7071, sampleRate);
+          state.eq.lastHp = hpFreq;
+          state.eq.hpStL = { z1: 0, z2: 0 };
+          state.eq.hpStR = { z1: 0, z2: 0 };
+        }
+        if (!state.eq.lsCoeffs || state.eq.lastLowGain !== lowGain || state.eq.lastLowFreq !== lowFreq) {
+          state.eq.lsCoeffs = computeBiquadCoeffs('lowshelf', lowFreq, lowGain, 0.7071, sampleRate);
+          state.eq.lastLowGain = lowGain;
+          state.eq.lastLowFreq = lowFreq;
+          state.eq.lsStL = { z1: 0, z2: 0 };
+          state.eq.lsStR = { z1: 0, z2: 0 };
+        }
+        if (!state.eq.midCoeffs || state.eq.lastMidGain !== midGain || state.eq.lastMidFreq !== midFreq) {
+          state.eq.midCoeffs = computeBiquadCoeffs('peaking', midFreq, midGain, midQ, sampleRate);
+          state.eq.lastMidGain = midGain;
+          state.eq.lastMidFreq = midFreq;
+          state.eq.midStL = { z1: 0, z2: 0 };
+          state.eq.midStR = { z1: 0, z2: 0 };
+        }
+        if (!state.eq.hsCoeffs || state.eq.lastHighGain !== highGain || state.eq.lastHighFreq !== highFreq) {
+          state.eq.hsCoeffs = computeBiquadCoeffs('highshelf', highFreq, highGain, 0.7071, sampleRate);
+          state.eq.lastHighGain = highGain;
+          state.eq.lastHighFreq = highFreq;
+          state.eq.hsStL = { z1: 0, z2: 0 };
+          state.eq.hsStR = { z1: 0, z2: 0 };
+        }
+
+        for (let i = 0; i < numFrames; i++) {
+          let sL = bufL[i];
+          let sR = bufR[i];
+          if (lowGain !== 0) {
+            sL = processBiquadSample(sL, state.eq.lsCoeffs, state.eq.lsStL);
+            sR = processBiquadSample(sR, state.eq.lsCoeffs, state.eq.lsStR);
+          }
+          if (midGain !== 0) {
+            sL = processBiquadSample(sL, state.eq.midCoeffs, state.eq.midStL);
+            sR = processBiquadSample(sR, state.eq.midCoeffs, state.eq.midStR);
+          }
+          if (highGain !== 0) {
+            sL = processBiquadSample(sL, state.eq.hsCoeffs, state.eq.hsStL);
+            sR = processBiquadSample(sR, state.eq.hsCoeffs, state.eq.hsStR);
+          }
+          bufL[i] = sL;
+          bufR[i] = sR;
+        }
+        break;
+      }
+
+      case 'vst-cla76': {
+        const inputDriveDb = params.input ?? -18;
+        const outputGainDb = params.output ?? 2;
+        const driveLin = Math.pow(10, (inputDriveDb + 24) / 20);
+        const outLin = Math.pow(10, outputGainDb / 20);
+        const ratioIdx = params.ratio ?? 1;
+        const ratios = [4, 8, 12, 20, 30];
+        const ratio = ratios[Math.min(ratioIdx, ratios.length - 1)];
+
+        const attSpeed = params.attack || 4;
+        const relSpeed = params.release || 6;
+        const attSec = Math.max(0.0001, (8 - attSpeed) * 0.0002);
+        const relSec = Math.max(0.01, (8 - relSpeed) * 0.08);
+        const attCoeff = Math.exp(-1 / (attSec * sampleRate));
+        const relCoeff = Math.exp(-1 / (relSec * sampleRate));
+
+        let env = state.cla.env || 0;
+        let maxGr = 0;
+
+        for (let i = 0; i < numFrames; i++) {
+          let sL = bufL[i] * driveLin;
+          let sR = bufR[i] * driveLin;
+          const peak = Math.max(Math.abs(sL), Math.abs(sR));
+
+          if (peak > env) {
+            env = attCoeff * env + (1 - attCoeff) * peak;
+          } else {
+            env = relCoeff * env + (1 - relCoeff) * peak;
+          }
+
+          const envDb = 20 * Math.log10(Math.max(1e-5, env));
+          const threshDb = -18;
+          let gainRedDb = 0;
+          if (envDb > threshDb) {
+            gainRedDb = (1 / ratio - 1) * (envDb - threshDb);
+          }
+          if (gainRedDb < maxGr) maxGr = gainRedDb;
+
+          const grLin = Math.pow(10, gainRedDb / 20);
+          sL = Math.tanh(sL * grLin) * outLin;
+          sR = Math.tanh(sR * grLin) * outLin;
+          bufL[i] = sL;
+          bufR[i] = sR;
+        }
+        state.cla.env = env;
+        inst.gainReductionDb = maxGr;
+        break;
+      }
+
+      case 'vst-valhalla-verb': {
+        const decay = params.decay || 1.2;
+        const mixPct = (params.mix !== undefined ? params.mix : 15) / 100;
+        const predelayMs = params.predelay || 15;
+        const predelaySamples = Math.floor((predelayMs / 1000) * sampleRate);
+        const ring = state.reverb;
+        const ringSize = ring.preRingL.length;
+        const damp = 0.45;
+        const fb = Math.min(0.88, 0.4 + 0.15 * Math.log(decay + 1));
+
+        for (let i = 0; i < numFrames; i++) {
+          const sL = bufL[i];
+          const sR = bufR[i];
+
+          ring.preRingL[ring.ringIdx] = sL;
+          ring.preRingR[ring.ringIdx] = sR;
+
+          const readIdx = (ring.ringIdx - predelaySamples + ringSize) % ringSize;
+          const delayedL = ring.preRingL[readIdx];
+          const delayedR = ring.preRingR[readIdx];
+          ring.ringIdx = (ring.ringIdx + 1) % ringSize;
+
+          ring.c1 = (1 - damp) * (delayedL + ring.c1 * fb) + damp * ring.c1;
+          ring.c2 = (1 - damp) * (delayedR + ring.c2 * fb * 0.95) + damp * ring.c2;
+          ring.c3 = (1 - damp) * (delayedL * 0.7 - ring.c3 * fb * 0.9) + damp * ring.c3;
+          ring.c4 = (1 - damp) * (delayedR * 0.7 + ring.c4 * fb * 0.85) + damp * ring.c4;
+
+          const wetL = (ring.c1 + ring.c3) * 0.5;
+          const wetR = (ring.c2 + ring.c4) * 0.5;
+
+          bufL[i] = sL * (1 - mixPct) + wetL * mixPct;
+          bufR[i] = sR * (1 - mixPct) + wetR * mixPct;
+        }
+        break;
+      }
+
+      case 'vst-vocal-rider': {
+        const targetDb = params.target_db ?? -18;
+        const rangeDb = params.range_db ?? 6;
+        const speedMs = params.attack_ms ?? 25;
+        const attCoeff = Math.exp(-1 / (Math.max(0.005, speedMs / 1000) * sampleRate));
+
+        let env = state.rider.env || 0;
+        let curGainDb = state.rider.currentGainDb || 0;
+
+        for (let i = 0; i < numFrames; i++) {
+          const sL = bufL[i];
+          const sR = bufR[i];
+          const maxS = Math.max(Math.abs(sL), Math.abs(sR));
+          env = attCoeff * env + (1 - attCoeff) * maxS;
+
+          const envDb = 20 * Math.log10(Math.max(1e-5, env));
+          if (envDb > -45) {
+            const diffDb = targetDb - envDb;
+            const targetGainDb = Math.max(-rangeDb, Math.min(rangeDb, diffDb));
+            curGainDb = 0.95 * curGainDb + 0.05 * targetGainDb;
+          } else {
+            curGainDb = 0.98 * curGainDb;
+          }
+
+          const gainLin = Math.pow(10, curGainDb / 20);
+          bufL[i] = sL * gainLin;
+          bufR[i] = sR * gainLin;
+        }
+        state.rider.env = env;
+        state.rider.currentGainDb = curGainDb;
+        break;
+      }
+
+      case 'vst-decapitator': {
+        const drive = (params.drive ?? 2.2) * (params.punish ? 3.5 : 1.0);
+        const tone = params.tone ?? 1.0;
+        const style = params.style ?? 0;
+        const mixPct = (params.mix !== undefined ? params.mix : 40) / 100;
+        const driveLin = Math.max(1.0, 1.0 + drive * 0.8);
+
+        for (let i = 0; i < numFrames; i++) {
+          const inL = bufL[i] * driveLin;
+          const inR = bufR[i] * driveLin;
+
+          let satL = style === 0 ? Math.tanh(inL) : Math.tanh(inL) - 0.1 * Math.sin(inL * inL);
+          let satR = style === 0 ? Math.tanh(inR) : Math.tanh(inR) - 0.1 * Math.sin(inR * inR);
+
+          if (tone > 0) {
+            satL = satL * (1 + tone * 0.1);
+            satR = satR * (1 + tone * 0.1);
+          }
+
+          const wetL = satL / Math.sqrt(driveLin);
+          const wetR = satR / Math.sqrt(driveLin);
+
+          bufL[i] = bufL[i] * (1 - mixPct) + wetL * mixPct;
+          bufR[i] = bufR[i] * (1 - mixPct) + wetR * mixPct;
+        }
+        break;
+      }
+
+      case 'vst-ozone-maximizer': {
+        const ceilingDb = params.ceiling_db ?? -1.0;
+        const threshDb = params.threshold_db ?? -4.0;
+        const ceilLin = Math.pow(10, ceilingDb / 20);
+        const threshLin = Math.pow(10, threshDb / 20);
+        const boostLin = 1.0 / Math.max(0.01, threshLin);
+
+        for (let i = 0; i < numFrames; i++) {
+          let sL = bufL[i] * boostLin;
+          let sR = bufR[i] * boostLin;
+
+          if (Math.abs(sL) > ceilLin) sL = Math.sign(sL) * ceilLin;
+          if (Math.abs(sR) > ceilLin) sR = Math.sign(sR) * ceilLin;
+
+          bufL[i] = sL;
+          bufR[i] = sR;
+        }
+        break;
+      }
+
+      case 'vst-ott-multiband': {
+        const depthPct = (params.depth ?? 25) / 100;
+        for (let i = 0; i < numFrames; i++) {
+          const sL = bufL[i];
+          const sR = bufR[i];
+          const compL = sL + Math.sign(sL) * Math.pow(Math.abs(sL), 0.7) * 0.25;
+          const compR = sR + Math.sign(sR) * Math.pow(Math.abs(sR), 0.7) * 0.25;
+          bufL[i] = sL * (1 - depthPct) + compL * depthPct;
+          bufR[i] = sR * (1 - depthPct) + compR * depthPct;
+        }
+        break;
+      }
+
+      default:
+        break;
+    }
+
+    if (wetDry < 0.999) {
+      for (let i = 0; i < numFrames; i++) {
+        bufL[i] = dryL[i] * (1 - wetDry) + bufL[i] * wetDry;
+        bufR[i] = dryR[i] * (1 - wetDry) + bufR[i] * wetDry;
+      }
+    }
   }
 }
 

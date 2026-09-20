@@ -62,7 +62,7 @@ export interface VoiceoverMixWizardModalProps {
   isPlaying: boolean;
   onTogglePlay: () => void;
   onSeek: (sec: number) => void;
-  onRunAIPipelineAndNorm: () => Promise<TrackState[]>;
+  onRunAIPipelineAndNorm: (onProgress?: (msg: string, percent: number) => void) => Promise<TrackState[]>;
   onRunFinalMasterAndMux: (
     updatedTracks: TrackState[],
     updatedVocalBus: VocalBusState
@@ -123,7 +123,11 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
 
     try {
       // 1. Применение AI и нормализация
-      const processedTracks = await onRunAIPipelineAndNorm();
+      const processedTracks = await onRunAIPipelineAndNorm((msg, pct) => {
+        setStatusMessage(`Шаг 1/4: ${msg}`);
+        setProgressPercent(Math.round(10 + pct * 0.25)); // Scale progress to 10% - 35%
+        addLog(msg);
+      });
       setTracks(processedTracks);
       addLog('AI обработка и EBU R128 нормализация всех дорожек успешно завершена.');
       setProgressPercent(35);

@@ -449,7 +449,8 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             pan: typeof c.pan === 'number' ? c.pan : 0.0,
             fadeInSamples: c.fadeInSamples || 0,
             fadeOutSamples: c.fadeOutSamples || 0,
-            isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true
+            isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true,
+            buffer: c.buffer
           }))
         });
       } catch (err) {
@@ -488,7 +489,8 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
               pan: typeof c.pan === 'number' ? c.pan : 0.0,
               fadeInSamples: c.fadeInSamples || 0,
               fadeOutSamples: c.fadeOutSamples || 0,
-              isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true
+              isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true,
+              buffer: c.buffer
             }))
           }))
         });
