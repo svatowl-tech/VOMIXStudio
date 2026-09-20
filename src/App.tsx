@@ -10,11 +10,14 @@ import { VideoMonitor } from './components/VideoMonitor';
 import { ExportStudio } from './components/ExportStudio';
 import { ProjectWorkspace } from './components/ProjectWorkspace';
 import { MinimalStudio } from './components/MinimalStudio';
+import { VSTPluginManager } from './components/VSTPluginManager';
 import { LogConsole } from './components/LogConsole';
 import { ConsoleStatusBar } from './components/ConsoleStatusBar';
 import { MediaImportModal } from './components/MediaImportModal';
 import { useAudioEngine } from './hooks/useAudioEngine';
-import { TrackState, MasterState, LiveDAWEngine, createNewTrack } from './audio/dawEngine';
+import { TrackState, MasterState, LiveDAWEngine, createNewTrack, VocalBusState, createDefaultVocalBus } from './audio/dawEngine';
+import { VSTPluginInstance } from './audio/vstTypes';
+import { MVPPreset } from './services/MVPPresetManager';
 import { SubtitleLine } from './services/AudioAIEngine';
 import { SubtitleCue } from './services/ProjectManager';
 import { MediaNormalizer } from './services/MediaNormalizer';
@@ -49,6 +52,12 @@ export default function App() {
     setTrackAutoDucker,
     setMasterVolume,
     setMasterLimiter,
+    setTrackVstChain,
+    setVocalBusVstChain,
+    setMasterVstChain,
+    updateVstParameter,
+    setVstBypass,
+    setVstWetDry,
     performLoudnessMatching
   } = useAudioEngine();
 
@@ -57,11 +66,14 @@ export default function App() {
     return new LiveDAWEngine().getTracks();
   });
 
+  const [vocalBus, setVocalBusState] = useState<VocalBusState>(() => createDefaultVocalBus());
+
   const [master, setMaster] = useState<MasterState>({
     volumeDb: 0,
     pan: 0,
     limiterCeilingDb: -0.1,
     limiterEnabled: true,
+    vstPlugins: [],
     peakL: 0,
     peakR: 0,
     clipped: false
@@ -134,6 +146,146 @@ export default function App() {
     setMaster(updatedMaster);
     setMasterVolume(updatedMaster.volumeDb);
     setMasterLimiter(updatedMaster.limiterEnabled, updatedMaster.limiterCeilingDb);
+  };
+
+  const handleUpdateTrackVstChain = (trackId: number, vstPlugins: VSTPluginInstance[]) => {
+    setTracks((prev) =>
+      prev.map((t) => (t.id === trackId ? { ...t, vstPlugins } : t))
+    );
+    setTrackVstChain(trackId, vstPlugins);
+  };
+
+  const handleUpdateVocalBusVstChain = (vstPlugins: VSTPluginInstance[]) => {
+    setVocalBusState((prev) => ({ ...prev, vstPlugins }));
+    setVocalBusVstChain(vstPlugins);
+  };
+
+  const handleUpdateMasterVstChain = (vstPlugins: VSTPluginInstance[]) => {
+    setMaster((prev) => ({ ...prev, vstPlugins }));
+    setMasterVstChain(vstPlugins);
+  };
+
+  const handleUpdateVstParam = (
+    target: 'track' | 'vocalBus' | 'master',
+    instanceId: string,
+    paramId: string,
+    value: number,
+    trackId?: number
+  ) => {
+    if (target === 'track' && trackId !== undefined) {
+      setTracks((prev) =>
+        prev.map((t) => {
+          if (t.id !== trackId) return t;
+          const plugins = (t.vstPlugins || []).map((p) =>
+            p.instanceId === instanceId
+              ? { ...p, parameters: { ...p.parameters, [paramId]: value } }
+              : p
+          );
+          return { ...t, vstPlugins: plugins };
+        })
+      );
+    } else if (target === 'vocalBus') {
+      setVocalBusState((prev) => {
+        const plugins = (prev.vstPlugins || []).map((p) =>
+          p.instanceId === instanceId
+            ? { ...p, parameters: { ...p.parameters, [paramId]: value } }
+            : p
+        );
+        return { ...prev, vstPlugins: plugins };
+      });
+    } else if (target === 'master') {
+      setMaster((prev) => {
+        const plugins = (prev.vstPlugins || []).map((p) =>
+          p.instanceId === instanceId
+            ? { ...p, parameters: { ...p.parameters, [paramId]: value } }
+            : p
+        );
+        return { ...prev, vstPlugins: plugins };
+      });
+    }
+    updateVstParameter(target, instanceId, paramId, value, trackId);
+  };
+
+  const handleUpdateVstBypass = (
+    target: 'track' | 'vocalBus' | 'master',
+    instanceId: string,
+    enabled: boolean,
+    trackId?: number
+  ) => {
+    if (target === 'track' && trackId !== undefined) {
+      setTracks((prev) =>
+        prev.map((t) => {
+          if (t.id !== trackId) return t;
+          const plugins = (t.vstPlugins || []).map((p) =>
+            p.instanceId === instanceId ? { ...p, enabled } : p
+          );
+          return { ...t, vstPlugins: plugins };
+        })
+      );
+    } else if (target === 'vocalBus') {
+      setVocalBusState((prev) => {
+        const plugins = (prev.vstPlugins || []).map((p) =>
+          p.instanceId === instanceId ? { ...p, enabled } : p
+        );
+        return { ...prev, vstPlugins: plugins };
+      });
+    } else if (target === 'master') {
+      setMaster((prev) => {
+        const plugins = (prev.vstPlugins || []).map((p) =>
+          p.instanceId === instanceId ? { ...p, enabled } : p
+        );
+        return { ...prev, vstPlugins: plugins };
+      });
+    }
+    setVstBypass(target, instanceId, enabled, trackId);
+  };
+
+  const handleUpdateVstWetDry = (
+    target: 'track' | 'vocalBus' | 'master',
+    instanceId: string,
+    wetDry: number,
+    trackId?: number
+  ) => {
+    if (target === 'track' && trackId !== undefined) {
+      setTracks((prev) =>
+        prev.map((t) => {
+          if (t.id !== trackId) return t;
+          const plugins = (t.vstPlugins || []).map((p) =>
+            p.instanceId === instanceId ? { ...p, wetDry } : p
+          );
+          return { ...t, vstPlugins: plugins };
+        })
+      );
+    } else if (target === 'vocalBus') {
+      setVocalBusState((prev) => {
+        const plugins = (prev.vstPlugins || []).map((p) =>
+          p.instanceId === instanceId ? { ...p, wetDry } : p
+        );
+        return { ...prev, vstPlugins: plugins };
+      });
+    } else if (target === 'master') {
+      setMaster((prev) => {
+        const plugins = (prev.vstPlugins || []).map((p) =>
+          p.instanceId === instanceId ? { ...p, wetDry } : p
+        );
+        return { ...prev, vstPlugins: plugins };
+      });
+    }
+    setVstWetDry(target, instanceId, wetDry, trackId);
+  };
+
+  const handleApplyGlobalPreset = (preset: MVPPreset) => {
+    if (preset.vocalBusSettings?.vstChain) {
+      handleUpdateVocalBusVstChain(preset.vocalBusSettings.vstChain);
+    }
+    if (preset.masterSettings?.vstChain) {
+      handleUpdateMasterVstChain(preset.masterSettings.vstChain);
+    }
+    if (preset.trackVstChain && tracks.length > 0) {
+      tracks.forEach((tr) => {
+        handleUpdateTrackVstChain(tr.id, preset.trackVstChain);
+      });
+    }
   };
 
   const handleLoadProjectState = (state: any) => {
@@ -363,6 +515,101 @@ export default function App() {
     setTimeout(() => setLoudnessStatus(null), 6000);
   };
 
+  /**
+   * Добавление сгенерированных AI стемов (Вокал + M&E) на дорожки DAW
+   */
+  const handleAddStemTracks = (
+    vocalsPcm: Float32Array,
+    karaokePcm: Float32Array,
+    vocalsName = 'Изолированный вокал оригинала',
+    karaokeName = 'Фонограмма M&E'
+  ) => {
+    const vocLen = Math.floor(vocalsPcm.length / 2);
+    const karLen = Math.floor(karaokePcm.length / 2);
+    const vocClipId = Date.now();
+    const karClipId = Date.now() + 1;
+
+    setTracks((prev) => {
+      const nextId1 = prev.length > 0 ? Math.max(...prev.map((t) => t.id)) + 1 : 1;
+      const nextId2 = nextId1 + 1;
+
+      const trackVoc = createNewTrack(nextId1, vocalsName, '#10b981');
+      trackVoc.clips = [
+        {
+          id: vocClipId,
+          name: `${vocalsName}.wav`,
+          offsetSamples: 0,
+          lengthSamples: vocLen,
+          gain: 1.0,
+          pan: 0,
+          fadeInSamples: 0,
+          fadeOutSamples: 0,
+          buffer: vocalsPcm,
+          color: '#10b981'
+        }
+      ];
+
+      const trackKar = createNewTrack(nextId2, karaokeName, '#06b6d4');
+      trackKar.clips = [
+        {
+          id: karClipId,
+          name: `${karaokeName}.wav`,
+          offsetSamples: 0,
+          lengthSamples: karLen,
+          gain: 1.0,
+          pan: 0,
+          fadeInSamples: 0,
+          fadeOutSamples: 0,
+          buffer: karaokePcm,
+          color: '#06b6d4'
+        }
+      ];
+
+      return [...prev, trackVoc, trackKar];
+    });
+
+    uploadRawPCMToTrack(vocalsPcm, tracks.length + 1, vocClipId, 0, 1.0, 0, true);
+    uploadRawPCMToTrack(karaokePcm, tracks.length + 2, karClipId, 0, 1.0, 0, true);
+  };
+
+  /**
+   * Применение очищенного или спектрально подкорректированного аудио к существующей дорожке
+   */
+  const handleApplyProcessedAudioToTrack = (
+    trackId: number,
+    newPcm: Float32Array,
+    clipName = 'Обработанное аудио'
+  ) => {
+    const totalFrames = Math.floor(newPcm.length / 2);
+    const clipId = Date.now();
+
+    setTracks((prev) =>
+      prev.map((t) =>
+        t.id === trackId
+          ? {
+              ...t,
+              clips: [
+                {
+                  id: clipId,
+                  name: clipName,
+                  offsetSamples: 0,
+                  lengthSamples: totalFrames,
+                  gain: 1.0,
+                  pan: 0,
+                  fadeInSamples: 0,
+                  fadeOutSamples: 0,
+                  buffer: newPcm,
+                  color: t.color
+                }
+              ]
+            }
+          : t
+      )
+    );
+
+    uploadRawPCMToTrack(newPcm, trackId, clipId, 0, 1.0, 0, true);
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-emerald-500 selection:text-slate-950">
       {/* Top Navigation */}
@@ -530,6 +777,13 @@ export default function App() {
           </div>
         )}
 
+        {/* Tab: Industrial VST & CLAP Plugin Host / Directory Manager */}
+        {activeTab === 'vst' && (
+          <div className="space-y-6 animate-fadeIn">
+            <VSTPluginManager />
+          </div>
+        )}
+
         {/* Tab: Local Project Manager (File System Access API) */}
         {activeTab === 'project' && (
           <div className="space-y-6 animate-fadeIn">
@@ -634,6 +888,8 @@ export default function App() {
               tracks={tracks}
               currentTimeSec={currentTimeSec}
               onSeek={seek}
+              onAddStemTracks={handleAddStemTracks}
+              onApplyProcessedAudioToTrack={handleApplyProcessedAudioToTrack}
             />
           </div>
         )}

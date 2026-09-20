@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Sliders, Cpu, Terminal, Sparkles, Volume2, FolderKanban, PlaySquare, AlertCircle, Upload, Plus } from 'lucide-react';
+import { Sliders, Cpu, Terminal, Sparkles, Volume2, FolderKanban, PlaySquare, AlertCircle, Upload, Plus, Layers } from 'lucide-react';
 import { systemLogger } from '../services/SystemLogger';
 
-export type NavigationTab = 'minimal' | 'studio' | 'project' | 'video' | 'ai-dubbing' | 'export' | 'cpp' | 'emcc' | 'console';
+export type NavigationTab = 'minimal' | 'studio' | 'vst' | 'project' | 'video' | 'ai-dubbing' | 'export' | 'cpp' | 'emcc' | 'console';
 
 interface HeaderProps {
   activeTab: NavigationTab;
@@ -78,6 +78,18 @@ export const Header: React.FC<HeaderProps> = ({ activeTab, onSelectTab, onOpenIm
           >
             <Volume2 size={14} />
             DAW Микшер
+          </button>
+
+          <button
+            onClick={() => onSelectTab('vst')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
+              activeTab === 'vst'
+                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Layers size={14} />
+            VST Плагины
           </button>
 
           <button

@@ -1,16 +1,30 @@
 import React, { useState } from 'react';
 import { TrackState } from '../audio/dawEngine';
+import { VSTPluginInstance } from '../audio/vstTypes';
 import { EqCurveVisualizer } from './EqCurveVisualizer';
-import { Sliders, Activity, Mic, VolumeX, Volume2, Shield } from 'lucide-react';
+import { VSTRackSlot } from './VSTRackSlot';
+import { Sliders, Activity, Mic, VolumeX, Volume2, Shield, Layers } from 'lucide-react';
 
 interface TrackStripProps {
   track: TrackState;
   allTracks: TrackState[];
   onUpdateTrack: (updated: TrackState) => void;
+  onUpdateVstChain?: (vstPlugins: VSTPluginInstance[]) => void;
+  onUpdateVstParam?: (instanceId: string, paramId: string, value: number) => void;
+  onUpdateVstBypass?: (instanceId: string, enabled: boolean) => void;
+  onUpdateVstWetDry?: (instanceId: string, wetDry: number) => void;
 }
 
-export const TrackStrip: React.FC<TrackStripProps> = ({ track, allTracks, onUpdateTrack }) => {
-  const [activeDspTab, setActiveDspTab] = useState<'eq' | 'comp' | 'duck'>('eq');
+export const TrackStrip: React.FC<TrackStripProps> = ({
+  track,
+  allTracks,
+  onUpdateTrack,
+  onUpdateVstChain,
+  onUpdateVstParam,
+  onUpdateVstBypass,
+  onUpdateVstWetDry
+}) => {
+  const [activeDspTab, setActiveDspTab] = useState<'eq' | 'comp' | 'duck' | 'vst'>('eq');
 
   const handleVolumeChange = (v: number) => {
     onUpdateTrack({ ...track, volumeDb: v });
@@ -40,9 +54,14 @@ export const TrackStrip: React.FC<TrackStripProps> = ({ track, allTracks, onUpda
             className="w-3 h-3 rounded-full shrink-0"
             style={{ backgroundColor: track.color }}
           />
-          <h3 className="text-sm font-bold text-slate-100 truncate max-w-[140px]">
+          <h3 className="text-sm font-bold text-slate-100 truncate max-w-[120px]">
             {track.name}
           </h3>
+          {track.vstPlugins && track.vstPlugins.length > 0 && (
+            <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 font-mono border border-emerald-500/30">
+              {track.vstPlugins.length} VST
+            </span>
+          )}
         </div>
 
         {/* Mute / Solo Buttons */}
@@ -93,8 +112,12 @@ export const TrackStrip: React.FC<TrackStripProps> = ({ track, allTracks, onUpda
           <div className="space-y-1">
             <div className="flex justify-between text-xs text-slate-400 font-mono">
               <span>Pan</span>
-              <span className="text-cyan-400 font-semibold">
-                {track.pan === 0 ? 'C' : track.pan < 0 ? `L${Math.abs(Math.round(track.pan * 100))}` : `R${Math.round(track.pan * 100)}`}
+              <span className="text-slate-300">
+                {track.pan === 0
+                  ? 'C'
+                  : track.pan < 0
+                  ? `L${Math.abs(Math.round(track.pan * 100))}`
+                  : `R${Math.round(track.pan * 100)}`}
               </span>
             </div>
             <input
@@ -104,34 +127,36 @@ export const TrackStrip: React.FC<TrackStripProps> = ({ track, allTracks, onUpda
               step={0.05}
               value={track.pan}
               onChange={(e) => handlePanChange(parseFloat(e.target.value))}
-              className="w-full accent-cyan-500 bg-slate-800 h-1.5 rounded-lg appearance-none cursor-pointer"
+              className="w-full accent-blue-500 bg-slate-800 h-1.5 rounded-lg appearance-none cursor-pointer"
             />
           </div>
         </div>
 
-        {/* Peak Meters (Left & Right) */}
-        <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800/80 space-y-1.5">
-          <div className="text-[10px] text-slate-500 font-mono flex justify-between">
-            <span>Peak Level</span>
-            <span className="text-slate-400 font-bold">
-              {Math.max(track.peakL, track.peakR) > 0.001
+        {/* C++ AudioWorklet Realtime Stereo Meters */}
+        <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800 space-y-1.5">
+          <div className="flex justify-between text-[10px] text-slate-400 font-mono">
+            <span>Peak L/R</span>
+            <span className={track.peakL > 0.99 || track.peakR > 0.99 ? 'text-rose-400 font-bold' : 'text-slate-400'}>
+              {Math.max(track.peakL, track.peakR) > 1e-4
                 ? `${(20 * Math.log10(Math.max(track.peakL, track.peakR))).toFixed(1)} dB`
                 : '-inf'}
             </span>
           </div>
 
           <div className="space-y-1">
-            {/* Left Channel Meter */}
-            <div className="h-2 bg-slate-900 rounded-full overflow-hidden flex">
+            <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
               <div
-                className="h-full bg-emerald-500 transition-all duration-75"
+                className={`h-full transition-all duration-75 ${
+                  track.peakL > 0.99 ? 'bg-rose-500' : track.peakL > 0.7 ? 'bg-amber-400' : 'bg-emerald-500'
+                }`}
                 style={{ width: `${Math.min(100, track.peakL * 100)}%` }}
               />
             </div>
-            {/* Right Channel Meter */}
-            <div className="h-2 bg-slate-900 rounded-full overflow-hidden flex">
+            <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
               <div
-                className="h-full bg-emerald-500 transition-all duration-75"
+                className={`h-full transition-all duration-75 ${
+                  track.peakR > 0.99 ? 'bg-rose-500' : track.peakR > 0.7 ? 'bg-amber-400' : 'bg-emerald-500'
+                }`}
                 style={{ width: `${Math.min(100, track.peakR * 100)}%` }}
               />
             </div>
@@ -139,11 +164,11 @@ export const TrackStrip: React.FC<TrackStripProps> = ({ track, allTracks, onUpda
         </div>
       </div>
 
-      {/* DSP Rack Tabs */}
-      <div className="bg-slate-950 rounded-lg p-3 border border-slate-800/80 space-y-3">
-        <div className="flex items-center justify-between border-b border-slate-800 pb-2 text-xs">
+      {/* DSP & VST Processing Section */}
+      <div className="bg-slate-950/70 p-3 rounded-xl border border-slate-800 space-y-3">
+        <div className="flex items-center justify-between border-b border-slate-800 pb-2">
           <span className="font-bold text-slate-300 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
-            <Sliders size={13} className="text-emerald-400" /> C++ DSP Chain
+            <Sliders size={13} className="text-emerald-400" /> C++ DSP & VST
           </span>
 
           <div className="flex items-center gap-1 bg-slate-900 p-0.5 rounded-md border border-slate-800">
@@ -161,7 +186,7 @@ export const TrackStrip: React.FC<TrackStripProps> = ({ track, allTracks, onUpda
                 activeDspTab === 'comp' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              Compressor
+              Comp
             </button>
             <button
               onClick={() => setActiveDspTab('duck')}
@@ -169,7 +194,16 @@ export const TrackStrip: React.FC<TrackStripProps> = ({ track, allTracks, onUpda
                 activeDspTab === 'duck' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              Auto-Duck
+              Duck
+            </button>
+            <button
+              onClick={() => setActiveDspTab('vst')}
+              className={`px-2 py-0.5 text-[11px] font-medium rounded flex items-center gap-1 ${
+                activeDspTab === 'vst' ? 'bg-violet-600 text-white' : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Layers size={11} />
+              VST ({track.vstPlugins?.length || 0})
             </button>
           </div>
         </div>
@@ -259,27 +293,33 @@ export const TrackStrip: React.FC<TrackStripProps> = ({ track, allTracks, onUpda
           </div>
         )}
 
-        {/* Tab 2: Soft Knee Compressor */}
+        {/* Tab 2: Dynamic Compressor */}
         {activeDspTab === 'comp' && (
           <div className="space-y-3">
             <div className="flex items-center justify-between text-xs">
-              <span className="text-slate-400 font-mono">Gain Reduction (GR):</span>
-              <span className="text-rose-400 font-bold font-mono">
+              <label className="flex items-center gap-2 text-slate-200 cursor-pointer font-medium">
+                <input
+                  type="checkbox"
+                  checked={track.compressor.enabled}
+                  onChange={(e) => {
+                    onUpdateTrack({
+                      ...track,
+                      compressor: { ...track.compressor, enabled: e.target.checked }
+                    });
+                  }}
+                  className="accent-emerald-500 rounded"
+                />
+                Включить компрессор
+              </label>
+
+              <span className="text-emerald-400 font-mono text-[10px]">
                 {track.compressor.currentGainReductionDb < -0.1
-                  ? `${track.compressor.currentGainReductionDb.toFixed(1)} dB`
+                  ? `GR: ${track.compressor.currentGainReductionDb.toFixed(1)} dB`
                   : '0.0 dB'}
               </span>
             </div>
 
-            {/* GR Meter bar */}
-            <div className="h-2 bg-slate-900 rounded-full overflow-hidden flex flex-row-reverse border border-slate-800">
-              <div
-                className="h-full bg-rose-500 transition-all duration-75"
-                style={{ width: `${Math.min(100, Math.abs(track.compressor.currentGainReductionDb) * 5)}%` }}
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-3 text-xs">
+            <div className="grid grid-cols-3 gap-2 text-xs">
               <div className="space-y-1">
                 <div className="flex justify-between text-slate-400 text-[10px] font-mono">
                   <span>Threshold</span>
@@ -289,6 +329,7 @@ export const TrackStrip: React.FC<TrackStripProps> = ({ track, allTracks, onUpda
                   type="range"
                   min={-40}
                   max={0}
+                  step={1}
                   value={track.compressor.thresholdDb}
                   onChange={(e) => {
                     const val = parseFloat(e.target.value);
@@ -297,7 +338,7 @@ export const TrackStrip: React.FC<TrackStripProps> = ({ track, allTracks, onUpda
                       compressor: { ...track.compressor, thresholdDb: val }
                     });
                   }}
-                  className="w-full accent-rose-500 bg-slate-800 h-1 rounded appearance-none cursor-pointer"
+                  className="w-full accent-emerald-500 bg-slate-800 h-1 rounded appearance-none cursor-pointer"
                 />
               </div>
 
@@ -319,29 +360,7 @@ export const TrackStrip: React.FC<TrackStripProps> = ({ track, allTracks, onUpda
                       compressor: { ...track.compressor, ratio: val }
                     });
                   }}
-                  className="w-full accent-rose-500 bg-slate-800 h-1 rounded appearance-none cursor-pointer"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <div className="flex justify-between text-slate-400 text-[10px] font-mono">
-                  <span>Knee Width</span>
-                  <span>{track.compressor.kneeDb} dB</span>
-                </div>
-                <input
-                  type="range"
-                  min={0}
-                  max={18}
-                  step={1}
-                  value={track.compressor.kneeDb}
-                  onChange={(e) => {
-                    const val = parseFloat(e.target.value);
-                    onUpdateTrack({
-                      ...track,
-                      compressor: { ...track.compressor, kneeDb: val }
-                    });
-                  }}
-                  className="w-full accent-amber-500 bg-slate-800 h-1 rounded appearance-none cursor-pointer"
+                  className="w-full accent-emerald-500 bg-slate-800 h-1 rounded appearance-none cursor-pointer"
                 />
               </div>
 
@@ -440,6 +459,40 @@ export const TrackStrip: React.FC<TrackStripProps> = ({ track, allTracks, onUpda
                 />
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Tab 4: VST Rack Slot */}
+        {activeDspTab === 'vst' && (
+          <div className="space-y-3 animate-fadeIn">
+            <VSTRackSlot
+              plugins={track.vstPlugins || []}
+              title={`VST рэк: ${track.name}`}
+              badge={`CH ${track.id}`}
+              color={track.color || '#8b5cf6'}
+              onUpdateChain={(newChain) => {
+                if (onUpdateVstChain) {
+                  onUpdateVstChain(newChain);
+                } else {
+                  onUpdateTrack({ ...track, vstPlugins: newChain });
+                }
+              }}
+              onUpdateParam={(instId, pId, val) => {
+                if (onUpdateVstParam) {
+                  onUpdateVstParam(instId, pId, val);
+                }
+              }}
+              onUpdateBypass={(instId, enabled) => {
+                if (onUpdateVstBypass) {
+                  onUpdateVstBypass(instId, enabled);
+                }
+              }}
+              onUpdateWetDry={(instId, wetDry) => {
+                if (onUpdateVstWetDry) {
+                  onUpdateVstWetDry(instId, wetDry);
+                }
+              }}
+            />
           </div>
         )}
       </div>

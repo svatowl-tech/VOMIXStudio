@@ -907,6 +907,147 @@ export class NativeDAWBridge {
   }
 
   /**
+   * Высокоточный речевой анализатор громкости с гейтированием пауз (ITU-R BS.1770 Dialogue Gating)
+   * Анализирует энергию с оконным шагом 100 мс и отсекает паузы между фразами (тишину),
+   * что дает идеальное сведение голосов разных актеров дубляжа независимо от длины пауз.
+   */
+  public static calculateSpeechGatedLoudness(
+    buffer: Float32Array,
+    sampleRate: number = 48000,
+    targetRmsDb: number = -18.0,
+    maxPeakDb: number = -1.0
+  ): {
+    speechRmsDb: number;
+    speechRmsLinear: number;
+    peakDb: number;
+    peakLinear: number;
+    gainDeltaToTargetDb: number;
+    isSilent: boolean;
+    activeSpeechRatio: number;
+  } {
+    const totalSamples = buffer.length;
+    if (totalSamples === 0) {
+      return {
+        speechRmsDb: NativeDAWBridge.MIN_DB_FLOOR,
+        speechRmsLinear: 0,
+        peakDb: NativeDAWBridge.MIN_DB_FLOOR,
+        peakLinear: 0,
+        gainDeltaToTargetDb: 0,
+        isSilent: true,
+        activeSpeechRatio: 0
+      };
+    }
+
+    // 1. Пиковый уровень по всему фрагменту
+    let maxPeak = 0;
+    for (let i = 0; i < totalSamples; i++) {
+      const absVal = Math.abs(buffer[i]);
+      if (absVal > maxPeak) maxPeak = absVal;
+    }
+    const peakDb = maxPeak > 1e-6 ? 20 * Math.log10(maxPeak) : NativeDAWBridge.MIN_DB_FLOOR;
+
+    if (maxPeak <= 1e-4) {
+      return {
+        speechRmsDb: NativeDAWBridge.MIN_DB_FLOOR,
+        speechRmsLinear: 0,
+        peakDb,
+        peakLinear: maxPeak,
+        gainDeltaToTargetDb: 0,
+        isSilent: true,
+        activeSpeechRatio: 0
+      };
+    }
+
+    // 2. Блочный RMS-анализ (окно 100 мс = 4800 сэмплов при 48 кГц)
+    const blockSize = Math.max(256, Math.floor(sampleRate * 0.1));
+    const numBlocks = Math.floor(totalSamples / blockSize);
+    const blockEnergies: number[] = [];
+
+    for (let b = 0; b < numBlocks; b++) {
+      const start = b * blockSize;
+      let sumSq = 0;
+      for (let i = 0; i < blockSize; i++) {
+        const s = buffer[start + i];
+        sumSq += s * s;
+      }
+      blockEnergies.push(Math.sqrt(sumSq / blockSize));
+    }
+
+    const remSamples = totalSamples - numBlocks * blockSize;
+    if (remSamples > 128) {
+      const start = numBlocks * blockSize;
+      let sumSq = 0;
+      for (let i = 0; i < remSamples; i++) {
+        const s = buffer[start + i];
+        sumSq += s * s;
+      }
+      blockEnergies.push(Math.sqrt(sumSq / remSamples));
+    }
+
+    // 3. Гейтирование речи (порог -45 dBFS отсекает фоновый шум и паузы)
+    const speechThresholdLin = Math.pow(10, -45 / 20); // ~0.0056 (-45 dBFS)
+    let activeSpeechSumSq = 0;
+    let activeSpeechBlocks = 0;
+
+    for (const bRms of blockEnergies) {
+      if (bRms >= speechThresholdLin) {
+        activeSpeechSumSq += bRms * bRms;
+        activeSpeechBlocks++;
+      }
+    }
+
+    // Если активной речи меньше 5% (очень тихий микрофон), берем топ 25% самых громких блоков
+    if (activeSpeechBlocks < Math.max(1, Math.floor(blockEnergies.length * 0.05))) {
+      const sorted = [...blockEnergies].sort((a, b) => b - a);
+      const topCount = Math.max(1, Math.floor(sorted.length * 0.25));
+      activeSpeechSumSq = 0;
+      activeSpeechBlocks = 0;
+      for (let i = 0; i < topCount; i++) {
+        if (sorted[i] > 1e-4) {
+          activeSpeechSumSq += sorted[i] * sorted[i];
+          activeSpeechBlocks++;
+        }
+      }
+    }
+
+    if (activeSpeechBlocks === 0) {
+      return {
+        speechRmsDb: NativeDAWBridge.MIN_DB_FLOOR,
+        speechRmsLinear: 0,
+        peakDb,
+        peakLinear: maxPeak,
+        gainDeltaToTargetDb: 0,
+        isSilent: true,
+        activeSpeechRatio: 0
+      };
+    }
+
+    const speechRmsLin = Math.sqrt(activeSpeechSumSq / activeSpeechBlocks);
+    const speechRmsDb = speechRmsLin > 1e-6 ? 20 * Math.log10(speechRmsLin) : NativeDAWBridge.MIN_DB_FLOOR;
+
+    // Расчет требуемого усиления строго по чистой речи
+    let requiredGainDb = targetRmsDb - speechRmsDb;
+    const projectedPeak = peakDb + requiredGainDb;
+
+    // Peak Guard (не допускаем клиппинга выше maxPeakDb)
+    if (projectedPeak > maxPeakDb) {
+      requiredGainDb = maxPeakDb - peakDb;
+    }
+
+    const gainDeltaToTargetDb = Math.max(-36.0, Math.min(18.0, requiredGainDb));
+
+    return {
+      speechRmsDb,
+      speechRmsLinear: speechRmsLin,
+      peakDb,
+      peakLinear: maxPeak,
+      gainDeltaToTargetDb,
+      isSilent: false,
+      activeSpeechRatio: activeSpeechBlocks / Math.max(1, blockEnergies.length)
+    };
+  }
+
+  /**
    * Пакетный расчет и выравнивание уровней громкости дорожек на C++
    */
   public normalizeAndAlignTracks(
@@ -914,11 +1055,6 @@ export class NativeDAWBridge {
     targetRmsDb: number = -18.0,
     maxPeakDb: number = -1.0
   ): NativeLoudnessResult {
-    const mod = this.getModule();
-    if (!mod.calculateLoudnessStats) {
-      throw new Error('[NativeDAWBridge] C++ функция calculateLoudnessStats отсутствует в WASM модуле');
-    }
-
     const adjustments: NativeTrackLoudnessAdjustment[] = [];
     let totalRmsLinearSum = 0;
     let activeTrackCount = 0;
@@ -974,22 +1110,24 @@ export class NativeDAWBridge {
         }
       }
 
-      const ptr = this.writeFloat32Direct(mergedBuffer);
-      let stats: NativeLoudnessStats;
-      try {
-        stats = mod.calculateLoudnessStats!(ptr, Math.floor(totalLength / 2), 2, targetRmsDb, maxPeakDb);
-      } finally {
-        this.freeFloats(ptr);
-      }
+      const isOriginal = track.isOriginalAudio || track.id === 1 || /видео|video|оригинал|original/i.test(track.name || '');
+      const trackTargetRms = isOriginal ? (targetRmsDb - 6.0) : targetRmsDb;
 
-      if (stats.rmsDb <= NativeDAWBridge.SILENCE_THRESHOLD_DB || stats.peakLinear <= 1e-4) {
+      const stats = NativeDAWBridge.calculateSpeechGatedLoudness(
+        mergedBuffer,
+        NativeDAWBridge.TARGET_SAMPLE_RATE,
+        trackTargetRms,
+        maxPeakDb
+      );
+
+      if (stats.isSilent || stats.speechRmsDb <= NativeDAWBridge.SILENCE_THRESHOLD_DB) {
         adjustments.push({
           trackId: track.id,
           trackName: track.name,
           originalVolumeDb: track.volumeDb,
           newVolumeDb: track.volumeDb,
           gainChangeDb: 0.0,
-          measuredRmsDb: Math.round(stats.rmsDb * 10) / 10,
+          measuredRmsDb: Math.round(stats.speechRmsDb * 10) / 10,
           measuredPeakDb: Math.round(stats.peakDb * 10) / 10,
           peakAfterGainDb: Math.round(stats.peakDb * 10) / 10,
           limitedByPeakGuard: false,
@@ -998,7 +1136,7 @@ export class NativeDAWBridge {
         return { ...track };
       }
 
-      totalRmsLinearSum += stats.rmsLinear;
+      totalRmsLinearSum += stats.speechRmsLinear;
       activeTrackCount++;
 
       const proposedNewVolume = Math.max(-60.0, Math.min(12.0, track.volumeDb + stats.gainDeltaToTargetDb));
@@ -1012,7 +1150,7 @@ export class NativeDAWBridge {
         originalVolumeDb: track.volumeDb,
         newVolumeDb: Math.round(proposedNewVolume * 10) / 10,
         gainChangeDb: Math.round(actualGainChange * 10) / 10,
-        measuredRmsDb: Math.round(stats.rmsDb * 10) / 10,
+        measuredRmsDb: Math.round(stats.speechRmsDb * 10) / 10,
         measuredPeakDb: Math.round(stats.peakDb * 10) / 10,
         peakAfterGainDb: Math.round(peakAfterGain * 10) / 10,
         limitedByPeakGuard: limitedByPeak,

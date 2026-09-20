@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { MediaNormalizer, LoudnessMatchingResult } from '../services/MediaNormalizer';
-import { TrackState, ClipConfig } from '../audio/dawEngine';
+import { TrackState, ClipConfig, VocalBusState } from '../audio/dawEngine';
+import { VSTPluginInstance } from '../audio/vstTypes';
 import { systemLogger } from '../services/SystemLogger';
 import { globalNativeDAWBridge } from '../services/NativeDAWBridge';
 import { EMBEDDED_WASM_CORE_BASE64 } from '../data/embeddedWasmCore';
@@ -18,6 +19,11 @@ export interface MasterMeterData {
   clipped: boolean;
 }
 
+export interface VocalBusMeterData {
+  peakL: number;
+  peakR: number;
+}
+
 export interface UseAudioEngineReturn {
   isInitialized: boolean;
   isPlaying: boolean;
@@ -25,6 +31,7 @@ export interface UseAudioEngineReturn {
   currentTimeSec: number;
   error: string | null;
   trackMeters: Map<number, TrackMeterData>;
+  vocalBusMeter: VocalBusMeterData;
   masterMeter: MasterMeterData;
 
   initAudioEngine: () => Promise<void>;
@@ -58,18 +65,24 @@ export interface UseAudioEngineReturn {
   setTrackSolo: (trackId: number, solo: boolean) => void;
   setTrackMute: (trackId: number, mute: boolean) => void;
 
-  setTrackEq: (trackId: number, eqParams: { lowGain?: number; midGain?: number; highGain?: number }) => void;
-  setTrackCompressor: (
-    trackId: number,
-    compParams: { threshold?: number; ratio?: number; attack?: number; release?: number; knee?: number; makeup?: number }
-  ) => void;
-  setTrackAutoDucker: (
-    trackId: number,
-    duckParams: { enabled?: boolean; threshold?: number; depth?: number; sourceTrackId?: number }
-  ) => void;
+  setTrackDsp: (trackId: number, dsp: any) => void;
+  setTrackEq: (trackId: number, eqParams: any) => void;
+  setTrackCompressor: (trackId: number, compParams: any) => void;
+  setTrackAutoDucker: (trackId: number, duckParams: any) => void;
+  setTrackNoiseGate: (trackId: number, noiseGate: any) => void;
+  setTrackDeEsser: (trackId: number, deEsser: any) => void;
+
+  setVocalBus: (vocalBus: VocalBusState) => void;
 
   setMasterVolume: (volumeDb: number) => void;
   setMasterLimiter: (enabled: boolean, ceilingDb: number) => void;
+
+  setTrackVstChain: (trackId: number, vstPlugins: VSTPluginInstance[]) => void;
+  setVocalBusVstChain: (vstPlugins: VSTPluginInstance[]) => void;
+  setMasterVstChain: (vstPlugins: VSTPluginInstance[]) => void;
+  updateVstParameter: (target: 'track' | 'vocalBus' | 'master', instanceId: string, paramId: string, value: number, trackId?: number) => void;
+  setVstBypass: (target: 'track' | 'vocalBus' | 'master', instanceId: string, enabled: boolean, trackId?: number) => void;
+  setVstWetDry: (target: 'track' | 'vocalBus' | 'master', instanceId: string, wetDry: number, trackId?: number) => void;
 
   performLoudnessMatching: (
     tracks: TrackState[],
@@ -86,6 +99,10 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
   const [error, setError] = useState<string | null>(null);
 
   const [trackMeters, setTrackMeters] = useState<Map<number, TrackMeterData>>(new Map());
+  const [vocalBusMeter, setVocalBusMeter] = useState<VocalBusMeterData>({
+    peakL: 0,
+    peakR: 0
+  });
   const [masterMeter, setMasterMeter] = useState<MasterMeterData>({
     peakL: 0,
     peakR: 0,
@@ -188,6 +205,10 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
                     });
                     return newMap;
                   });
+                }
+
+                if (data.vocalBus) {
+                  setVocalBusMeter(data.vocalBus);
                 }
 
                 if (data.master) {
@@ -449,6 +470,15 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             pan: t.pan,
             solo: t.solo,
             mute: t.mute,
+            isOriginalAudio: t.isOriginalAudio,
+            dsp: {
+              eq: t.eq,
+              compressor: t.compressor,
+              noiseGate: t.noiseGate,
+              deEsser: t.deEsser,
+              deClicker: t.deClicker,
+              autoDucker: t.autoDucker
+            },
             clips: t.clips.map((c) => ({
               id: c.id,
               name: c.name,
@@ -524,35 +554,54 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     }
   }, []);
 
-  const setTrackEq = useCallback((trackId: number, eqParams: { lowGain?: number; midGain?: number; highGain?: number }) => {
+  const setTrackDsp = useCallback((trackId: number, dsp: any) => {
     if (workletNodeRef.current) {
-      workletNodeRef.current.port.postMessage({ type: 'SET_EQ_PARAMS', trackId, eqParams });
+      workletNodeRef.current.port.postMessage({ type: 'SET_TRACK_DSP', trackId, dsp });
     }
   }, []);
 
-  const setTrackCompressor = useCallback(
-    (
-      trackId: number,
-      compParams: { threshold?: number; ratio?: number; attack?: number; release?: number; knee?: number; makeup?: number }
-    ) => {
-      if (workletNodeRef.current) {
-        workletNodeRef.current.port.postMessage({ type: 'SET_COMP_PARAMS', trackId, compParams });
-      }
-    },
-    []
-  );
+  const setTrackEq = useCallback((trackId: number, eqParams: any) => {
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({ type: 'SET_TRACK_EQ', trackId, eq: eqParams.lowShelf ? eqParams : undefined, eqParams: !eqParams.lowShelf ? eqParams : undefined });
+    }
+  }, []);
 
-  const setTrackAutoDucker = useCallback(
-    (
-      trackId: number,
-      duckParams: { enabled?: boolean; threshold?: number; depth?: number; sourceTrackId?: number }
-    ) => {
-      if (workletNodeRef.current) {
-        workletNodeRef.current.port.postMessage({ type: 'SET_DUCK_PARAMS', trackId, duckParams });
-      }
-    },
-    []
-  );
+  const setTrackCompressor = useCallback((trackId: number, compParams: any) => {
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({ type: 'SET_TRACK_COMPRESSOR', trackId, compressor: compParams.thresholdDb !== undefined ? compParams : undefined, compParams: compParams.thresholdDb === undefined ? compParams : undefined });
+    }
+  }, []);
+
+  const setTrackNoiseGate = useCallback((trackId: number, noiseGate: any) => {
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({ type: 'SET_TRACK_NOISE_GATE', trackId, noiseGate });
+    }
+  }, []);
+
+  const setTrackDeEsser = useCallback((trackId: number, deEsser: any) => {
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({ type: 'SET_TRACK_DEESSER', trackId, deEsser });
+    }
+  }, []);
+
+  const setTrackAutoDucker = useCallback((trackId: number, duckParams: any) => {
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({ type: 'SET_TRACK_AUTODUCKER', trackId, autoDucker: duckParams.thresholdDb !== undefined ? duckParams : undefined, duckParams: duckParams.thresholdDb === undefined ? duckParams : undefined });
+    }
+  }, []);
+
+  const setVocalBus = useCallback((vocalBus: VocalBusState) => {
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({
+        type: 'SET_VOCAL_BUS',
+        volumeDb: vocalBus.volumeDb,
+        pan: vocalBus.pan,
+        mute: vocalBus.mute,
+        solo: vocalBus.solo,
+        dsp: vocalBus.dsp
+      });
+    }
+  }, []);
 
   const setMasterVolume = useCallback((volumeDb: number) => {
     if (workletNodeRef.current) {
@@ -566,6 +615,61 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     }
   }, []);
 
+  const setTrackVstChain = useCallback((trackId: number, vstPlugins: VSTPluginInstance[]) => {
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({ type: 'SET_TRACK_VST_CHAIN', trackId, vstPlugins });
+    }
+  }, []);
+
+  const setVocalBusVstChain = useCallback((vstPlugins: VSTPluginInstance[]) => {
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({ type: 'SET_VOCAL_BUS_VST_CHAIN', vstPlugins });
+    }
+  }, []);
+
+  const setMasterVstChain = useCallback((vstPlugins: VSTPluginInstance[]) => {
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({ type: 'SET_MASTER_VST_CHAIN', vstPlugins });
+    }
+  }, []);
+
+  const updateVstParameter = useCallback((target: 'track' | 'vocalBus' | 'master', instanceId: string, paramId: string, value: number, trackId?: number) => {
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({
+        type: 'UPDATE_VST_PARAM',
+        target,
+        trackId,
+        instanceId,
+        paramId,
+        value
+      });
+    }
+  }, []);
+
+  const setVstBypass = useCallback((target: 'track' | 'vocalBus' | 'master', instanceId: string, enabled: boolean, trackId?: number) => {
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({
+        type: 'UPDATE_VST_PARAM',
+        target,
+        trackId,
+        instanceId,
+        enabled
+      });
+    }
+  }, []);
+
+  const setVstWetDry = useCallback((target: 'track' | 'vocalBus' | 'master', instanceId: string, wetDry: number, trackId?: number) => {
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({
+        type: 'UPDATE_VST_PARAM',
+        target,
+        trackId,
+        instanceId,
+        wetDry
+      });
+    }
+  }, []);
+
   return {
     isInitialized,
     isPlaying,
@@ -573,6 +677,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     currentTimeSec,
     error,
     trackMeters,
+    vocalBusMeter,
     masterMeter,
 
     initAudioEngine,
@@ -591,12 +696,25 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     setTrackSolo,
     setTrackMute,
 
+    setTrackDsp,
     setTrackEq,
     setTrackCompressor,
+    setTrackNoiseGate,
+    setTrackDeEsser,
     setTrackAutoDucker,
+
+    setVocalBus,
 
     setMasterVolume,
     setMasterLimiter,
+
+    setTrackVstChain,
+    setVocalBusVstChain,
+    setMasterVstChain,
+    updateVstParameter,
+    setVstBypass,
+    setVstWetDry,
+
     performLoudnessMatching
   };
 };

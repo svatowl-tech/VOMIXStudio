@@ -46,18 +46,28 @@ import {
   Database,
   SlidersHorizontal,
   Upload,
-  Terminal
+  Layers,
+  X,
+  Terminal,
+  BrainCircuit
 } from 'lucide-react';
 import { systemLogger } from '../services/SystemLogger';
 import { useAudioEngine } from '../hooks/useAudioEngine';
-import { TrackState, MasterState, LiveDAWEngine, createNewTrack } from '../audio/dawEngine';
+import { TrackState, MasterState, LiveDAWEngine, createNewTrack, VocalBusState, createDefaultVocalBus, ClipConfig } from '../audio/dawEngine';
+import { VSTPluginInstance } from '../audio/vstTypes';
 import { MediaNormalizer } from '../services/MediaNormalizer';
 import { ProjectState, globalProjectManager } from '../services/ProjectManager';
 import { RenderProgressInfo, globalRenderManager } from '../services/RenderManager';
 import { AssetDatabase, DatabaseStats } from '../services/AssetDatabase';
+import { MVPPreset } from '../services/MVPPresetManager';
+import { MVPPipelinePresets } from './MVPPipelinePresets';
+import { VSTRackSlot } from './VSTRackSlot';
 import { TrackDSPPanel } from './TrackDSPPanel';
 import { TimelineView } from './TimelineView';
 import { MediaImportModal } from './MediaImportModal';
+import { VocalBusSection } from './VocalBusSection';
+import { MasterSection } from './MasterSection';
+import { DubbingAIStudio } from './DubbingAIStudio';
 import { SubtitleCue } from '../services/ProjectManager';
 import { formatSMPTE } from '../utils/waveformUtils';
 
@@ -68,6 +78,8 @@ export const MinimalStudio: React.FC = () => {
     isPlaying,
     currentTimeSec,
     trackMeters,
+    vocalBusMeter,
+    masterMeter,
     initAudioEngine,
     togglePlay,
     seek,
@@ -79,16 +91,27 @@ export const MinimalStudio: React.FC = () => {
     setTrackPan,
     setTrackSolo,
     setTrackMute,
+    setTrackDsp,
     setTrackEq,
     setTrackCompressor,
+    setTrackNoiseGate,
+    setTrackDeEsser,
     setTrackAutoDucker,
+    setVocalBus,
     setMasterVolume,
     setMasterLimiter,
+    setTrackVstChain,
+    setVocalBusVstChain,
+    setMasterVstChain,
+    updateVstParameter,
+    setVstBypass,
+    setVstWetDry,
     performLoudnessMatching
   } = useAudioEngine();
 
   // --- 2. Состояние дорожек и мастера проекта (Поддержка до 32 дорожек) ---
   const [tracks, setTracks] = useState<TrackState[]>(() => new LiveDAWEngine().getTracks());
+  const [vocalBus, setVocalBusState] = useState<VocalBusState>(() => createDefaultVocalBus());
 
   // Автоматическая фоновая синхронизация дорожек и клипов с AudioWorklet
   useEffect(() => {
@@ -96,8 +119,17 @@ export const MinimalStudio: React.FC = () => {
       syncAllTracks(tracks);
     }
   }, [isInitialized, tracks, syncAllTracks]);
+
+  // Синхронизация Vocal Bus с AudioWorklet
+  useEffect(() => {
+    if (isInitialized) {
+      setVocalBus(vocalBus);
+    }
+  }, [isInitialized, vocalBus, setVocalBus]);
   const [activeDspTrackId, setActiveDspTrackId] = useState<number | null>(null);
   const activeDspTrack = tracks.find((t) => t.id === activeDspTrackId) || null;
+  const [activeVstTrackId, setActiveVstTrackId] = useState<number | null>(null);
+  const activeVstTrack = tracks.find((t) => t.id === activeVstTrackId) || null;
   const [dbStats, setDbStats] = useState<DatabaseStats | null>(null);
   const [showDbModal, setShowDbModal] = useState<boolean>(false);
   const [master, setMaster] = useState<MasterState>({
@@ -650,6 +682,95 @@ export const MinimalStudio: React.FC = () => {
     setStatusMessage(`Дорожка CH ${trackId} удалена.`);
   };
 
+  // Добавление стем-дорожек после AI разделения (Вокал + Фонограмма M&E)
+  const handleAddStemTracks = (
+    vocalsPcm: Float32Array,
+    karaokePcm: Float32Array,
+    vocalsName = 'Изолированный вокал',
+    karaokeName = 'Фонограмма M&E'
+  ) => {
+    const nextId = tracks.length > 0 ? Math.max(...tracks.map((t) => t.id)) + 1 : 1;
+    const vocalsClip: ClipConfig = {
+      id: Date.now() + 1,
+      name: vocalsName,
+      offsetSamples: 0,
+      lengthSamples: Math.floor(vocalsPcm.length / 2),
+      gain: 1.0,
+      pan: 0,
+      fadeInSamples: 2400,
+      fadeOutSamples: 2400,
+      buffer: vocalsPcm,
+      color: '#10b981'
+    };
+    const karaokeClip: ClipConfig = {
+      id: Date.now() + 2,
+      name: karaokeName,
+      offsetSamples: 0,
+      lengthSamples: Math.floor(karaokePcm.length / 2),
+      gain: 0.85,
+      pan: 0,
+      fadeInSamples: 2400,
+      fadeOutSamples: 2400,
+      buffer: karaokePcm,
+      color: '#06b6d4'
+    };
+
+    const newVocalsTrack: TrackState = {
+      ...createNewTrack(nextId, vocalsName, '#10b981'),
+      clips: [vocalsClip]
+    };
+
+    const newKaraokeTrack: TrackState = {
+      ...createNewTrack(nextId + 1, karaokeName, '#06b6d4'),
+      volumeDb: -1.5,
+      clips: [karaokeClip]
+    };
+
+    const updatedTracks = [...tracks, newVocalsTrack, newKaraokeTrack];
+    setTracks(updatedTracks);
+    syncAllTracks(updatedTracks);
+    triggerAutoSave();
+    setStatusMessage(`Стемы успешно добавлены в проект: "${vocalsName}" и "${karaokeName}"!`);
+  };
+
+  // Применение обработанного нейросетью аудио к целевой дорожке
+  const handleApplyProcessedAudioToTrack = (
+    trackId: number,
+    newPcm: Float32Array,
+    clipName = 'Обработанное аудио'
+  ) => {
+    const lengthSamples = Math.floor(newPcm.length / 2);
+    const clipId = Date.now();
+    const newClip: ClipConfig = {
+      id: clipId,
+      name: clipName,
+      offsetSamples: 0,
+      lengthSamples: lengthSamples,
+      gain: 1.0,
+      pan: 0,
+      fadeInSamples: 2400,
+      fadeOutSamples: 2400,
+      buffer: newPcm,
+      color: '#10b981'
+    };
+
+    const updatedTracks = tracks.map((t) => {
+      if (t.id === trackId) {
+        return {
+          ...t,
+          clips: [newClip]
+        };
+      }
+      return t;
+    });
+
+    setTracks(updatedTracks);
+    syncAllTracks(updatedTracks);
+    uploadRawPCMToTrack(newPcm, trackId, clipId, 0, 1.0, 0.0, true);
+    triggerAutoSave();
+    setStatusMessage(`AI-обработанное аудио успешно применено к Дорожке CH #${trackId}!`);
+  };
+
   // Загрузка аудиофайла напрямую в дорожку
   const handleTrackFileUpload = async (trackId: number, file: File) => {
     if (!isInitialized) {
@@ -845,33 +966,264 @@ export const MinimalStudio: React.FC = () => {
   const handleUpdateDspTrack = (updated: TrackState) => {
     setTracks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
 
-    // Передаем параметры в реальном времени в AudioWorklet
-    if (updated.eq.enabled) {
-      setTrackEq(updated.id, {
-        lowGain: updated.eq.lowShelf.gainDb,
-        midGain: updated.eq.peaking.gainDb,
-        highGain: updated.eq.highShelf.gainDb
+    // Передаем параметры в реальном времени в AudioWorklet (онлайн-обработка)
+    setTrackDsp(updated.id, {
+      eq: updated.eq,
+      compressor: updated.compressor,
+      noiseGate: updated.noiseGate,
+      deEsser: updated.deEsser,
+      deClicker: updated.deClicker,
+      autoDucker: updated.autoDucker
+    });
+    setTrackEq(updated.id, updated.eq);
+    setTrackCompressor(updated.id, updated.compressor);
+    setTrackNoiseGate(updated.id, updated.noiseGate);
+    setTrackDeEsser(updated.id, updated.deEsser);
+    setTrackAutoDucker(updated.id, updated.autoDucker);
+
+    triggerAutoSave();
+  };
+
+  const handleUpdateVocalBus = (updated: VocalBusState) => {
+    setVocalBusState(updated);
+    setVocalBus(updated);
+    triggerAutoSave();
+  };
+
+  // --- VST Инсерты и Обработка цепочек эффектов ---
+  const handleUpdateTrackVstChain = (trackId: number, vstPlugins: VSTPluginInstance[]) => {
+    setTracks((prev) =>
+      prev.map((t) => (t.id === trackId ? { ...t, vstPlugins } : t))
+    );
+    setTrackVstChain(trackId, vstPlugins);
+    triggerAutoSave();
+  };
+
+  const handleUpdateVocalBusVstChain = (vstPlugins: VSTPluginInstance[]) => {
+    setVocalBusState((prev) => ({ ...prev, vstPlugins }));
+    setVocalBusVstChain(vstPlugins);
+    triggerAutoSave();
+  };
+
+  const handleUpdateMasterVstChain = (vstPlugins: VSTPluginInstance[]) => {
+    setMaster((prev) => ({ ...prev, vstPlugins }));
+    setMasterVstChain(vstPlugins);
+    triggerAutoSave();
+  };
+
+  const handleUpdateVstParam = (
+    target: 'track' | 'vocalBus' | 'master',
+    instanceId: string,
+    paramId: string,
+    value: number,
+    trackId?: number
+  ) => {
+    if (target === 'track' && trackId !== undefined) {
+      setTracks((prev) =>
+        prev.map((t) => {
+          if (t.id !== trackId) return t;
+          const plugins = (t.vstPlugins || []).map((p) =>
+            p.instanceId === instanceId
+              ? { ...p, parameters: { ...p.parameters, [paramId]: value } }
+              : p
+          );
+          return { ...t, vstPlugins: plugins };
+        })
+      );
+    } else if (target === 'vocalBus') {
+      setVocalBusState((prev) => {
+        const plugins = (prev.vstPlugins || []).map((p) =>
+          p.instanceId === instanceId
+            ? { ...p, parameters: { ...p.parameters, [paramId]: value } }
+            : p
+        );
+        return { ...prev, vstPlugins: plugins };
+      });
+    } else if (target === 'master') {
+      setMaster((prev) => {
+        const plugins = (prev.vstPlugins || []).map((p) =>
+          p.instanceId === instanceId
+            ? { ...p, parameters: { ...p.parameters, [paramId]: value } }
+            : p
+        );
+        return { ...prev, vstPlugins: plugins };
       });
     }
-    if (updated.compressor.enabled) {
-      setTrackCompressor(updated.id, {
-        threshold: updated.compressor.thresholdDb,
-        ratio: updated.compressor.ratio,
-        attack: updated.compressor.attackMs,
-        release: updated.compressor.releaseMs,
-        knee: updated.compressor.kneeDb,
-        makeup: updated.compressor.makeupGainDb
+    updateVstParameter(target, instanceId, paramId, value, trackId);
+  };
+
+  const handleUpdateVstBypass = (
+    target: 'track' | 'vocalBus' | 'master',
+    instanceId: string,
+    enabled: boolean,
+    trackId?: number
+  ) => {
+    if (target === 'track' && trackId !== undefined) {
+      setTracks((prev) =>
+        prev.map((t) => {
+          if (t.id !== trackId) return t;
+          const plugins = (t.vstPlugins || []).map((p) =>
+            p.instanceId === instanceId ? { ...p, enabled } : p
+          );
+          return { ...t, vstPlugins: plugins };
+        })
+      );
+    } else if (target === 'vocalBus') {
+      setVocalBusState((prev) => {
+        const plugins = (prev.vstPlugins || []).map((p) =>
+          p.instanceId === instanceId ? { ...p, enabled } : p
+        );
+        return { ...prev, vstPlugins: plugins };
+      });
+    } else if (target === 'master') {
+      setMaster((prev) => {
+        const plugins = (prev.vstPlugins || []).map((p) =>
+          p.instanceId === instanceId ? { ...p, enabled } : p
+        );
+        return { ...prev, vstPlugins: plugins };
       });
     }
-    if (updated.autoDucker.enabled) {
-      setTrackAutoDucker(updated.id, {
-        enabled: updated.autoDucker.enabled,
-        threshold: updated.autoDucker.thresholdDb,
-        depth: updated.autoDucker.duckDepthDb,
-        sourceTrackId: updated.autoDucker.sourceTrackId
+    setVstBypass(target, instanceId, enabled, trackId);
+  };
+
+  const handleUpdateVstWetDry = (
+    target: 'track' | 'vocalBus' | 'master',
+    instanceId: string,
+    wetDry: number,
+    trackId?: number
+  ) => {
+    if (target === 'track' && trackId !== undefined) {
+      setTracks((prev) =>
+        prev.map((t) => {
+          if (t.id !== trackId) return t;
+          const plugins = (t.vstPlugins || []).map((p) =>
+            p.instanceId === instanceId ? { ...p, wetDry } : p
+          );
+          return { ...t, vstPlugins: plugins };
+        })
+      );
+    } else if (target === 'vocalBus') {
+      setVocalBusState((prev) => {
+        const plugins = (prev.vstPlugins || []).map((p) =>
+          p.instanceId === instanceId ? { ...p, wetDry } : p
+        );
+        return { ...prev, vstPlugins: plugins };
       });
+    } else if (target === 'master') {
+      setMaster((prev) => {
+        const plugins = (prev.vstPlugins || []).map((p) =>
+          p.instanceId === instanceId ? { ...p, wetDry } : p
+        );
+        return { ...prev, vstPlugins: plugins };
+      });
+    }
+    setVstWetDry(target, instanceId, wetDry, trackId);
+  };
+
+  // --- Применение пресета на весь MVP пайплайн («Закадр», «Рекаст», «Ридап», «Дубляж») ---
+  const handleApplyGlobalPreset = (preset: MVPPreset) => {
+    systemLogger.info('MVPPreset', `Применение пресета пайплайна: "${preset.name}" (${preset.category})`);
+
+    // 1. Применяем DSP и VST цепочки к дорожкам
+    setTracks((prevTracks) => {
+      const updated = prevTracks.map((t, idx) => {
+        const custom = preset.customTrackChains?.find((c) => c.trackIndex === idx);
+        const newEq = custom?.dsp?.eq
+          ? JSON.parse(JSON.stringify(custom.dsp.eq))
+          : preset.trackDspTemplate?.eq
+          ? JSON.parse(JSON.stringify(preset.trackDspTemplate.eq))
+          : t.eq;
+        const newComp = custom?.dsp?.compressor
+          ? JSON.parse(JSON.stringify(custom.dsp.compressor))
+          : preset.trackDspTemplate?.compressor
+          ? JSON.parse(JSON.stringify(preset.trackDspTemplate.compressor))
+          : t.compressor;
+        const newDuck = custom?.dsp?.autoDucker
+          ? JSON.parse(JSON.stringify(custom.dsp.autoDucker))
+          : preset.trackDspTemplate?.autoDucker
+          ? JSON.parse(JSON.stringify(preset.trackDspTemplate.autoDucker))
+          : t.autoDucker;
+        const newGate = custom?.dsp?.noiseGate
+          ? JSON.parse(JSON.stringify(custom.dsp.noiseGate))
+          : preset.trackDspTemplate?.noiseGate
+          ? JSON.parse(JSON.stringify(preset.trackDspTemplate.noiseGate))
+          : t.noiseGate;
+        const newDeEsser = custom?.dsp?.deEsser
+          ? JSON.parse(JSON.stringify(custom.dsp.deEsser))
+          : preset.trackDspTemplate?.deEsser
+          ? JSON.parse(JSON.stringify(preset.trackDspTemplate.deEsser))
+          : t.deEsser;
+        const newPlugins = custom?.vstPlugins
+          ? JSON.parse(JSON.stringify(custom.vstPlugins))
+          : preset.trackVstChain
+          ? JSON.parse(JSON.stringify(preset.trackVstChain))
+          : (t.vstPlugins || []);
+
+        return {
+          ...t,
+          eq: newEq,
+          compressor: newComp,
+          autoDucker: newDuck,
+          noiseGate: newGate,
+          deEsser: newDeEsser,
+          vstPlugins: newPlugins
+        };
+      });
+
+      // Синхронизируем с AudioWorklet
+      updated.forEach((t) => {
+        setTrackDsp(t.id, {
+          eq: t.eq,
+          compressor: t.compressor,
+          autoDucker: t.autoDucker,
+          noiseGate: t.noiseGate,
+          deEsser: t.deEsser
+        });
+        setTrackVstChain(t.id, t.vstPlugins || []);
+      });
+
+      return updated;
+    });
+
+    // 2. Применяем Vocal Bus
+    if (preset.vocalBusSettings) {
+      const newVocalBusDsp = JSON.parse(JSON.stringify(preset.vocalBusSettings.dsp));
+      const newVocalBusPlugins = preset.vocalBusSettings.vstChain
+        ? JSON.parse(JSON.stringify(preset.vocalBusSettings.vstChain))
+        : (vocalBus.vstPlugins || []);
+
+      const newVocalBus: VocalBusState = {
+        ...vocalBus,
+        volumeDb: preset.vocalBusSettings.volumeDb ?? vocalBus.volumeDb,
+        pan: preset.vocalBusSettings.pan ?? vocalBus.pan,
+        dsp: newVocalBusDsp,
+        vstPlugins: newVocalBusPlugins
+      };
+      setVocalBusState(newVocalBus);
+      setVocalBus(newVocalBus);
+      setVocalBusVstChain(newVocalBusPlugins);
     }
 
+    // 3. Применяем Master Limiter & Master Plugins
+    if (preset.masterSettings) {
+      const newMasterPlugins = preset.masterSettings.vstChain
+        ? JSON.parse(JSON.stringify(preset.masterSettings.vstChain))
+        : (master.vstPlugins || []);
+
+      const newMaster: MasterState = {
+        ...master,
+        volumeDb: preset.masterSettings.volumeDb ?? master.volumeDb,
+        pan: preset.masterSettings.pan ?? master.pan,
+        limiterEnabled: preset.masterSettings.limiterEnabled,
+        limiterCeilingDb: preset.masterSettings.limiterCeilingDb,
+        vstPlugins: newMasterPlugins
+      };
+      setMaster(newMaster);
+      setMasterLimiter(newMaster.limiterEnabled, newMaster.limiterCeilingDb);
+      setMasterVstChain(newMasterPlugins);
+    }
+
+    setStatusMessage(`Применен пресет пайплайна: "${preset.name}" (${preset.category})`);
     triggerAutoSave();
   };
 
@@ -1177,6 +1529,14 @@ export const MinimalStudio: React.FC = () => {
         )}
       </div>
 
+      {/* СИСТЕМА ПРЕСЕТОВ ВСЕГО ПАЙПЛАЙНА (Закадр, Рекаст, Ридап, Дубляж) */}
+      <MVPPipelinePresets
+        tracks={tracks}
+        vocalBus={vocalBus}
+        master={master}
+        onApplyPreset={handleApplyGlobalPreset}
+      />
+
       {/* 2. ВИДЕО-ПЛЕЕР СИНХРОНИЗАЦИИ И ЭКСПОРТ */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Экран видео */}
@@ -1448,6 +1808,17 @@ export const MinimalStudio: React.FC = () => {
         />
       </div>
 
+      {/* 2.75. ОБРАБОТКА С ПОМОЩЬЮ НЕЙРОСЕТЕЙ (AI DUBBING & AUDIO CLEANUP PIPELINE) */}
+      <div className="bg-[#0f1422] border border-[#1e293b] p-5 rounded-2xl shadow-xl space-y-4">
+        <DubbingAIStudio
+          tracks={tracks}
+          currentTimeSec={currentTimeSec}
+          onSeek={seek}
+          onAddStemTracks={handleAddStemTracks}
+          onApplyProcessedAudioToTrack={handleApplyProcessedAudioToTrack}
+        />
+      </div>
+
       {/* 3. КОНСОЛЬ СВЕДЕНИЯ МИКШЕРА */}
       <div className="bg-[#0f1422] border border-[#1e293b] p-5 rounded-2xl shadow-xl space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-800">
@@ -1641,6 +2012,21 @@ export const MinimalStudio: React.FC = () => {
                     </div>
                   </button>
 
+                  {/* Кнопка открытия VST Рэка инсертов */}
+                  <button
+                    onClick={() => setActiveVstTrackId(activeVstTrackId === track.id ? null : track.id)}
+                    className="w-full mb-3 px-2.5 py-1.5 bg-[#141026] hover:bg-slate-800 border border-violet-800/60 rounded-lg text-xs font-semibold text-slate-200 flex items-center justify-between transition-all cursor-pointer shadow-sm"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <Layers size={13} className="text-violet-400" />
+                      <span>VST Инсерты</span>
+                    </div>
+
+                    <span className="text-[10px] px-1.5 py-0.2 rounded font-mono bg-violet-950 text-violet-300 border border-violet-800">
+                      {track.vstPlugins && track.vstPlugins.length > 0 ? `${track.vstPlugins.length} плаг.` : 'Пусто'}
+                    </span>
+                  </button>
+
                   {/* Peak/RMS Индикаторы */}
                   <div className="space-y-1 bg-slate-950 p-2.5 rounded-lg border border-slate-800 mb-4">
                     <div className="flex justify-between text-[10px] font-mono">
@@ -1753,7 +2139,77 @@ export const MinimalStudio: React.FC = () => {
             );
           })}
         </div>
+
+        {/* 3.1. Мастер-секция вокальной шины (Master Voiceover Bus) и Мастер-микс */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 pt-4 border-t border-slate-800">
+          <VocalBusSection
+            vocalBus={vocalBus}
+            vocalBusMeter={vocalBusMeter}
+            onUpdateVocalBus={handleUpdateVocalBus}
+            onUpdateVstChain={handleUpdateVocalBusVstChain}
+            onUpdateVstParam={(instId, pId, val) => handleUpdateVstParam('vocalBus', instId, pId, val)}
+            onUpdateVstBypass={(instId, enabled) => handleUpdateVstBypass('vocalBus', instId, enabled)}
+            onUpdateVstWetDry={(instId, wetDry) => handleUpdateVstWetDry('vocalBus', instId, wetDry)}
+          />
+          <MasterSection
+            master={{
+              ...master,
+              peakL: masterMeter.peakL,
+              peakR: masterMeter.peakR,
+              clipped: masterMeter.clipped
+            }}
+            isPlaying={isPlaying}
+            onTogglePlay={togglePlay}
+            onReset={() => seek(0)}
+            onUpdateMaster={(updated) => {
+              setMaster(updated);
+              setMasterVolume(updated.volumeDb);
+              setMasterLimiter(updated.limiterEnabled, updated.limiterCeilingDb);
+              triggerAutoSave();
+            }}
+            onUpdateVstChain={handleUpdateMasterVstChain}
+            onUpdateVstParam={(instId, pId, val) => handleUpdateVstParam('master', instId, pId, val)}
+            onUpdateVstBypass={(instId, enabled) => handleUpdateVstBypass('master', instId, enabled)}
+            onUpdateVstWetDry={(instId, wetDry) => handleUpdateVstWetDry('master', instId, wetDry)}
+          />
+        </div>
       </div>
+
+      {/* Модальное окно VST Рэка выбранного трека */}
+      {activeVstTrack && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-[#0b0f19] border border-slate-800 rounded-2xl p-6 max-w-xl w-full shadow-2xl space-y-4 max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-3.5 h-3.5 rounded-full" style={{ backgroundColor: activeVstTrack.color }} />
+                <h3 className="text-sm font-bold text-slate-100">
+                  VST инсерты: {activeVstTrack.name}
+                </h3>
+                <span className="text-[10px] px-2 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30 font-mono">
+                  CH {activeVstTrack.id}
+                </span>
+              </div>
+              <button
+                onClick={() => setActiveVstTrackId(null)}
+                className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <VSTRackSlot
+              plugins={activeVstTrack.vstPlugins || []}
+              title={`Инсерты: ${activeVstTrack.name}`}
+              badge={`CH ${activeVstTrack.id}`}
+              color={activeVstTrack.color || '#8b5cf6'}
+              onUpdateChain={(newChain) => handleUpdateTrackVstChain(activeVstTrack.id, newChain)}
+              onUpdateParam={(instId, pId, val) => handleUpdateVstParam('track', instId, pId, val, activeVstTrack.id)}
+              onUpdateBypass={(instId, enabled) => handleUpdateVstBypass('track', instId, enabled, activeVstTrack.id)}
+              onUpdateWetDry={(instId, wetDry) => handleUpdateVstWetDry('track', instId, wetDry, activeVstTrack.id)}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Встроенный C++ DSP Vocal Rack рэк для выбранного трека */}
       {activeDspTrack && (

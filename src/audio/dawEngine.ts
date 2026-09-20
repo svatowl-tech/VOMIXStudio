@@ -15,6 +15,7 @@
  */
 
 import { globalNativeDAWBridge } from '../services/NativeDAWBridge';
+import { VSTPluginInstance } from './vstTypes';
 
 export interface ClipConfig {
   id: number;
@@ -98,6 +99,21 @@ export interface DeEsserParams {
   currentGainReductionDb?: number;
 }
 
+export interface TrackDSP {
+  eq: {
+    lowShelf: BiquadParams;
+    peaking: BiquadParams;
+    highShelf: BiquadParams;
+    enabled: boolean;
+  };
+  compressor: CompressorParams;
+  autoDucker: AutoDuckerParams;
+  deClicker?: DeClickerParams;
+  dePlosive?: DePlosiveParams;
+  noiseGate?: NoiseGateParams;
+  deEsser?: DeEsserParams;
+}
+
 export interface TrackState {
   id: number;
   name: string;
@@ -119,8 +135,85 @@ export interface TrackState {
   dePlosive: DePlosiveParams;
   noiseGate: NoiseGateParams;
   deEsser: DeEsserParams;
+  vstPlugins?: VSTPluginInstance[];
   peakL: number;
   peakR: number;
+  isOriginalAudio?: boolean;
+}
+
+export interface VocalBusDSP {
+  eq: {
+    lowShelf: BiquadParams;
+    peaking: BiquadParams;
+    highShelf: BiquadParams;
+    enabled: boolean;
+  };
+  compressor: CompressorParams;
+  limiter: {
+    enabled: boolean;
+    ceilingDb: number;
+    releaseMs: number;
+  };
+  autoDucker: {
+    enabled: boolean;
+    thresholdDb: number;
+    duckDepthDb: number;
+    attackMs: number;
+    releaseMs: number;
+  };
+}
+
+export interface VocalBusState {
+  volumeDb: number;
+  pan: number;
+  mute: boolean;
+  solo: boolean;
+  peakL: number;
+  peakR: number;
+  dsp: VocalBusDSP;
+  vstPlugins?: VSTPluginInstance[];
+}
+
+export function createDefaultVocalBus(): VocalBusState {
+  return {
+    volumeDb: 0.0,
+    pan: 0.0,
+    mute: false,
+    solo: false,
+    peakL: 0.0,
+    peakR: 0.0,
+    vstPlugins: [],
+    dsp: {
+      eq: {
+        lowShelf: { type: 'lowshelf', frequency: 120, gainDb: 0.0, Q: 0.7071, enabled: true },
+        peaking: { type: 'peaking', frequency: 3200, gainDb: 1.5, Q: 1.0, enabled: true },
+        highShelf: { type: 'highshelf', frequency: 10000, gainDb: 2.0, Q: 0.7071, enabled: true },
+        enabled: false
+      },
+      compressor: {
+        thresholdDb: -16.0,
+        ratio: 3.0,
+        attackMs: 25.0,
+        releaseMs: 150.0,
+        makeupGainDb: 1.0,
+        kneeDb: 6.0,
+        enabled: true,
+        currentGainReductionDb: 0.0
+      },
+      limiter: {
+        enabled: true,
+        ceilingDb: -0.5,
+        releaseMs: 60.0
+      },
+      autoDucker: {
+        enabled: true,
+        thresholdDb: -26.0,
+        duckDepthDb: -8.0,
+        attackMs: 15.0,
+        releaseMs: 250.0
+      }
+    }
+  };
 }
 
 export interface MasterState {
@@ -128,6 +221,7 @@ export interface MasterState {
   pan: number;
   limiterCeilingDb: number;
   limiterEnabled: boolean;
+  vstPlugins?: VSTPluginInstance[];
   peakL: number;
   peakR: number;
   clipped: boolean;
@@ -209,6 +303,7 @@ export function createNewTrack(id: number, name?: string, color?: string): Track
       enabled: false,
       currentGainReductionDb: 0
     },
+    vstPlugins: [],
     peakL: 0,
     peakR: 0
   };
@@ -226,6 +321,7 @@ export function populateTrackDSPDefaults(track: Partial<TrackState> & { id: numb
     dePlosive: track.dePlosive || d.dePlosive,
     noiseGate: track.noiseGate || d.noiseGate,
     deEsser: track.deEsser || d.deEsser,
+    vstPlugins: track.vstPlugins || d.vstPlugins || []
   } as TrackState;
 }
 

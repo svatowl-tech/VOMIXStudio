@@ -25,6 +25,8 @@ export type LogSource =
   | 'Project'
   | 'RenderManager'
   | 'DubbingAI'
+  | 'VSTHost'
+  | 'MVPPreset'
   | 'System'
   | 'GlobalError';
 
