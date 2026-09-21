@@ -108,6 +108,68 @@ void NoiseGate::processBuffer(float* interleavedBuffer, size_t numFrames) noexce
     }
 }
 
+float NoiseGate::process(float sample) noexcept {
+    if (!enabled) return sample;
+
+    float openThreshLin = dbToGain(thresholdDb);
+    float closeThreshLin = dbToGain(thresholdDb - 3.0f);
+    float floorGainLin = dbToGain(floorDb);
+    size_t holdSamplesTotal = static_cast<size_t>(std::max(holdMs, 0.0f) * 0.001f * sampleRate);
+
+    float level = std::abs(sample);
+
+    envelope = (level > envelope)
+        ? 0.85f * envelope + 0.15f * level
+        : 0.999f * envelope + 0.001f * level;
+
+    switch (state) {
+        case GateState::Closed:
+            if (envelope >= openThreshLin) {
+                state = GateState::Opening;
+            }
+            break;
+
+        case GateState::Opening:
+            currentGain = attackCoeff * currentGain + (1.0f - attackCoeff) * 1.0f;
+            if (currentGain >= 0.99f) {
+                currentGain = 1.0f;
+                state = GateState::Open;
+            }
+            break;
+
+        case GateState::Open:
+            if (envelope < closeThreshLin) {
+                state = GateState::Holding;
+                holdSamplesCounter = holdSamplesTotal;
+            }
+            break;
+
+        case GateState::Holding:
+            if (envelope >= openThreshLin) {
+                state = GateState::Open;
+            } else if (holdSamplesCounter > 0) {
+                holdSamplesCounter--;
+            } else {
+                state = GateState::Closing;
+            }
+            break;
+
+        case GateState::Closing:
+            if (envelope >= openThreshLin) {
+                state = GateState::Opening;
+            } else {
+                currentGain = releaseCoeff * currentGain + (1.0f - releaseCoeff) * floorGainLin;
+                if (currentGain <= floorGainLin * 1.02f) {
+                    currentGain = floorGainLin;
+                    state = GateState::Closed;
+                }
+            }
+            break;
+    }
+
+    return sample * currentGain;
+}
+
 // ============================================================================
 // 2. SoftKneeCompressor
 // ============================================================================
@@ -134,6 +196,25 @@ void SoftKneeCompressor::updateTimeConstants() noexcept {
     attackCoeff = std::exp(-1.0f / (safeAttack * 0.001f * sampleRate));
     releaseCoeff = std::exp(-1.0f / (safeRelease * 0.001f * sampleRate));
     makeupGainLinear = dbToGain(makeupGainDb);
+}
+
+float SoftKneeCompressor::process(float sample) noexcept {
+    if (!enabled) return sample;
+
+    float inLevel = std::abs(sample);
+    float inDb = gainToDb(inLevel);
+
+    float gainReductionDb = computeGainReductionDb(inDb);
+    float targetGain = dbToGain(-gainReductionDb);
+
+    envelopeGain = (targetGain < envelopeGain)
+        ? attackCoeff * envelopeGain + (1.0f - attackCoeff) * targetGain
+        : releaseCoeff * envelopeGain + (1.0f - releaseCoeff) * targetGain;
+
+    currentGainReduction = envelopeGain;
+    float finalGain = envelopeGain * makeupGainLinear;
+
+    return sample * finalGain;
 }
 
 float SoftKneeCompressor::computeGainReductionDb(float inDb) const noexcept {

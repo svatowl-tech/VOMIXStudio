@@ -55,6 +55,12 @@ public:
     void setup(float sr) noexcept;
     void reset() noexcept;
     void updateConstants() noexcept;
+    inline void updateTimeConstants() noexcept { updateConstants(); }
+
+    /**
+     * Посемпльная обработка моно сигналов
+     */
+    float process(float sample) noexcept;
 
     /**
      * Пакетная обработка стереобуфера
@@ -102,6 +108,11 @@ public:
         currentGainReduction = envelopeGain;
         return envelopeGain;
     }
+
+    /**
+     * Посемпльная обработка моно сигналов
+     */
+    float process(float sample) noexcept;
 
     /**
      * Расчет передаточной характеристики с мягким коленом

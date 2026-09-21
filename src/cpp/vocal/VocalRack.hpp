@@ -133,6 +133,11 @@ public:
     void reset() noexcept;
     void updateCoefficients() noexcept;
 
+    /**
+     * Посемпльная обработка моно сигналов
+     */
+    float process(float sample) noexcept;
+
     void processBuffer(float* interleavedBuffer, size_t numFrames) noexcept;
 };
 

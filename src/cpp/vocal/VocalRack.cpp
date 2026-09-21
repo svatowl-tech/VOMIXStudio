@@ -221,6 +221,31 @@ void DeEsser::updateCoefficients() noexcept {
     a2 = (1.0f - alpha) / a0;
 }
 
+float DeEsser::process(float sample) noexcept {
+    if (!enabled) return sample;
+
+    float sibilant = b0 * sample + b1 * bpX1L + b2 * bpX2L - a1 * bpY1L - a2 * bpY2L;
+    bpX2L = bpX1L; bpX1L = sample; bpY2L = bpY1L; bpY1L = sibilant;
+
+    float essLevel = std::abs(sibilant);
+    essEnvelope = (essLevel > essEnvelope)
+        ? attackCoeff * essEnvelope + (1.0f - attackCoeff) * essLevel
+        : releaseCoeff * essEnvelope + (1.0f - releaseCoeff) * essLevel;
+
+    float essDb = gainToDb(essEnvelope);
+    float reductionDb = 0.0f;
+
+    if (essDb > thresholdDb) {
+        reductionDb = (essDb - thresholdDb) * (1.0f - 1.0f / std::max(ratio, 1.0f));
+        reductionDb = std::min(18.0f, reductionDb);
+    }
+
+    currentGainReductionDb = reductionDb;
+    float gainFactor = dbToGain(-reductionDb);
+
+    return sample * gainFactor;
+}
+
 void DeEsser::processBuffer(float* interleavedBuffer, size_t numFrames) noexcept {
     if (!enabled || numFrames == 0 || !interleavedBuffer) return;
 
