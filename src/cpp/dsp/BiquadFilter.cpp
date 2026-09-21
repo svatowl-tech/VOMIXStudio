@@ -211,6 +211,10 @@ ParametricEQ3Band::ParametricEQ3Band() noexcept {
     updateAll(48000.0f);
 }
 
+void ParametricEQ3Band::setup(float sr) noexcept {
+    updateAll(sr);
+}
+
 void ParametricEQ3Band::updateAll(float sr) noexcept {
     lowShelf.sampleRate = sr;
     lowShelf.updateCoefficients();

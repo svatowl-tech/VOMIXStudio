@@ -165,8 +165,9 @@ public:
     ParametricEQ3Band() noexcept;
 
     /**
-     * Обновление частоты дискретизации для всех 3 полос
+     * Инициализация / обновление частоты дискретизации для всех 3 полос
      */
+    void setup(float sr) noexcept;
     void updateAll(float sr) noexcept;
 
     /**
