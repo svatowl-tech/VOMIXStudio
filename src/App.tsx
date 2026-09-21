@@ -281,8 +281,8 @@ export default function App() {
     if (preset.masterSettings?.vstChain) {
       handleUpdateMasterVstChain(preset.masterSettings.vstChain);
     }
-    if (preset.trackVstChain && tracks.length > 0) {
-      tracks.forEach((tr) => {
+    if (preset.trackVstChain && (tracks || []).length > 0) {
+      (tracks || []).forEach((tr) => {
         handleUpdateTrackVstChain(tr.id, preset.trackVstChain);
       });
     }
@@ -299,7 +299,7 @@ export default function App() {
     }
     if (Array.isArray(state.tracks)) {
       setTracks((prev) =>
-        prev.map((t) => {
+        (prev || []).map((t) => {
           const matched = state.tracks.find((st: any) => st.id === t.id);
           if (matched) {
             return {
@@ -315,8 +315,8 @@ export default function App() {
         })
       );
     }
-    if (Array.isArray(state.subtitles) && state.subtitles.length > 0) {
-      setSubtitles(state.subtitles);
+    if (Array.isArray(state.subtitles)) {
+      setSubtitles(state.subtitles || []);
     }
   };
 
@@ -324,10 +324,14 @@ export default function App() {
     if (data.videoFile) {
       setSourceVideoFile(data.videoFile);
     }
-    for (let i = 0; i < data.audioFiles.length && i < tracks.length; i++) {
-      const { file } = data.audioFiles[i];
-      const targetTrack = tracks[i];
-      await handleFileUpload(file, targetTrack.id);
+    const audioList = data.audioFiles || [];
+    const currentTracks = tracks || [];
+    for (let i = 0; i < audioList.length && i < currentTracks.length; i++) {
+      const { file } = audioList[i];
+      const targetTrack = currentTracks[i];
+      if (targetTrack) {
+        await handleFileUpload(file, targetTrack.id);
+      }
     }
   };
 
@@ -336,12 +340,12 @@ export default function App() {
   const handleFileUpload = async (file: File, trackId: number) => {
     const res = await uploadAudioFileToTrack(file, trackId, Date.now(), 0);
     setTracks((prev) =>
-      prev.map((t) => {
+      (prev || []).map((t) => {
         if (t.id === trackId) {
           return {
             ...t,
             clips: [
-              ...t.clips,
+              ...(t.clips || []),
               {
                 id: Date.now(),
                 name: file.name,
@@ -419,7 +423,7 @@ export default function App() {
         }
 
         // 2. Проверяем, свободна ли Первая дорожка
-        if (prev.length > 0 && prev[0].clips.length === 0 && (prev[0].name.includes('Дорожка') || prev[0].name.includes('Track'))) {
+        if (prev.length > 0 && (prev[0].clips || []).length === 0 && (prev[0].name.includes('Дорожка') || prev[0].name.includes('Track'))) {
           actualTargetTrackId = prev[0].id;
           return prev.map((t, idx) =>
             idx === 0

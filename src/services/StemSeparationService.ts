@@ -9,9 +9,10 @@
  * Архитектурный принцип:
  * - TypeScript выполняет диспетчеризацию:
  *   1. Настраивает ONNX Runtime Web (версия 1.30.0 с поддержкой WebGPU / WASM SIMD128).
- *   2. При успехе запускает нейросетевое разделение.
- *   3. При сетевых сбоях (CORS, 404, офлайн) мгновенно переключает обработку на нативный C++ DSP.
- *   4. Исключает утечки памяти в куче WASM благодаря строгим блокам try ... finally.
+ *   2. Проверяет доступную оперативную память перед загрузкой нейросетей > 50 МБ.
+ *   3. При успехе запускает нейросетевое разделение.
+ *   4. При сетевых сбоях (CORS, 404, офлайн, OOM) мгновенно переключает обработку на нативный C++ DSP (SIMD M/S).
+ *   5. Исключает утечки памяти в куче WASM благодаря строгим блокам try ... finally и вызову session.release().
  * ============================================================================
  */
 
@@ -34,6 +35,7 @@ export const HF_MODEL_REGISTRY = {
     hopSize: 1024,
     dimF: 1024,
     dimT: 256,
+    sizeMb: 60.5,
   },
   // Demucs v4 Tiny / Mobile (Time-Domain Waveform)
   DEMUCS_TINY: {
@@ -43,6 +45,7 @@ export const HF_MODEL_REGISTRY = {
     fallbackUrl: 'https://huggingface.co/alexcg1/demucs-onnx/resolve/main/demucs_tiny.onnx',
     sampleRate: 44100,
     chunkDurationSec: 4.0,
+    sizeMb: 28.0,
   }
 } as const;
 
@@ -90,6 +93,37 @@ export interface SeparationOptions {
 }
 
 /**
+ * Проверка наличия достаточного объема доступной оперативной памяти для загрузки тяжелых моделей (> 50 МБ)
+ */
+export function checkDeviceMemoryForModel(modelSizeMb: number): { supported: boolean; reason?: string } {
+  if (typeof navigator !== 'undefined' && 'deviceMemory' in navigator) {
+    const devMemGb = (navigator as any).deviceMemory || 4;
+    if (devMemGb < 3 && modelSizeMb > 50) {
+      return {
+        supported: false,
+        reason: `Ограничение ОЗУ устройства (${devMemGb} ГБ) для модели ${modelSizeMb} МБ. Активирован нативный C++ DSP режим.`
+      };
+    }
+  }
+
+  if (typeof performance !== 'undefined' && (performance as any).memory) {
+    const mem = (performance as any).memory;
+    const usedHeapMb = mem.usedJSHeapSize / (1024 * 1024);
+    const heapLimitMb = mem.jsHeapSizeLimit / (1024 * 1024);
+    const freeHeapMb = heapLimitMb - usedHeapMb;
+
+    if (freeHeapMb < modelSizeMb * 2.5) {
+      return {
+        supported: false,
+        reason: `Мало свободной памяти JS Heap (${Math.round(freeHeapMb)} МБ) для модели ${modelSizeMb} МБ. Активирован C++ DSP режим.`
+      };
+    }
+  }
+
+  return { supported: true };
+}
+
+/**
  * Главный сервис инференса и спектрального разделения аудио
  */
 export class StemSeparationService {
@@ -111,7 +145,6 @@ export class StemSeparationService {
       if (typeof ort !== 'undefined' && ort.env) {
         ort.env.wasm.simd = true;
         ort.env.wasm.numThreads = Math.min(4, typeof navigator !== 'undefined' ? (navigator.hardwareConcurrency || 2) : 2);
-        // Актуальная версия ONNX Runtime Web из package.json
         ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/';
       }
     } catch (e) {
@@ -140,6 +173,9 @@ export class StemSeparationService {
   public async initSession(
     options: SeparationOptions = {}
   ): Promise<'webgpu' | 'wasm' | 'native-cpp'> {
+    // Освобождаем предыдущую сессию ONNX для предотвращения утечек памяти
+    await this.dispose();
+
     const presetKey = options.modelPreset || 'UVR_MDX_VOCALS_HQ';
     const preset = HF_MODEL_REGISTRY[presetKey];
     this.currentModelName = preset.name;
@@ -152,6 +188,16 @@ export class StemSeparationService {
         backendUsed: this.activeBackend,
       });
     };
+
+    // Проверка объема ОЗУ перед загрузкой нейросети > 50 МБ
+    const modelSizeMb = (preset as any).sizeMb || 60;
+    const memCheck = checkDeviceMemoryForModel(modelSizeMb);
+    if (!memCheck.supported) {
+      systemLogger.warn('AudioAI', memCheck.reason || 'Недостаточно памяти для нейросети');
+      this.activeBackend = 'native-cpp';
+      report('init_engine', 50, memCheck.reason || 'Активирован нативный C++ WASM SIMD128 модуль StemSeparator.');
+      return 'native-cpp';
+    }
 
     report('init_engine', 5, 'Инициализация нативного C++ модуля спектрального разделения...');
 
@@ -196,7 +242,7 @@ export class StemSeparationService {
         } catch {
           systemLogger.warn('AudioAI', 'Сетевая загрузка недоступна. Автоматическое мгновенное переключение на нативный C++ WASM SIMD128 модуль.');
           this.activeBackend = 'native-cpp';
-          report('init_engine', 50, 'Активирован нативный C++ WASM SIMD128 модуль StemSeparator.');
+          report('init_engine', 50, 'Сбой загрузки моделей (CORS/404/офлайн). Активирован нативный C++ WASM SIMD128 модуль StemSeparator.');
           return 'native-cpp';
         }
       }
@@ -287,14 +333,17 @@ export class StemSeparationService {
 
     // Попытка нейросетевого ONNX инференса (если сессия жива)
     if (this.activeBackend !== 'native-cpp' && this.session) {
+      let inputTensor: ort.Tensor | null = null;
+      let output: Record<string, ort.Tensor> | null = null;
+
       try {
         report('onnx_inference', 15, 'Запуск нейросетевого ONNX инференса...');
         
         const inputName = this.session.inputNames[0];
         // Формируем стерео тензор для входа модели
-        const inputTensor = new ort.Tensor('float32', new Float32Array(numSamples * 2), [1, 2, numSamples]);
+        inputTensor = new ort.Tensor('float32', new Float32Array(numSamples * 2), [1, 2, numSamples]);
         const feeds = { [inputName]: inputTensor };
-        const output = await this.session.run(feeds);
+        output = await this.session.run(feeds);
         
         const outputKeys = Object.keys(output);
         const vocalsData = output[outputKeys[0]].data as Float32Array;
@@ -331,6 +380,11 @@ export class StemSeparationService {
       } catch (onnxErr) {
         systemLogger.warn('AudioAI', 'Сбой нейросетевого инференса. Экстренный fallback на нативный C++ модуль.', onnxErr);
         this.activeBackend = 'native-cpp';
+      } finally {
+        // Очищаем тяжелые тензоры и освобождаем ONNX сессию для предотвращения утечек памяти
+        inputTensor = null;
+        output = null;
+        await this.dispose();
       }
     }
 
@@ -343,7 +397,7 @@ export class StemSeparationService {
     report('stft_analysis', 45, 'Спектральная M/S фильтрация вокальных формант в C++...');
     await new Promise((r) => setTimeout(r, 10));
 
-    // Нативный метод внутри `globalNativeDAWBridge` сам по себе гарантирует try-finally освобождение выделенной памяти
+    // Нативный метод внутри `globalNativeDAWBridge` гарантирует try-finally освобождение выделенной памяти
     const { vocalsL, vocalsR, karaokeL, karaokeR } = globalNativeDAWBridge.separateVocalsAndKaraoke(
       leftChannel,
       rightChannel,
@@ -376,10 +430,10 @@ export class StemSeparationService {
   /**
    * Освобождение памяти и уничтожение ONNX сессии
    */
-  public dispose(): void {
+  public async dispose(): Promise<void> {
     if (this.session) {
       try {
-        this.session.release();
+        await this.session.release();
       } catch {
         // ignore
       }

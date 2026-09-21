@@ -23,6 +23,7 @@ enum class PluginFormat {
  */
 struct SubPluginDescriptor {
     std::string uid;              // Уникальный идентификатор (GUID для VST3 или 4-char ID / Hex для VST2)
+    std::string classUid;         // 32-hex / UUID VST3 класса фабрики
     uint32_t shellId = 0;         // Числовой 32-битный UID для VST2 Shell плагинов
     std::string name;             // Название плагина (например, "CLA-76 Compressor")
     std::string category;         // Категория ("Fx|Dynamics", "Fx|EQ", "Instrument" и т.д.)
@@ -30,6 +31,7 @@ struct SubPluginDescriptor {
     std::string version;          // Версия плагина
     std::string sdkVersion;       // Версия SDK ("VST 2.4", "VST 3.7", etc.)
     bool isShellSubPlugin = false;// Флаг, является ли плагин дочерним элементом Shell-библиотеки
+    std::string shellPath;        // Путь к родительскому контейнеру библиотеки WaveShell
     int32_t numInputs = 2;        // Количество входных аудиоканалов
     int32_t numOutputs = 2;       // Количество выходных аудиоканалов
 };

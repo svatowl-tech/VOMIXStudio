@@ -12,6 +12,7 @@ export type VSTPluginCategory =
   | 'Dynamics'
   | 'Reverb'
   | 'Restoration'
+  | 'Mastering'
   | 'Limiter'
   | 'Delay'
   | 'Vocal'
@@ -58,6 +59,11 @@ export interface VSTPluginDefinition {
   presets: VSTPluginPreset[];
   isBuiltIn?: boolean;
   isCustomInstalled?: boolean;
+  // Поля для поддержки Shell-контейнеров (WaveShell / VST3 Multi-Class Modules)
+  classUid?: string;          // 16-байтный / 32-hex GUID конкретного VST3 класса в пакете
+  subPluginId?: number | string; // Числовой или строковый идентификатор суб-плагина (VST2 Shell / Waves)
+  isShell?: boolean;          // Флаг суб-плагина внутри Shell-пакета (WaveShell)
+  shellPath?: string;         // Путь к родительскому файлу контейнера (.vst3 / .dll)
 }
 
 /**
@@ -82,6 +88,11 @@ export interface VSTPluginInstance {
   peakInR?: number;
   peakOutL?: number;
   peakOutR?: number;
+  // Shell-метаданные инстанса
+  classUid?: string;
+  subPluginId?: number | string;
+  isShell?: boolean;
+  shellPath?: string;
 }
 
 export interface VSTScanDirectory {

@@ -1,4 +1,5 @@
 #include "VST3HostEngine.hpp"
+#include "VST3BundleScanner.hpp"
 
 #include <iostream>
 #include <cstring>
@@ -65,64 +66,16 @@ bool DynamicLibrary::load(const std::string& path) {
     unload();
     m_path = path;
 
-#if defined(_WIN32) || defined(_WIN64)
-    std::wstring wpath = utf8ToWide(path);
-    m_handle = (void*)LoadLibraryW(wpath.c_str());
-    if (!m_handle) {
-        // Попытка загрузить с флагом поиска зависимостей в папке плагина
-        m_handle = (void*)LoadLibraryExW(wpath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-    }
-#else
-    std::string actualPath = path;
-
-    // Проверка, является ли путь macOS .vst3 бандлом (папкой)
-    struct stat st;
-    if (stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
-        // Извлекаем имя бандла
-        std::string bundleName;
-        size_t lastSlash = path.find_last_of('/');
-        if (lastSlash != std::string::npos) {
-            bundleName = path.substr(lastSlash + 1);
-        } else {
-            bundleName = path;
-        }
-        if (bundleName.size() > 5 && bundleName.substr(bundleName.size() - 5) == ".vst3") {
-            bundleName = bundleName.substr(0, bundleName.size() - 5);
-        }
-
-        std::string binaryCandidate = path + "/Contents/MacOS/" + bundleName;
-        if (stat(binaryCandidate.c_str(), &st) == 0) {
-            actualPath = binaryCandidate;
-        } else {
-            // Альтернативный поиск исполняемого файла в Contents/MacOS/
-            std::string macOsDir = path + "/Contents/MacOS";
-            DIR* dir = opendir(macOsDir.c_str());
-            if (dir) {
-                struct dirent* ent;
-                while ((ent = readdir(dir)) != nullptr) {
-                    if (ent->d_name[0] != '.') {
-                        actualPath = macOsDir + "/" + ent->d_name;
-                        break;
-                    }
-                }
-                closedir(dir);
-            }
-        }
-    }
-
-    m_handle = dlopen(actualPath.c_str(), RTLD_NOW | RTLD_LOCAL);
-#endif
+    // Резолвим VST3 бандл и его внутренний бинарник
+    ResolvedPluginBinary resolved = VST3BundleScanner::resolvePluginBinary(path);
+    m_handle = VST3BundleScanner::safeLoadLibrary(resolved);
 
     return m_handle != nullptr;
 }
 
 void DynamicLibrary::unload() {
     if (m_handle) {
-#if defined(_WIN32) || defined(_WIN64)
-        FreeLibrary((HMODULE)m_handle);
-#else
-        dlclose(m_handle);
-#endif
+        VST3BundleScanner::safeFreeLibrary(m_handle);
         m_handle = nullptr;
     }
     m_path.clear();
@@ -497,6 +450,56 @@ struct ParameterInfoVst3 {
     int32 flags;
 };
 
+struct ViewRect {
+    int32 left = 0;
+    int32 top = 0;
+    int32 right = 0;
+    int32 bottom = 0;
+};
+
+static const char* kPlatformTypeHWND = "HWND";
+static const char* kPlatformTypeNSView = "NSView";
+static const char* kPlatformTypeX11EmbedWindowID = "X11EmbedWindowID";
+static const char* kEditorViewType = "editor";
+
+static const TUID IPlugView_iid = {
+    (char)0x5B, (char)0x0E, (char)0x39, (char)0x3C,
+    (char)0x9E, (char)0x48, (char)0x40, (char)0x50,
+    (char)0xAC, (char)0x57, (char)0xAB, (char)0xD8,
+    (char)0x30, (char)0x69, (char)0x70, (char)0xFB
+};
+
+static const TUID IComponentHandler_iid = {
+    (char)0x93, (char)0xA4, (char)0x6B, (char)0xFA,
+    (char)0xA5, (char)0x64, (char)0x45, (char)0xB6,
+    (char)0x8F, (char)0x34, (char)0xB3, (char)0x37,
+    (char)0x9E, (char)0xEB, (char)0x2D, (char)0x42
+};
+
+class IPlugView : public FUnknown {
+public:
+    virtual tresult isPlatformTypeSupported(FIDString type) = 0;
+    virtual tresult attached(void* parent, FIDString type) = 0;
+    virtual tresult removed() = 0;
+    virtual tresult onWheel(float distance) = 0;
+    virtual tresult onKeyDown(char16_t key, int16 keyCode, int16 modifiers) = 0;
+    virtual tresult onKeyUp(char16_t key, int16 keyCode, int16 modifiers) = 0;
+    virtual tresult getSize(ViewRect* size) = 0;
+    virtual tresult onSize(ViewRect* newSize) = 0;
+    virtual tresult onFocus(TBool state) = 0;
+    virtual tresult setFrame(void* frame) = 0;
+    virtual tresult canResize() = 0;
+    virtual tresult checkSizeConstraint(ViewRect* rect) = 0;
+};
+
+class IComponentHandler : public FUnknown {
+public:
+    virtual tresult beginEdit(ParamID id) = 0;
+    virtual tresult performEdit(ParamID id, ParamValue valueNormalized) = 0;
+    virtual tresult endEdit(ParamID id) = 0;
+    virtual tresult restartComponent(int32 flags) = 0;
+};
+
 class IEditController : public FUnknown {
 public:
     virtual tresult initialize(FUnknown* context) = 0;
@@ -512,8 +515,8 @@ public:
     virtual ParamValue plainParamToNormalized(ParamID id, ParamValue plainValue) = 0;
     virtual ParamValue getParamNormalized(ParamID id) = 0;
     virtual tresult setParamNormalized(ParamID id, ParamValue value) = 0;
-    virtual tresult setComponentHandler(void* handler) = 0;
-    virtual void* createView(FIDString name) = 0;
+    virtual tresult setComponentHandler(IComponentHandler* handler) = 0;
+    virtual IPlugView* createView(FIDString name) = 0;
 };
 
 // =============================================================================
@@ -927,6 +930,16 @@ public:
     const ProcessContext& getProcessContext() const { return m_processContext; }
 
     // Регистрация экземпляров для обратного вызова audioMasterCallback
+    static thread_local uint32_t s_pendingShellId;
+
+    static void setPendingShellId(uint32_t id) {
+        s_pendingShellId = id;
+    }
+
+    static uint32_t getPendingShellId() {
+        return s_pendingShellId;
+    }
+
     static void registerInstance(VST2PluginInstance* inst) {
         std::lock_guard<std::mutex> lock(s_mapMutex);
         s_instances[inst->getAEffect()] = inst;
@@ -956,6 +969,10 @@ public:
                 return 2400; // VST 2.4
             case audioMasterCurrentId: {
                 // Поддержка Waves Shell плагинов: плагин запрашивает выбранный sub-plugin ID
+                // Если экземпляр еще в процессе инициализации (mainProc), возвращаем s_pendingShellId
+                if (s_pendingShellId != 0) {
+                    return (intptr_t)s_pendingShellId;
+                }
                 VST2PluginInstance* inst = findInstance(effect);
                 if (inst) {
                     return (intptr_t)inst->getShellUid();
@@ -1036,6 +1053,51 @@ private:
 
 std::mutex VST2PluginInstance::s_mapMutex;
 std::unordered_map<AEffect*, VST2PluginInstance*> VST2PluginInstance::s_instances;
+thread_local uint32_t VST2PluginInstance::s_pendingShellId = 0;
+
+class VST3PluginInstance;
+
+class HostComponentHandler : public IComponentHandler {
+public:
+    HostComponentHandler(VST3PluginInstance* owner) : m_refCount(1), m_owner(owner) {}
+
+    tresult queryInterface(const TUID _iid, void** obj) override {
+        if (!obj) return kInvalidArgument;
+        if (std::memcmp(_iid, IComponentHandler_iid, sizeof(TUID)) == 0 ||
+            std::memcmp(_iid, FUnknown_iid, sizeof(TUID)) == 0) {
+            *obj = static_cast<IComponentHandler*>(this);
+            addRef();
+            return kResultOk;
+        }
+        *obj = nullptr;
+        return kNoInterface;
+    }
+
+    uint32 addRef() override { return ++m_refCount; }
+    uint32 release() override {
+        uint32 r = --m_refCount;
+        if (r == 0) delete this;
+        return r;
+    }
+
+    tresult beginEdit(ParamID) override {
+        return kResultOk;
+    }
+
+    tresult performEdit(ParamID id, ParamValue valueNormalized) override;
+
+    tresult endEdit(ParamID) override {
+        return kResultOk;
+    }
+
+    tresult restartComponent(int32) override {
+        return kResultOk;
+    }
+
+private:
+    std::atomic<uint32> m_refCount;
+    VST3PluginInstance* m_owner;
+};
 
 // =============================================================================
 // РЕАЛИЗАЦИЯ IVSTPluginInstance ДЛЯ VST 3.7 (С ПОДДЕРЖКОЙ SUB-PLUGINS/SHELL)
@@ -1060,20 +1122,31 @@ public:
         m_libraryPath(libraryPath),
         m_sampleRate(48000.0),
         m_blockSize(512),
-        m_isActivated(false)
+        m_isActivated(false),
+        m_plugView(nullptr),
+        m_componentHandler(nullptr)
     {
         if (m_factory) m_factory->addRef();
         if (m_component) m_component->addRef();
         if (m_processor) m_processor->addRef();
-        if (m_controller) m_controller->addRef();
+        if (m_controller) {
+            m_controller->addRef();
+            m_componentHandler = new HostComponentHandler(this);
+            m_controller->setComponentHandler(m_componentHandler);
+        }
         m_paramChanges = new ParameterChangesImpl();
     }
 
     ~VST3PluginInstance() override {
         terminate();
+        closeEditor();
         if (m_paramChanges) {
             m_paramChanges->release();
             m_paramChanges = nullptr;
+        }
+        if (m_componentHandler) {
+            m_componentHandler->release();
+            m_componentHandler = nullptr;
         }
         if (m_controller) { m_controller->release(); m_controller = nullptr; }
         if (m_processor) { m_processor->release(); m_processor = nullptr; }
@@ -1337,10 +1410,84 @@ public:
         return true;
     }
 
-    bool hasEditor() const override { return false; }
-    void* openEditor(void*) override { return nullptr; }
-    void closeEditor() override {}
-    bool getEditorSize(int32_t&, int32_t&) override { return false; }
+    bool hasEditor() const override {
+        if (!m_controller) return false;
+        IPlugView* view = m_controller->createView(kEditorViewType);
+        if (view) {
+            view->release();
+            return true;
+        }
+        return false;
+    }
+
+    void* openEditor(void* parentWindowHandle) override {
+        if (!m_controller) return nullptr;
+        if (m_plugView) {
+            return (void*)m_plugView;
+        }
+
+        m_plugView = m_controller->createView(kEditorViewType);
+        if (!m_plugView) {
+            m_plugView = m_controller->createView(nullptr);
+        }
+        if (!m_plugView) return nullptr;
+
+        // Передаем обработчик изменений параметров хоста
+        if (m_componentHandler) {
+            m_controller->setComponentHandler(m_componentHandler);
+        }
+
+        // Выбираем тип платформы в зависимости от ОС
+#if defined(_WIN32) || defined(__WIN32__) || defined(WIN32)
+        const char* platType = kPlatformTypeHWND;
+#elif defined(__APPLE__)
+        const char* platType = kPlatformTypeNSView;
+#else
+        const char* platType = kPlatformTypeX11EmbedWindowID;
+#endif
+
+        tresult res = m_plugView->isPlatformTypeSupported(platType);
+        if (res == kResultOk || res == kResultTrue) {
+            m_plugView->attached(parentWindowHandle, platType);
+        } else {
+            m_plugView->attached(parentWindowHandle, kPlatformTypeHWND);
+        }
+
+        return (void*)m_plugView;
+    }
+
+    void closeEditor() override {
+        if (m_plugView) {
+            m_plugView->removed();
+            m_plugView->release();
+            m_plugView = nullptr;
+        }
+    }
+
+    bool getEditorSize(int32_t& width, int32_t& height) override {
+        if (m_plugView) {
+            ViewRect rect = {};
+            if (m_plugView->getSize(&rect) == kResultOk) {
+                width = rect.right - rect.left;
+                height = rect.bottom - rect.top;
+                return (width > 0 && height > 0);
+            }
+        } else if (m_controller) {
+            IPlugView* tempView = m_controller->createView(kEditorViewType);
+            if (!tempView) tempView = m_controller->createView(nullptr);
+            if (tempView) {
+                ViewRect rect = {};
+                tresult res = tempView->getSize(&rect);
+                tempView->release();
+                if (res == kResultOk) {
+                    width = rect.right - rect.left;
+                    height = rect.bottom - rect.top;
+                    return (width > 0 && height > 0);
+                }
+            }
+        }
+        return false;
+    }
 
 private:
     DynamicLibrary m_library;
@@ -1355,7 +1502,17 @@ private:
     bool m_isActivated;
     ProcessContext m_processContext;
     ParameterChangesImpl* m_paramChanges;
+    IPlugView* m_plugView;
+    IComponentHandler* m_componentHandler;
 };
+
+// Реализация HostComponentHandler::performEdit для немедленной трансляции правок GUI в DSP-очередь параметров
+tresult HostComponentHandler::performEdit(ParamID id, ParamValue valueNormalized) {
+    if (m_owner) {
+        m_owner->setParameter((uint32_t)id, (float)valueNormalized);
+    }
+    return kResultOk;
+}
 
 // =============================================================================
 // РЕАЛИЗАЦИЯ VST3HostEngine (ПОИСК, ОПРОС SHELL, СОЗДАНИЕ ИНСТАНСОВ)
@@ -1420,10 +1577,12 @@ std::vector<SubPluginDescriptor> VST3HostEngine::enumerateSubPlugins(const std::
                         std::strcmp(classInfo.category, "Component") == 0) {
                         SubPluginDescriptor desc;
                         desc.uid = tuidToString(classInfo.cid);
+                        desc.classUid = desc.uid;
                         desc.name = classInfo.name;
                         desc.category = classInfo.category;
                         desc.sdkVersion = "VST 3.7";
                         desc.isShellSubPlugin = (numClasses > 1);
+                        desc.shellPath = libraryPath;
 
                         if (factory2) {
                             PClassInfo2 classInfo2;
@@ -1477,6 +1636,7 @@ std::vector<SubPluginDescriptor> VST3HostEngine::enumerateSubPlugins(const std::
                     std::stringstream ss;
                     ss << std::hex << shellSubUid;
                     desc.uid = ss.str();
+                    desc.classUid = desc.uid;
                     desc.shellId = (uint32_t)shellSubUid;
                     desc.name = subPluginName[0] ? subPluginName : ("SubPlugin " + ss.str());
                     desc.category = "Fx|Dynamics";
@@ -1484,6 +1644,7 @@ std::vector<SubPluginDescriptor> VST3HostEngine::enumerateSubPlugins(const std::
                     desc.version = "2.4";
                     desc.sdkVersion = "VST 2.4";
                     desc.isShellSubPlugin = true;
+                    desc.shellPath = libraryPath;
                     desc.numInputs = effect->numInputs;
                     desc.numOutputs = effect->numOutputs;
                     results.push_back(desc);
@@ -1505,6 +1666,7 @@ std::vector<SubPluginDescriptor> VST3HostEngine::enumerateSubPlugins(const std::
                     std::stringstream ss;
                     ss << std::hex << effect->uniqueID;
                     desc.uid = ss.str();
+                    desc.classUid = desc.uid;
                     desc.shellId = (uint32_t)effect->uniqueID;
                     desc.name = effectName[0] ? effectName : (productString[0] ? productString : "VST2 Plugin");
                     desc.vendor = vendorName[0] ? vendorName : "Unknown Vendor";
@@ -1512,6 +1674,7 @@ std::vector<SubPluginDescriptor> VST3HostEngine::enumerateSubPlugins(const std::
                     desc.sdkVersion = "VST 2.4";
                     desc.category = "Fx";
                     desc.isShellSubPlugin = false;
+                    desc.shellPath = libraryPath;
                     desc.numInputs = effect->numInputs;
                     desc.numOutputs = effect->numOutputs;
                     results.push_back(desc);
@@ -1523,6 +1686,31 @@ std::vector<SubPluginDescriptor> VST3HostEngine::enumerateSubPlugins(const std::
     }
 
     return results;
+}
+
+namespace {
+    // Вспомогательная функция очистки строки идентификатора UID (удаление дефисов, скобок, пробелов)
+    inline std::string cleanUidString(const std::string& input) {
+        std::string out;
+        out.reserve(input.length());
+        for (char c : input) {
+            if (c != '-' && c != '{' && c != '}' && c != ' ' && c != '\t' && c != '\r' && c != '\n') {
+                out.push_back((char)std::tolower((unsigned char)c));
+            }
+        }
+        return out;
+    }
+
+    // Проверка совпадения имени класса без учета регистра
+    inline bool stringContainsIgnoreCase(const std::string& haystack, const std::string& needle) {
+        if (needle.empty()) return true;
+        auto it = std::search(
+            haystack.begin(), haystack.end(),
+            needle.begin(), needle.end(),
+            [](char ch1, char ch2) { return std::tolower((unsigned char)ch1) == std::tolower((unsigned char)ch2); }
+        );
+        return (it != haystack.end());
+    }
 }
 
 std::unique_ptr<IVSTPluginInstance> VST3HostEngine::createInstance(
@@ -1537,6 +1725,8 @@ std::unique_ptr<IVSTPluginInstance> VST3HostEngine::createInstance(
         return nullptr;
     }
 
+    const std::string cleanedTargetUid = cleanUidString(subPluginUid);
+
     // --- 1. Попытка инстанцирования VST3 плагина ---
     auto getFactoryProc = (IPluginFactory* (*)())lib.getSymbol("GetPluginFactory");
     if (getFactoryProc) {
@@ -1550,34 +1740,84 @@ std::unique_ptr<IVSTPluginInstance> VST3HostEngine::createInstance(
             IPluginFactory2* factory2 = nullptr;
             factory->queryInterface(IPluginFactory_iid, (void**)&factory2);
 
-            for (int32 i = 0; i < numClasses; ++i) {
-                PClassInfo classInfo;
-                if (factory->getClassInfo(i, &classInfo) == kResultOk) {
-                    if (std::strcmp(classInfo.category, "Audio Module Class") == 0 ||
-                        std::strcmp(classInfo.category, "Component") == 0) {
-                        std::string classUidStr = tuidToString(classInfo.cid);
+            int32 matchedClassIdx = -1;
 
-                        // Если конкретный UID не задан — берем первый подходящий класс
-                        if (subPluginUid.empty() || subPluginUid == classUidStr) {
-                            std::memcpy(targetCid, classInfo.cid, 16);
-                            matchedDesc.uid = classUidStr;
-                            matchedDesc.name = classInfo.name;
-                            matchedDesc.category = classInfo.category;
-                            matchedDesc.sdkVersion = "VST 3.7";
-                            matchedDesc.isShellSubPlugin = (numClasses > 1);
-
-                            if (factory2) {
-                                PClassInfo2 classInfo2;
-                                if (factory2->getClassInfo2(i, &classInfo2) == kResultOk) {
-                                    matchedDesc.vendor = classInfo2.vendor;
-                                    matchedDesc.version = classInfo2.version;
-                                    matchedDesc.category = classInfo2.subCategories;
-                                }
+            // Многоуровневый поиск нужного суб-плагина в WaveShell / Multi-Class фабрике:
+            // Уровень 1: Точное или нормализованное совпадение 32-hex UID класса (Class CID)
+            if (!subPluginUid.empty()) {
+                for (int32 i = 0; i < numClasses; ++i) {
+                    PClassInfo classInfo;
+                    if (factory->getClassInfo(i, &classInfo) == kResultOk) {
+                        if (std::strcmp(classInfo.category, "Audio Module Class") == 0 ||
+                            std::strcmp(classInfo.category, "Component") == 0) {
+                            std::string cidStr = tuidToString(classInfo.cid);
+                            std::string cleanedCid = cleanUidString(cidStr);
+                            
+                            // Совпадение по чистому CID или подстроке в композитном ID (waveshell15_vst3:Name:CID)
+                            if (cleanedCid == cleanedTargetUid ||
+                                (!cleanedCid.empty() && cleanedTargetUid.find(cleanedCid) != std::string::npos) ||
+                                (!cleanedTargetUid.empty() && cleanedCid.find(cleanedTargetUid) != std::string::npos)) {
+                                matchedClassIdx = i;
+                                break;
                             }
-                            foundTarget = true;
+                        }
+                    }
+                }
+            }
+
+            // Уровень 2: Сопоставление по имени суб-плагина (e.g. "CLA-76", "Vocal Rider", "R-Vox")
+            if (matchedClassIdx < 0 && !subPluginUid.empty()) {
+                for (int32 i = 0; i < numClasses; ++i) {
+                    PClassInfo classInfo;
+                    if (factory->getClassInfo(i, &classInfo) == kResultOk) {
+                        if (std::strcmp(classInfo.category, "Audio Module Class") == 0 ||
+                            std::strcmp(classInfo.category, "Component") == 0) {
+                            std::string className = classInfo.name;
+                            if (stringContainsIgnoreCase(className, subPluginUid) ||
+                                stringContainsIgnoreCase(subPluginUid, className)) {
+                                matchedClassIdx = i;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Уровень 3: Если идентификатор пуст или поиск не дал результатов, берем первый аудиомодуль
+            if (matchedClassIdx < 0) {
+                for (int32 i = 0; i < numClasses; ++i) {
+                    PClassInfo classInfo;
+                    if (factory->getClassInfo(i, &classInfo) == kResultOk) {
+                        if (std::strcmp(classInfo.category, "Audio Module Class") == 0 ||
+                            std::strcmp(classInfo.category, "Component") == 0) {
+                            matchedClassIdx = i;
                             break;
                         }
                     }
+                }
+            }
+
+            if (matchedClassIdx >= 0) {
+                PClassInfo classInfo;
+                if (factory->getClassInfo(matchedClassIdx, &classInfo) == kResultOk) {
+                    std::memcpy(targetCid, classInfo.cid, 16);
+                    matchedDesc.uid = tuidToString(classInfo.cid);
+                    matchedDesc.classUid = matchedDesc.uid;
+                    matchedDesc.name = classInfo.name;
+                    matchedDesc.category = classInfo.category;
+                    matchedDesc.sdkVersion = "VST 3.7";
+                    matchedDesc.isShellSubPlugin = (numClasses > 1);
+                    matchedDesc.shellPath = libraryPath;
+
+                    if (factory2) {
+                        PClassInfo2 classInfo2;
+                        if (factory2->getClassInfo2(matchedClassIdx, &classInfo2) == kResultOk) {
+                            matchedDesc.vendor = classInfo2.vendor;
+                            matchedDesc.version = classInfo2.version;
+                            matchedDesc.category = classInfo2.subCategories;
+                        }
+                    }
+                    foundTarget = true;
                 }
             }
 
@@ -1585,6 +1825,7 @@ std::unique_ptr<IVSTPluginInstance> VST3HostEngine::createInstance(
 
             if (foundTarget) {
                 IComponent* component = nullptr;
+                // ВАЖНО: Передаем точный targetCid суб-плагина в factory->createInstance!
                 if (factory->createInstance(targetCid, IComponent_iid, (void**)&component) == kResultOk && component) {
                     IAudioProcessor* processor = nullptr;
                     component->queryInterface(IAudioProcessor_iid, (void**)&processor);
@@ -1612,29 +1853,55 @@ std::unique_ptr<IVSTPluginInstance> VST3HostEngine::createInstance(
         }
     }
 
-    // --- 2. Попытка инстанцирования VST2 плагина ---
+    // --- 2. Попытка инстанцирования VST2 плагина (с поддержкой WaveShell VST2) ---
     auto mainProc = (VstPluginMainFunc)lib.getSymbol("VSTPluginMain");
     if (!mainProc) {
         mainProc = (VstPluginMainFunc)lib.getSymbol("main");
     }
 
     if (mainProc) {
+        uint32_t targetShellId = 0;
+        if (!subPluginUid.empty()) {
+            try {
+                if (subPluginUid.rfind("0x", 0) == 0 || subPluginUid.rfind("0X", 0) == 0) {
+                    targetShellId = (uint32_t)std::stoul(subPluginUid.substr(2), nullptr, 16);
+                } else if (subPluginUid.length() <= 8 && std::all_of(subPluginUid.begin(), subPluginUid.end(), ::isxdigit)) {
+                    targetShellId = (uint32_t)std::stoul(subPluginUid, nullptr, 16);
+                } else {
+                    targetShellId = (uint32_t)std::stoul(subPluginUid, nullptr, 10);
+                }
+            } catch (...) {
+                targetShellId = 0;
+            }
+        }
+
+        // Устанавливаем потокобезопасный pending Shell ID перед вызовом mainProc()!
+        if (targetShellId != 0) {
+            VST2PluginInstance::setPendingShellId(targetShellId);
+        }
+
         AEffect* effect = mainProc(VST2PluginInstance::audioMasterCallback);
+
+        // Очищаем pending Shell ID после завершения вызова mainProc()
+        VST2PluginInstance::setPendingShellId(0);
+
         if (effect && effect->magic == 0x56737450 /* 'VstP' */) {
             SubPluginDescriptor desc;
             desc.name = "VST2 Plugin";
             desc.sdkVersion = "VST 2.4";
+            desc.shellPath = libraryPath;
 
-            if (!subPluginUid.empty()) {
-                uint32_t shellId = (uint32_t)std::stoul(subPluginUid, nullptr, 16);
-                desc.shellId = shellId;
+            if (targetShellId != 0) {
+                desc.shellId = targetShellId;
                 desc.uid = subPluginUid;
+                desc.classUid = subPluginUid;
                 desc.isShellSubPlugin = true;
             } else {
                 desc.shellId = (uint32_t)effect->uniqueID;
                 std::stringstream ss;
                 ss << std::hex << effect->uniqueID;
                 desc.uid = ss.str();
+                desc.classUid = desc.uid;
             }
 
             return std::make_unique<VST2PluginInstance>(
@@ -1650,38 +1917,7 @@ std::unique_ptr<IVSTPluginInstance> VST3HostEngine::createInstance(
 }
 
 std::vector<std::string> VST3HostEngine::getDefaultPluginSearchPaths() const {
-    std::vector<std::string> paths;
-
-#if defined(_WIN32) || defined(_WIN64)
-    // Windows 64-bit стандартные директории
-    paths.push_back("C:\\Program Files\\Common Files\\VST3");
-    paths.push_back("C:\\Program Files\\VSTPlugins");
-    paths.push_back("C:\\Program Files\\Steinberg\\VSTPlugins");
-    paths.push_back("C:\\Program Files\\Common Files\\VST2");
-    paths.push_back("C:\\Program Files (x86)\\Common Files\\VST3");
-#elif defined(__APPLE__)
-    // macOS стандартные директории VST3 / VST2
-    paths.push_back("/Library/Audio/Plug-Ins/VST3");
-    paths.push_back("/Library/Audio/Plug-Ins/VST");
-    const char* home = getenv("HOME");
-    if (home) {
-        paths.push_back(std::string(home) + "/Library/Audio/Plug-Ins/VST3");
-        paths.push_back(std::string(home) + "/Library/Audio/Plug-Ins/VST");
-    }
-#else
-    // Linux стандартные директории
-    paths.push_back("/usr/lib/vst3");
-    paths.push_back("/usr/local/lib/vst3");
-    paths.push_back("/usr/lib/lxvst");
-    paths.push_back("/usr/lib/vst");
-    const char* home = getenv("HOME");
-    if (home) {
-        paths.push_back(std::string(home) + "/.vst3");
-        paths.push_back(std::string(home) + "/.vst");
-    }
-#endif
-
-    return paths;
+    return VST3BundleScanner::getDefaultSearchPaths();
 }
 
 } // namespace vst

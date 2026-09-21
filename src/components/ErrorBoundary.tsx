@@ -62,7 +62,7 @@ export class ErrorBoundary extends Component<Props, State> {
                 onClick={() => {
                   localStorage.clear();
                   indexedDB.databases?.().then((dbs) => {
-                    dbs.forEach((db) => db.name && indexedDB.deleteDatabase(db.name));
+                    (dbs || []).forEach((db) => db && db.name && indexedDB.deleteDatabase(db.name));
                   }).catch(() => {});
                   window.location.reload();
                 }}

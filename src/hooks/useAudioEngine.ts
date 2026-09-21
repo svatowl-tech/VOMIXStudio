@@ -232,6 +232,10 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
   const isInitializedRef = useRef<boolean>(false);
   const pendingClipAcksRef = useRef<Map<number, () => void>>(new Map());
 
+  // Согласование времени плейхеда без дрожания с помощью performance.now()
+  const playheadStartPerfRef = useRef<number>(performance.now());
+  const playheadStartTimeSecRef = useRef<number>(0);
+
   // Реестры ожидающих промисов для асинхронных VST операций
   // key: `${trackId}_${slotIdx}` -> resolve callback
   const pendingPluginLoadsRef = useRef<Map<string, () => void>>(new Map());
@@ -324,7 +328,20 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             let frameId: number | null = null;
 
             const updateStateThrottled = () => {
-              setCurrentTimeSec(lastTimeSec);
+              // Плавная интерполяция времени плейхеда без сетевого/IPC дрожания
+              const now = performance.now();
+              const elapsedSec = (now - playheadStartPerfRef.current) / 1000;
+              const smoothTimeSec = playheadStartTimeSecRef.current + elapsedSec;
+
+              // Если рассинхронизация с C++ ворклером превышает 80мс, плавно примагничиваем
+              if (Math.abs(smoothTimeSec - lastTimeSec) > 0.08) {
+                playheadStartTimeSecRef.current = lastTimeSec;
+                playheadStartPerfRef.current = now;
+                setCurrentTimeSec(Math.max(0, lastTimeSec));
+              } else {
+                setCurrentTimeSec(Math.max(0, smoothTimeSec));
+              }
+
               if (lastTracksData) {
                 setTrackMeters((prevMap) => {
                   const newMap = new Map(prevMap);
@@ -450,11 +467,13 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
       await audioCtxRef.current.resume();
     }
+    playheadStartPerfRef.current = performance.now();
+    playheadStartTimeSecRef.current = currentTimeSec;
     if (workletNodeRef.current) {
       workletNodeRef.current.port.postMessage({ type: 'PLAY' });
     }
     setIsPlaying(true);
-  }, [isInitialized, initAudioEngine]);
+  }, [isInitialized, initAudioEngine, currentTimeSec]);
 
   const pause = useCallback(() => {
     if (workletNodeRef.current) {
@@ -472,10 +491,13 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
   }, [isPlaying, play, pause]);
 
   const seek = useCallback((timeSec: number) => {
+    const safeTime = Math.max(0, timeSec);
+    playheadStartPerfRef.current = performance.now();
+    playheadStartTimeSecRef.current = safeTime;
     if (workletNodeRef.current) {
-      workletNodeRef.current.port.postMessage({ type: 'SEEK', timeSec });
+      workletNodeRef.current.port.postMessage({ type: 'SEEK', timeSec: safeTime });
     }
-    setCurrentTimeSec(timeSec);
+    setCurrentTimeSec(safeTime);
   }, []);
 
   /**
@@ -614,7 +636,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             fadeInSamples: c.fadeInSamples || 0,
             fadeOutSamples: c.fadeOutSamples || 0,
             isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true,
-            buffer: undefined
+            buffer: c.buffer instanceof Float32Array && c.buffer.length > 0 ? c.buffer : undefined
           }))
         });
       } catch (err) {
@@ -655,7 +677,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
               fadeInSamples: c.fadeInSamples || 0,
               fadeOutSamples: c.fadeOutSamples || 0,
               isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true,
-              buffer: undefined
+              buffer: c.buffer instanceof Float32Array && c.buffer.length > 0 ? c.buffer : undefined
             }))
           }))
         });

@@ -233,21 +233,48 @@ void Track::applyFaderAndPan(size_t numFrames) noexcept {
 #endif
 }
 
-void Track::calculatePeaks(size_t numFrames) noexcept {
-    size_t safeFrames = std::min(numFrames, MAX_BUFFER_SIZE);
-    float pL = 0.0f;
-    float pR = 0.0f;
-
-    for (size_t i = 0; i < safeFrames; ++i) {
-        float absL = std::abs(trackBuffer[i * 2]);
-        float absR = std::abs(trackBuffer[i * 2 + 1]);
-        if (absL > pL) pL = absL;
-        if (absR > pR) pR = absR;
+void Track::calculateBlockMeters(const float* buffer, int numFrames) noexcept {
+    if (!buffer || numFrames <= 0) {
+        peakL *= 0.85f;
+        peakR *= 0.85f;
+        rmsL *= 0.85f;
+        rmsR *= 0.85f;
+        return;
     }
 
-    // Плавный спад пиков (decay envelope)
+    size_t safeFrames = std::min(static_cast<size_t>(numFrames), MAX_BUFFER_SIZE);
+    float pL = 0.0f;
+    float pR = 0.0f;
+    double sumL = 0.0;
+    double sumR = 0.0;
+
+    for (size_t i = 0; i < safeFrames; ++i) {
+        float sampleL = buffer[i * 2];
+        float sampleR = buffer[i * 2 + 1];
+        float absL = std::abs(sampleL);
+        float absR = std::abs(sampleR);
+        if (absL > pL) pL = absL;
+        if (absR > pR) pR = absR;
+        sumL += static_cast<double>(sampleL) * static_cast<double>(sampleL);
+        sumR += static_cast<double>(sampleR) * static_cast<double>(sampleR);
+    }
+
+    float calcRmsL = safeFrames > 0 ? std::sqrt(static_cast<float>(sumL / safeFrames)) : 0.0f;
+    float calcRmsR = safeFrames > 0 ? std::sqrt(static_cast<float>(sumR / safeFrames)) : 0.0f;
+
+    // Плавный спад пиков и RMS (decay envelope)
     peakL = std::max(pL, peakL * 0.85f);
     peakR = std::max(pR, peakR * 0.85f);
+    rmsL = std::max(calcRmsL, rmsL * 0.85f);
+    rmsR = std::max(calcRmsR, rmsR * 0.85f);
+}
+
+void Track::calculateBlockMeters(size_t numFrames) noexcept {
+    calculateBlockMeters(trackBuffer, static_cast<int>(numFrames));
+}
+
+void Track::calculatePeaks(size_t numFrames) noexcept {
+    calculateBlockMeters(numFrames);
 }
 
 } // namespace DAWCore

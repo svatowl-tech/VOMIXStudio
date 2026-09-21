@@ -269,15 +269,16 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
 
   // Вычисление максимальной длины проекта с учетом видео, всех аудиоклипов и субтитров
   const effectiveDurationSec = useMemo(() => {
-    let maxSec = Math.max(totalTimeSec, videoDuration);
-    tracks.forEach((t) => {
-      t.clips.forEach((c) => {
-        const endSec = (c.offsetSamples + c.lengthSamples) / sampleRate;
+    let maxSec = Math.max(totalTimeSec || 0, videoDuration || 0);
+    (tracks || []).forEach((t) => {
+      (t.clips || []).forEach((c) => {
+        if (!c) return;
+        const endSec = ((c.offsetSamples || 0) + (c.lengthSamples || 0)) / sampleRate;
         if (endSec > maxSec) maxSec = endSec;
       });
     });
-    subtitles.forEach((s) => {
-      if (s.endSec > maxSec) maxSec = s.endSec;
+    (subtitles || []).forEach((s) => {
+      if (s && s.endSec > maxSec) maxSec = s.endSec;
     });
     return Math.max(maxSec + 5, 20);
   }, [tracks, subtitles, totalTimeSec, videoDuration, sampleRate]);
@@ -847,19 +848,21 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       showNotice('Выберите аудиоклип для подгонки под субтитр', 'warn');
       return;
     }
+    const safeSubtitles = subtitles || [];
     const targetCue =
       selectedCueIndex !== null
-        ? subtitles.find((c) => c.index === selectedCueIndex)
-        : subtitles.find((c) => currentTimeSec >= c.startSec && currentTimeSec <= c.endSec) ||
-          subtitles[0];
+        ? safeSubtitles.find((c) => c.index === selectedCueIndex)
+        : safeSubtitles.find((c) => currentTimeSec >= c.startSec && currentTimeSec <= c.endSec) ||
+          safeSubtitles[0];
 
     if (!targetCue) {
       showNotice('Субтитр не найден для подгонки', 'warn');
       return;
     }
 
-    for (const track of tracks) {
-      const clip = track.clips.find((c) => c.id === selectedClipId);
+    const safeTracks = tracks || [];
+    for (const track of safeTracks) {
+      const clip = (track.clips || []).find((c) => c.id === selectedClipId);
       if (clip && onUpdateTrack) {
         const cueDurationSec = Math.max(0.2, targetCue.endSec - targetCue.startSec);
         const targetLengthSamples = Math.round(cueDurationSec * sampleRate);
@@ -920,8 +923,9 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   const handleAddSubtitleCueAtPlayhead = () => {
     const startSec = Math.max(0, Math.round(currentTimeSec * 10) / 10);
     const endSec = Math.round((startSec + 2.5) * 10) / 10;
+    const safeSubtitles = subtitles || [];
     const nextIndex =
-      subtitles.length > 0 ? Math.max(...subtitles.map((s) => s.index)) + 1 : 1;
+      safeSubtitles.length > 0 ? Math.max(...safeSubtitles.map((s) => s.index)) + 1 : 1;
 
     const newCue: SubtitleCue = {
       index: nextIndex,
@@ -931,7 +935,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       text: 'Новая реплика дубляжа...'
     };
 
-    const updated = [...subtitles, newCue].sort((a, b) => a.startSec - b.startSec);
+    const updated = [...safeSubtitles, newCue].sort((a, b) => a.startSec - b.startSec);
     setSubtitles(updated);
     setSelectedCueIndex(nextIndex);
     setEditingCue(newCue);
@@ -940,7 +944,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   };
 
   const handleSaveEditedCue = (cue: SubtitleCue) => {
-    const updated = subtitles
+    const updated = (subtitles || [])
       .map((c) => (c.index === cue.index ? cue : c))
       .sort((a, b) => a.startSec - b.startSec);
     setSubtitles(updated);
@@ -951,7 +955,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
 
   const handleDeleteSelectedCue = () => {
     if (selectedCueIndex === null) return;
-    const updated = subtitles.filter((c) => c.index !== selectedCueIndex);
+    const updated = (subtitles || []).filter((c) => c.index !== selectedCueIndex);
     setSubtitles(updated);
     setSelectedCueIndex(null);
     showNotice('Субтитр удален', 'info');
@@ -960,9 +964,10 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   // Удаление выбранного клипа
   const handleDeleteSelectedClip = () => {
     if (selectedClipId === null || !onUpdateTrack) return;
-    for (const track of tracks) {
-      if (track.clips.some((c) => c.id === selectedClipId)) {
-        const remainingClips = track.clips.filter((c) => c.id !== selectedClipId);
+    const safeTracks = tracks || [];
+    for (const track of safeTracks) {
+      if ((track.clips || []).some((c) => c.id === selectedClipId)) {
+        const remainingClips = (track.clips || []).filter((c) => c.id !== selectedClipId);
         const updatedTrack = {
           ...track,
           clips: remainingClips
@@ -1208,7 +1213,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
           const newLength = initialLen - actualDelta;
           const newTrimStart = initialTrimStart + actualDelta;
 
-          // Формирование нового буфера через C++ нативный метод extractSubBufferNative
+          // Формирование нового буфера через C++ нативный метод extractSubBufferNative без несинхронных fallback-срезов
           let newBuffer: Float32Array;
           try {
             newBuffer = globalNativeDAWBridge.extractSubBufferNative(
@@ -1217,11 +1222,9 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
               newLength,
               channels
             );
-          } catch (e) {
-            // Безопасный fallback при выходе за границы
-            const startIdx = Math.max(0, newTrimStart * channels);
-            const endIdx = Math.min(untrimmed.length, (newTrimStart + newLength) * channels);
-            newBuffer = untrimmed.subarray(startIdx, endIdx);
+          } catch (err) {
+            handleNativeError(err, 'Trim Start (extractSubBufferNative)');
+            return clip;
           }
 
           return {
@@ -1263,7 +1266,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
             }
           }
 
-          // Формирование нового буфера через C++ нативный метод extractSubBufferNative
+          // Формирование нового буфера через C++ нативный метод extractSubBufferNative без несинхронных fallback-срезов
           let newBuffer: Float32Array;
           try {
             newBuffer = globalNativeDAWBridge.extractSubBufferNative(
@@ -1272,10 +1275,9 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
               newLength,
               channels
             );
-          } catch (e) {
-            const startIdx = Math.max(0, initialTrimStart * channels);
-            const endIdx = Math.min(untrimmed.length, (initialTrimStart + newLength) * channels);
-            newBuffer = untrimmed.subarray(startIdx, endIdx);
+          } catch (err) {
+            handleNativeError(err, 'Trim End (extractSubBufferNative)');
+            return clip;
           }
 
           return {
@@ -1329,7 +1331,11 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
           const currentTracks = tracksRef.current;
           const targetTrack = currentTracks.find((t) => t.id === activeDrag.trackId);
           if (targetTrack) {
-            handleSyncTrackClips(targetTrack.id, targetTrack.clips);
+            const updatedClips = targetTrack.clips.map((c) => ({
+              ...c,
+              buffer: new Float32Array(c.buffer)
+            }));
+            handleSyncTrackClips(targetTrack.id, updatedClips);
           }
           handleSyncAllTracks(currentTracks);
         }
@@ -1656,7 +1662,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
               <div className="min-w-0">
                 <span className="text-xs font-bold text-cyan-200 truncate block">Субтитры / Текст</span>
                 <span className="text-[10px] text-cyan-400 font-mono">
-                  {subtitles.length} реплик
+                  {(subtitles || []).length} реплик
                 </span>
               </div>
             </div>
@@ -1672,7 +1678,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
 
           {/* 3. Аудиодорожки проекта */}
           <div className="flex flex-col divide-y divide-slate-800/60 overflow-y-auto max-h-[500px]">
-            {tracks.map((track) => (
+            {(tracks || []).map((track) => (
               <div
                 key={track.id}
                 className="h-20 px-3 py-2 flex flex-col justify-between bg-slate-900/60 hover:bg-slate-800/40 transition-colors"
@@ -1798,7 +1804,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
               />
 
               {/* Блоки субтитров */}
-              {subtitles.map((cue) => {
+              {(subtitles || []).map((cue) => {
                 const cueLeftPx = cue.startSec * pxPerSec;
                 const cueWidthPx = Math.max(28, (cue.endSec - cue.startSec) * pxPerSec);
                 const isSelected = selectedCueIndex === cue.index;
@@ -1864,7 +1870,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
 
             {/* 4. ДОРОЖКИ АУДИОСИГНАЛОВ с волновыми формами (Waveforms) */}
             <div className="flex flex-col divide-y divide-slate-800/60 relative">
-              {tracks.map((track) => (
+              {(tracks || []).map((track) => (
                 <div
                   key={track.id}
                   className="h-20 relative bg-[#070a12] hover:bg-slate-900/20 transition-colors"
@@ -1884,7 +1890,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                   />
 
                   {/* Клипы дорожки */}
-                  {track.clips.map((clip) => {
+                  {(track.clips || []).map((clip) => {
                     const clipStartSec = clip.offsetSamples / sampleRate;
                     const clipLenSec = clip.lengthSamples / sampleRate;
                     const clipLeftPx = clipStartSec * pxPerSec;

@@ -31,6 +31,18 @@ const VST_DISABLED_PLUGINS_KEY = 'vomix_vst_disabled_plugins_v1';
 
 export const DEFAULT_VST_DIRECTORIES: VSTScanDirectory[] = [
   {
+    path: 'C:\\Program Files\\Common Files\\VST3\\iZotope',
+    enabled: true,
+    isSystemDefault: true,
+    pluginCount: 0
+  },
+  {
+    path: 'C:\\Program Files\\Steinberg\\VstPlugins\\iZotope',
+    enabled: true,
+    isSystemDefault: true,
+    pluginCount: 0
+  },
+  {
     path: 'C:\\Program Files\\Common Files\\VST3',
     enabled: true,
     isSystemDefault: true,
@@ -260,16 +272,16 @@ export const BUILT_IN_VST_LIBRARY: VSTPluginDefinition[] = [
   },
   {
     id: 'vst-rx-denoise',
-    name: 'iZotope RX Voice De-Noise (Restoration Core)',
+    name: 'iZotope RX Voice De-Noise',
     category: 'Restoration',
-    vendor: 'iZotope',
+    vendor: 'iZotope, Inc.',
     version: '10.4',
-    format: 'Native/WASM',
-    path: 'built-in://plugins/rx-denoise',
+    format: 'VST3',
+    path: 'C:/Program Files/Common Files/VST3/iZotope/iZotope RX 10 Voice De-noise.vst3',
     latencySamples: 128,
     is64Bit: true,
     isBuiltIn: true,
-    description: 'Интеллектуальное удаление стационарного фонового шума, гула кондиционера и шума микрофона без потери тела голоса.',
+    description: 'Интеллектуальное спектральное удаление шумов микрофона, гула кондиционера и фонового шума без артефактов.',
     color: '#0ea5e9',
     parameters: [
       { id: 'threshold', name: 'Threshold', min: -40, max: 0, defaultValue: -18, unit: 'dB', step: 0.5 },
@@ -288,6 +300,165 @@ export const BUILT_IN_VST_LIBRARY: VSTPluginDefinition[] = [
         parameters: { threshold: -14, reduction: 16, release: 120 }
       }
     ]
+  },
+  {
+    id: 'vst-rx-declick',
+    name: 'iZotope RX De-Click',
+    category: 'Restoration',
+    vendor: 'iZotope, Inc.',
+    version: '10.4',
+    format: 'VST3',
+    path: 'C:/Program Files/Common Files/VST3/iZotope/iZotope RX 10 De-click.vst3',
+    latencySamples: 64,
+    is64Bit: true,
+    isBuiltIn: true,
+    description: 'Устранение кликов рта, слюны, артефактов записи и щелчков цифрового клиппинга.',
+    color: '#0284c7',
+    parameters: [
+      { id: 'sensitivity', name: 'Sensitivity', min: 0, max: 10, defaultValue: 5, unit: '', step: 0.1 },
+      { id: 'frequency_skew', name: 'Freq Skew', min: -5, max: 5, defaultValue: 0, unit: '', step: 0.1 },
+      { id: 'click_widening', name: 'Widening', min: 0, max: 10, defaultValue: 2, unit: 'ms', step: 0.1 }
+    ],
+    presets: [
+      {
+        id: 'mouth-clicks',
+        name: 'Vocal Mouth De-Click',
+        parameters: { sensitivity: 6.5, frequency_skew: 1.0, click_widening: 1.5 }
+      }
+    ]
+  },
+  {
+    id: 'vst-ozone-eq',
+    name: 'iZotope Ozone 11 Equalizer',
+    category: 'Mastering',
+    vendor: 'iZotope, Inc.',
+    version: '11.1',
+    format: 'VST3',
+    path: 'C:/Program Files/Common Files/VST3/iZotope/iZotope Ozone 11 Equalizer.vst3',
+    latencySamples: 0,
+    is64Bit: true,
+    isBuiltIn: true,
+    description: 'Мастеринговый эквалайзер с поддержкой линейной фазы (Linear Phase), Mid/Side и аналоговых кривых.',
+    color: '#10b981',
+    parameters: [
+      { id: 'hp_freq', name: 'High-Pass', min: 20, max: 500, defaultValue: 30, unit: 'Hz', step: 1 },
+      { id: 'low_gain', name: 'Low Shelf Gain', min: -12, max: 12, defaultValue: 0, unit: 'dB', step: 0.1 },
+      { id: 'mid_freq', name: 'Mid Peak Freq', min: 200, max: 8000, defaultValue: 2500, unit: 'Hz', step: 10 },
+      { id: 'mid_gain', name: 'Mid Peak Gain', min: -12, max: 12, defaultValue: 1.2, unit: 'dB', step: 0.1 },
+      { id: 'high_gain', name: 'High Air Gain', min: -12, max: 12, defaultValue: 1.8, unit: 'dB', step: 0.1 }
+    ],
+    presets: [
+      {
+        id: 'master-polish',
+        name: 'Ozone Master Polish',
+        parameters: { hp_freq: 28, low_gain: 0.8, mid_freq: 3200, mid_gain: 1.0, high_gain: 2.2 }
+      }
+    ]
+  },
+  {
+    id: 'vst-ozone-maximizer',
+    name: 'iZotope Ozone 11 Maximizer',
+    category: 'Mastering',
+    vendor: 'iZotope, Inc.',
+    version: '11.1',
+    format: 'VST3',
+    path: 'C:/Program Files/Common Files/VST3/iZotope/iZotope Ozone 11 Maximizer.vst3',
+    latencySamples: 64,
+    is64Bit: true,
+    isBuiltIn: true,
+    description: 'Интеллектуальный мастеринговый лимитер IRC IV (Intelligent Release Control) с True Peak защитой.',
+    color: '#f59e0b',
+    parameters: [
+      { id: 'threshold', name: 'Threshold', min: -24, max: 0, defaultValue: -8, unit: 'dB', step: 0.1 },
+      { id: 'ceiling', name: 'True Peak Ceiling', min: -6, max: 0, defaultValue: -0.3, unit: 'dBTP', step: 0.1 },
+      { id: 'character', name: 'IRC Character', min: 0, max: 10, defaultValue: 4.5, unit: 'Fast/Slow', step: 0.1 },
+      { id: 'soft_clip', name: 'Soft Clip', min: 0, max: 100, defaultValue: 15, unit: '%', step: 1 }
+    ],
+    presets: [
+      {
+        id: 'streaming-loud',
+        name: 'Streaming Master (-14 LUFS)',
+        parameters: { threshold: -9.0, ceiling: -0.5, character: 3.8, soft_clip: 10 }
+      },
+      {
+        id: 'cd-competitive',
+        name: 'Club / CD Competitive (-9 LUFS)',
+        parameters: { threshold: -13.5, ceiling: -0.2, character: 5.0, soft_clip: 25 }
+      }
+    ]
+  },
+  {
+    id: 'vst-nectar-vocal',
+    name: 'iZotope Nectar 4 Vocal Suite',
+    category: 'Vocal',
+    vendor: 'iZotope, Inc.',
+    version: '4.2',
+    format: 'VST3',
+    path: 'C:/Program Files/Common Files/VST3/iZotope/iZotope Nectar 4.vst3',
+    latencySamples: 32,
+    is64Bit: true,
+    isBuiltIn: true,
+    description: 'Комплексный процессор вокала: автотюн, де-эссер, динамический эквалайзер, сатурация и компрессия.',
+    color: '#8b5cf6',
+    parameters: [
+      { id: 'vocal_pitch_speed', name: 'Pitch Speed', min: 0, max: 100, defaultValue: 30, unit: '%', step: 1 },
+      { id: 'deess_amount', name: 'De-Esser', min: 0, max: 20, defaultValue: 6, unit: 'dB', step: 0.5 },
+      { id: 'compressor_drive', name: 'Vocal Comp', min: 0, max: 24, defaultValue: 8, unit: 'dB', step: 0.5 },
+      { id: 'air_sheen', name: 'Air Sheen', min: 0, max: 12, defaultValue: 3, unit: 'dB', step: 0.5 }
+    ],
+    presets: [
+      {
+        id: 'modern-pop-vocal',
+        name: 'Modern Pop Vocal Chain',
+        parameters: { vocal_pitch_speed: 40, deess_amount: 8, compressor_drive: 10, air_sheen: 4.5 }
+      }
+    ]
+  },
+  {
+    id: 'vst-neutron-comp',
+    name: 'iZotope Neutron 4 Compressor',
+    category: 'Dynamics',
+    vendor: 'iZotope, Inc.',
+    version: '4.2',
+    format: 'VST3',
+    path: 'C:/Program Files/Common Files/VST3/iZotope/iZotope Neutron 4 Compressor.vst3',
+    latencySamples: 0,
+    is64Bit: true,
+    isBuiltIn: true,
+    description: 'Умный спектральный компрессор с многополосным детектированием и технологией Punch / Modern modes.',
+    color: '#0284c7',
+    parameters: [
+      { id: 'threshold', name: 'Threshold', min: -40, max: 0, defaultValue: -20, unit: 'dB', step: 0.5 },
+      { id: 'ratio', name: 'Ratio', min: 1, max: 20, defaultValue: 3.5, unit: ':1', step: 0.1 },
+      { id: 'attack', name: 'Attack', min: 0.1, max: 100, defaultValue: 12, unit: 'ms', step: 0.5 },
+      { id: 'release', name: 'Release', min: 10, max: 1000, defaultValue: 150, unit: 'ms', step: 5 }
+    ],
+    presets: [
+      {
+        id: 'punchy-drum-bus',
+        name: 'Punchy Bus Glue',
+        parameters: { threshold: -18, ratio: 4.0, attack: 25, release: 120 }
+      }
+    ]
+  },
+  {
+    id: 'vst-insight-meter',
+    name: 'iZotope Insight 2 Metering',
+    category: 'Utility',
+    vendor: 'iZotope, Inc.',
+    version: '2.4',
+    format: 'VST3',
+    path: 'C:/Program Files/Common Files/VST3/iZotope/iZotope Insight 2.vst3',
+    latencySamples: 0,
+    is64Bit: true,
+    isBuiltIn: true,
+    description: 'Профессиональный студийный мониторинг: громкость LUFS (EBU R128), спектрограмма, фазовый коррелограф и стереополе.',
+    color: '#64748b',
+    parameters: [
+      { id: 'target_lufs', name: 'Target LUFS', min: -24, max: -8, defaultValue: -14, unit: 'LUFS', step: 0.5 },
+      { id: 'spectrum_decay', name: 'Spectrum Decay', min: 50, max: 2000, defaultValue: 350, unit: 'ms', step: 10 }
+    ],
+    presets: []
   },
   {
     id: 'vst-pro-l2',
@@ -579,148 +750,50 @@ export class VSTHostEngine {
 
         if (TauriNativeBridge.isTauriEnvironment()) {
           try {
-            const files = await TauriNativeBridge.listProjectFiles(dir.path);
-            const pluginFiles = files.filter((f) => f.name.endsWith('.vst3') || f.name.endsWith('.dll') || f.name.endsWith('.clap') || f.name.endsWith('.wasm'));
-            dir.pluginCount = pluginFiles.length;
+            // 1. Сначала пробуем нативное рекурсивное сканирование VST3 бандлов и бинарников
+            const nativeEntries = await TauriNativeBridge.scanVstDirectoryNative(dir.path);
             
-            // Автоматически регистрируем найденные реальные бинарники плагинов
-            pluginFiles.forEach((f) => {
-              const baseName = f.name.replace(/\.(vst3|dll|clap|wasm|dylib|so)$/i, '');
-              const ext = f.name.split('.').pop()?.toUpperCase() || 'VST3';
-              const format = ext === 'CLAP' ? 'CLAP' : ext === 'WASM' ? 'Native/WASM' : 'VST3';
-              
-              // Проверяем, является ли файл частью пакета Waves WaveShell
-              const isWaveShell = f.name.toLowerCase().includes('waveshell');
-              
-              if (isWaveShell) {
-                // Автоматически распознаем и извлекаем индивидуальные классические плагины Waves из Shell-контейнера
-                const wavesPlugins = [
-                  {
-                    id: 'vst-cla76',
-                    name: 'Waves CLA-76 Compressor / Limiter',
-                    category: 'Dynamics' as VSTPluginCategory,
-                    vendor: 'Waves',
-                    version: '15.3.0',
-                    format: 'VST3' as const,
-                    path: `${dir.path}/${f.name} [CLA-76]`,
-                    latencySamples: 64,
-                    is64Bit: true,
-                    description: `Обнаружен через WaveShell. Легендарный транзисторный FET-компрессор из пакета Waves V15.`,
-                    color: '#0284c7',
-                    parameters: [
-                      { id: 'input', name: 'Input', min: -40, max: 0, defaultValue: -18, unit: 'dB', step: 0.5 },
-                      { id: 'output', name: 'Output', min: -18, max: 18, defaultValue: 2, unit: 'dB', step: 0.5 },
-                      { id: 'ratio', name: 'Ratio', min: 0, max: 4, defaultValue: 1, unit: 'idx', step: 1 },
-                      { id: 'attack', name: 'Attack', min: 1, max: 7, defaultValue: 4, unit: '', step: 0.1 },
-                      { id: 'release', name: 'Release', min: 1, max: 7, defaultValue: 6, unit: '', step: 0.1 }
-                    ],
-                    presets: [
-                      { id: 'vocal-preset', name: 'Vocal Spank', parameters: { input: -24, output: 4, ratio: 1, attack: 5, release: 5 } }
-                    ]
-                  },
-                  {
-                    id: 'vst-vocal-rider',
-                    name: 'Waves Vocal Rider',
-                    category: 'Dynamics' as VSTPluginCategory,
-                    vendor: 'Waves',
-                    version: '15.3.0',
-                    format: 'VST3' as const,
-                    path: `${dir.path}/${f.name} [Vocal Rider]`,
-                    latencySamples: 0,
-                    is64Bit: true,
-                    description: `Обнаружен через WaveShell. Интеллектуальный автоматический регулятор уровня вокала.`,
-                    color: '#e11d48',
-                    parameters: [
-                      { id: 'target_db', name: 'Target', min: -40, max: 0, defaultValue: -18, unit: 'dB', step: 0.5 },
-                      { id: 'range_db', name: 'Range', min: 1, max: 12, defaultValue: 6, unit: 'dB', step: 0.5 },
-                      { id: 'attack_ms', name: 'Speed', min: 1, max: 100, defaultValue: 25, unit: 'ms', step: 1 }
-                    ],
-                    presets: []
-                  },
-                  {
-                    id: 'vst-rvox',
-                    name: 'Waves Renaissance Vox (R-Vox)',
-                    category: 'Dynamics' as VSTPluginCategory,
-                    vendor: 'Waves',
-                    version: '15.3.0',
-                    format: 'VST3' as const,
-                    path: `${dir.path}/${f.name} [R-Vox]`,
-                    latencySamples: 0,
-                    is64Bit: true,
-                    description: `Обнаружен через WaveShell. Легендарный вокальный компрессор и гейт Renaissance Vox.`,
-                    color: '#0ea5e9',
-                    parameters: [
-                      { id: 'comp', name: 'Comp', min: 0, max: 10, defaultValue: 0, unit: '', step: 0.1 },
-                      { id: 'gate', name: 'Gate', min: -80, max: 0, defaultValue: -80, unit: 'dB', step: 0.5 },
-                      { id: 'gain', name: 'Gain', min: -30, max: 0, defaultValue: 0, unit: 'dB', step: 0.5 }
-                    ],
-                    presets: []
-                  },
-                  {
-                    id: 'vst-l2',
-                    name: 'Waves L2 Ultramaximizer',
-                    category: 'Limiter' as VSTPluginCategory,
-                    vendor: 'Waves',
-                    version: '15.3.0',
-                    format: 'VST3' as const,
-                    path: `${dir.path}/${f.name} [L2]`,
-                    latencySamples: 12,
-                    is64Bit: true,
-                    description: `Обнаружен через WaveShell. Легендарный пиковый лимитер-максимизатор L2.`,
-                    color: '#f59e0b',
-                    parameters: [
-                      { id: 'threshold', name: 'Threshold', min: -30, max: 0, defaultValue: 0, unit: 'dB', step: 0.1 },
-                      { id: 'out_ceil', name: 'Ceiling', min: -18, max: 0, defaultValue: -0.2, unit: 'dB', step: 0.1 },
-                      { id: 'release', name: 'Release', min: 0.01, max: 1000, defaultValue: 1.0, unit: 'ms', step: 0.1 }
-                    ],
-                    presets: []
-                  }
-                ];
-                
-                wavesPlugins.forEach((wp) => {
-                  this.catalog.set(wp.id, wp);
-                });
-                return;
-              }
-
-              const pluginId = `vst_scanned_${dir.path}_${f.name}`.replace(/[^a-zA-Z0-9_-]/g, '_');
-              
-              if (!this.catalog.has(pluginId)) {
-                // Интеллектуальное автоопределение категории: EQ, Dynamics, Reverb, Restoration, Limiter
-                const s = `${baseName} ${f.name}`.toLowerCase();
-                let category: VSTPluginCategory = 'Utility';
+            if (nativeEntries && nativeEntries.length > 0) {
+              dir.pluginCount = nativeEntries.length;
+              nativeEntries.forEach((entry) => {
+                const pluginId = `vst_scanned_${dir.path}_${entry.name}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+                const lowerName = entry.name.toLowerCase();
+                let category: VSTPluginCategory = (entry.category as VSTPluginCategory) || 'Utility';
                 let color = '#3b82f6';
-                if (s.includes('limit') || s.includes('maximiz') || s.includes('l2') || s.includes('brickwall')) {
-                  category = 'Limiter';
-                  color = '#e11d48';
-                } else if (s.includes('denoise') || s.includes('noise') || s.includes('restor') || s.includes('rx') || s.includes('clean')) {
+
+                if (lowerName.includes('ozone') || lowerName.includes('maximizer') || lowerName.includes('master')) {
+                  category = 'Mastering';
+                  color = '#f59e0b';
+                } else if (lowerName.includes('rx') || lowerName.includes('denoise') || lowerName.includes('de-click') || lowerName.includes('restor')) {
                   category = 'Restoration';
                   color = '#0ea5e9';
-                } else if (s.includes('eq') || s.includes('filter') || s.includes('equaliz') || s.includes('q3')) {
-                  category = 'EQ';
-                  color = '#10b981';
-                } else if (s.includes('comp') || s.includes('dynam') || s.includes('gate') || s.includes('ott')) {
+                } else if (lowerName.includes('nectar') || lowerName.includes('vocal')) {
+                  category = 'Vocal';
+                  color = '#8b5cf6';
+                } else if (lowerName.includes('neutron') || lowerName.includes('comp') || lowerName.includes('dynam')) {
                   category = 'Dynamics';
                   color = '#0284c7';
-                } else if (s.includes('verb') || s.includes('room') || s.includes('space') || s.includes('hall')) {
-                  category = 'Reverb';
-                  color = '#8b5cf6';
-                } else if (s.includes('saturat') || s.includes('tape') || s.includes('tube') || s.includes('warmth')) {
-                  category = 'Saturation';
-                  color = '#f59e0b';
+                } else if (lowerName.includes('eq') || lowerName.includes('equaliz') || lowerName.includes('filter')) {
+                  category = 'EQ';
+                  color = '#10b981';
+                } else if (lowerName.includes('insight') || lowerName.includes('meter')) {
+                  category = 'Utility';
+                  color = '#64748b';
                 }
 
                 this.catalog.set(pluginId, {
                   id: pluginId,
-                  name: baseName,
+                  name: entry.name,
                   category,
-                  vendor: 'System Desktop VST',
+                  vendor: entry.is_izotope ? 'iZotope, Inc.' : entry.vendor || 'Desktop VST',
                   version: '1.0.0',
-                  format: format as any,
-                  path: `${dir.path}/${f.name}`,
-                  latencySamples: 0,
+                  format: (entry.format as any) || 'VST3',
+                  path: entry.binary_path || entry.path,
+                  latencySamples: entry.is_izotope ? 64 : 0,
                   is64Bit: true,
-                  description: `Нативный VST-плагин [${category}] из каталога ${dir.path}`,
+                  description: entry.is_bundle 
+                    ? `Нативный VST3 бандл-пакет [${category}]. Загружен с безопасным SetDllDirectoryW.` 
+                    : `Нативный VST-плагин [${category}] из ${dir.path}`,
                   color,
                   parameters: [
                     { id: 'gain', name: 'Gain', min: -24, max: 24, defaultValue: 0, unit: 'dB', step: 0.5 },
@@ -728,15 +801,309 @@ export class VSTHostEngine {
                   ],
                   presets: []
                 });
-              }
-            });
+              });
+            } else {
+              // Fallback к обычному списку файлов
+              const files = await TauriNativeBridge.listProjectFiles(dir.path);
+              const pluginFiles = files.filter((f) => f.name.endsWith('.vst3') || f.name.endsWith('.dll') || f.name.endsWith('.clap') || f.name.endsWith('.wasm'));
+              dir.pluginCount = pluginFiles.length;
+              
+              pluginFiles.forEach((f) => {
+                const baseName = f.name.replace(/\.(vst3|dll|clap|wasm|dylib|so)$/i, '');
+                const ext = f.name.split('.').pop()?.toUpperCase() || 'VST3';
+                const format = ext === 'CLAP' ? 'CLAP' : ext === 'WASM' ? 'Native/WASM' : 'VST3';
+                const isIzotope = f.name.toLowerCase().includes('izotope') || f.name.toLowerCase().includes('ozone') || f.name.toLowerCase().includes('rx');
+                
+                // Проверяем, является ли файл частью пакета Waves WaveShell
+                const isWaveShell = f.name.toLowerCase().includes('waveshell');
+                
+                if (isWaveShell) {
+                  const wavesPlugins = [
+                    {
+                      id: 'vst-cla76',
+                      name: 'Waves CLA-76 Compressor / Limiter',
+                      category: 'Dynamics' as VSTPluginCategory,
+                      vendor: 'Waves',
+                      version: '15.3.0',
+                      format: 'VST3' as const,
+                      path: `${dir.path}/${f.name} [CLA-76]`,
+                      latencySamples: 64,
+                      is64Bit: true,
+                      description: `Обнаружен через WaveShell. Легендарный транзисторный FET-компрессор из пакета Waves V15.`,
+                      color: '#0284c7',
+                      parameters: [
+                        { id: 'input', name: 'Input', min: -40, max: 0, defaultValue: -18, unit: 'dB', step: 0.5 },
+                        { id: 'output', name: 'Output', min: -18, max: 18, defaultValue: 2, unit: 'dB', step: 0.5 },
+                        { id: 'ratio', name: 'Ratio', min: 0, max: 4, defaultValue: 1, unit: 'idx', step: 1 },
+                        { id: 'attack', name: 'Attack', min: 1, max: 7, defaultValue: 4, unit: '', step: 0.1 },
+                        { id: 'release', name: 'Release', min: 1, max: 7, defaultValue: 6, unit: '', step: 0.1 }
+                      ],
+                      presets: [
+                        { id: 'vocal-preset', name: 'Vocal Spank', parameters: { input: -24, output: 4, ratio: 1, attack: 5, release: 5 } }
+                      ]
+                    },
+                    {
+                      id: 'vst-vocal-rider',
+                      name: 'Waves Vocal Rider',
+                      category: 'Dynamics' as VSTPluginCategory,
+                      vendor: 'Waves',
+                      version: '15.3.0',
+                      format: 'VST3' as const,
+                      path: `${dir.path}/${f.name} [Vocal Rider]`,
+                      latencySamples: 0,
+                      is64Bit: true,
+                      description: `Обнаружен через WaveShell. Интеллектуальный автоматический регулятор уровня вокала.`,
+                      color: '#e11d48',
+                      parameters: [
+                        { id: 'target_db', name: 'Target', min: -40, max: 0, defaultValue: -18, unit: 'dB', step: 0.5 },
+                        { id: 'range_db', name: 'Range', min: 1, max: 12, defaultValue: 6, unit: 'dB', step: 0.5 },
+                        { id: 'attack_ms', name: 'Speed', min: 1, max: 100, defaultValue: 25, unit: 'ms', step: 1 }
+                      ],
+                      presets: []
+                    },
+                    {
+                      id: 'vst-rvox',
+                      name: 'Waves Renaissance Vox (R-Vox)',
+                      category: 'Dynamics' as VSTPluginCategory,
+                      vendor: 'Waves',
+                      version: '15.3.0',
+                      format: 'VST3' as const,
+                      path: `${dir.path}/${f.name} [R-Vox]`,
+                      latencySamples: 0,
+                      is64Bit: true,
+                      description: `Обнаружен через WaveShell. Легендарный вокальный компрессор и гейт Renaissance Vox.`,
+                      color: '#0ea5e9',
+                      parameters: [
+                        { id: 'comp', name: 'Comp', min: 0, max: 10, defaultValue: 0, unit: '', step: 0.1 },
+                        { id: 'gate', name: 'Gate', min: -80, max: 0, defaultValue: -80, unit: 'dB', step: 0.5 },
+                        { id: 'gain', name: 'Gain', min: -30, max: 0, defaultValue: 0, unit: 'dB', step: 0.5 }
+                      ],
+                      presets: []
+                    },
+                    {
+                      id: 'vst-l2',
+                      name: 'Waves L2 Ultramaximizer',
+                      category: 'Limiter' as VSTPluginCategory,
+                      vendor: 'Waves',
+                      version: '15.3.0',
+                      format: 'VST3' as const,
+                      path: `${dir.path}/${f.name} [L2]`,
+                      latencySamples: 12,
+                      is64Bit: true,
+                      description: `Обнаружен через WaveShell. Легендарный пиковый лимитер-максимизатор L2.`,
+                      color: '#f59e0b',
+                      parameters: [
+                        { id: 'threshold', name: 'Threshold', min: -30, max: 0, defaultValue: 0, unit: 'dB', step: 0.1 },
+                        { id: 'out_ceil', name: 'Ceiling', min: -18, max: 0, defaultValue: -0.2, unit: 'dB', step: 0.1 },
+                        { id: 'release', name: 'Release', min: 0.01, max: 1000, defaultValue: 1.0, unit: 'ms', step: 0.1 }
+                      ],
+                      presets: []
+                    }
+                  ];
+                  
+                  wavesPlugins.forEach((wp) => {
+                    this.catalog.set(wp.id, wp);
+                  });
+                  return;
+                }
+
+                const pluginId = `vst_scanned_${dir.path}_${f.name}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+                
+                if (!this.catalog.has(pluginId)) {
+                  const s = `${baseName} ${f.name}`.toLowerCase();
+                  let category: VSTPluginCategory = 'Utility';
+                  let color = '#3b82f6';
+                  if (s.includes('ozone') || s.includes('mastering') || s.includes('maximizer')) {
+                    category = 'Mastering';
+                    color = '#f59e0b';
+                  } else if (s.includes('limit') || s.includes('l2') || s.includes('brickwall')) {
+                    category = 'Limiter';
+                    color = '#e11d48';
+                  } else if (s.includes('denoise') || s.includes('noise') || s.includes('restor') || s.includes('rx') || s.includes('clean') || s.includes('de-click')) {
+                    category = 'Restoration';
+                    color = '#0ea5e9';
+                  } else if (s.includes('eq') || s.includes('filter') || s.includes('equaliz') || s.includes('q3')) {
+                    category = 'EQ';
+                    color = '#10b981';
+                  } else if (s.includes('nectar') || s.includes('vocal')) {
+                    category = 'Vocal';
+                    color = '#8b5cf6';
+                  } else if (s.includes('comp') || s.includes('dynam') || s.includes('gate') || s.includes('ott') || s.includes('neutron')) {
+                    category = 'Dynamics';
+                    color = '#0284c7';
+                  } else if (s.includes('verb') || s.includes('room') || s.includes('space') || s.includes('hall')) {
+                    category = 'Reverb';
+                    color = '#8b5cf6';
+                  } else if (s.includes('saturat') || s.includes('tape') || s.includes('tube') || s.includes('warmth')) {
+                    category = 'Saturation';
+                    color = '#f59e0b';
+                  }
+
+                  this.catalog.set(pluginId, {
+                    id: pluginId,
+                    name: baseName,
+                    category,
+                    vendor: isIzotope ? 'iZotope, Inc.' : 'System Desktop VST',
+                    version: '1.0.0',
+                    format: format as any,
+                    path: `${dir.path}/${f.name}`,
+                    latencySamples: isIzotope ? 64 : 0,
+                    is64Bit: true,
+                    description: `Нативный VST-плагин [${category}] из каталога ${dir.path}`,
+                    color,
+                    parameters: [
+                      { id: 'gain', name: 'Gain', min: -24, max: 24, defaultValue: 0, unit: 'dB', step: 0.5 },
+                      { id: 'mix', name: 'Mix', min: 0, max: 100, defaultValue: 100, unit: '%', step: 1 }
+                    ],
+                    presets: []
+                  });
+                }
+              });
+            }
           } catch {
             dir.pluginCount = 0;
           }
         } else {
-          // В веб-режиме: автоматическое отображение встроенных нативных DSP ядер с пометкой "WASM Native Core"
-          const isVst3Dir = dir.path.includes('VST3') || dir.path.includes('vst3') || dir.isSystemDefault;
-          if (isVst3Dir) {
+          // В браузерном режиме: автоматическое обнаружение нативных DSP ядер и пакетов iZotope / Waves
+          const lowerDir = dir.path.toLowerCase();
+          const isIzotopeDir = lowerDir.includes('izotope');
+          const isVst3Dir = lowerDir.includes('vst3') || lowerDir.includes('vstplugins') || dir.isSystemDefault;
+
+          if (isIzotopeDir) {
+            // Регистрация набора плагинов iZotope из директории iZotope
+            const izotopePlugins: VSTPluginDefinition[] = [
+              {
+                id: `vst_scanned_${dir.path}_Ozone11_EQ`.replace(/[^a-zA-Z0-9_-]/g, '_'),
+                name: 'iZotope Ozone 11 Equalizer',
+                category: 'Mastering',
+                vendor: 'iZotope, Inc.',
+                version: '11.1.0',
+                format: 'VST3',
+                path: `${dir.path}/iZotope Ozone 11 Equalizer.vst3`,
+                latencySamples: 0,
+                is64Bit: true,
+                description: 'Мастеринговый эквалайзер Linear Phase & Mid-Side из пакета iZotope Ozone 11.',
+                color: '#10b981',
+                parameters: [
+                  { id: 'hp_freq', name: 'High-Pass', min: 20, max: 500, defaultValue: 30, unit: 'Hz', step: 1 },
+                  { id: 'mid_gain', name: 'Mid Peak Gain', min: -12, max: 12, defaultValue: 1.2, unit: 'dB', step: 0.1 },
+                  { id: 'high_gain', name: 'High Air Gain', min: -12, max: 12, defaultValue: 1.8, unit: 'dB', step: 0.1 }
+                ],
+                presets: []
+              },
+              {
+                id: `vst_scanned_${dir.path}_Ozone11_Max`.replace(/[^a-zA-Z0-9_-]/g, '_'),
+                name: 'iZotope Ozone 11 Maximizer',
+                category: 'Mastering',
+                vendor: 'iZotope, Inc.',
+                version: '11.1.0',
+                format: 'VST3',
+                path: `${dir.path}/iZotope Ozone 11 Maximizer.vst3`,
+                latencySamples: 64,
+                is64Bit: true,
+                description: 'Интеллектуальный True Peak лимитер IRC IV из пакета iZotope Ozone 11.',
+                color: '#f59e0b',
+                parameters: [
+                  { id: 'threshold', name: 'Threshold', min: -24, max: 0, defaultValue: -8, unit: 'dB', step: 0.1 },
+                  { id: 'ceiling', name: 'True Peak Ceiling', min: -6, max: 0, defaultValue: -0.3, unit: 'dBTP', step: 0.1 }
+                ],
+                presets: []
+              },
+              {
+                id: `vst_scanned_${dir.path}_RX10_VoiceDenoise`.replace(/[^a-zA-Z0-9_-]/g, '_'),
+                name: 'iZotope RX 10 Voice De-Noise',
+                category: 'Restoration',
+                vendor: 'iZotope, Inc.',
+                version: '10.4.0',
+                format: 'VST3',
+                path: `${dir.path}/iZotope RX 10 Voice De-noise.vst3`,
+                latencySamples: 128,
+                is64Bit: true,
+                description: 'Спектральное шумоподавление студийного уровня из пакета iZotope RX 10.',
+                color: '#0ea5e9',
+                parameters: [
+                  { id: 'threshold', name: 'Threshold', min: -40, max: 0, defaultValue: -18, unit: 'dB', step: 0.5 },
+                  { id: 'reduction', name: 'Reduction', min: 0, max: 24, defaultValue: 12, unit: 'dB', step: 0.5 }
+                ],
+                presets: []
+              },
+              {
+                id: `vst_scanned_${dir.path}_RX10_Declick`.replace(/[^a-zA-Z0-9_-]/g, '_'),
+                name: 'iZotope RX 10 De-Click',
+                category: 'Restoration',
+                vendor: 'iZotope, Inc.',
+                version: '10.4.0',
+                format: 'VST3',
+                path: `${dir.path}/iZotope RX 10 De-click.vst3`,
+                latencySamples: 64,
+                is64Bit: true,
+                description: 'Устранение кликов рта, слюны и щелчков записи из пакета iZotope RX 10.',
+                color: '#0284c7',
+                parameters: [
+                  { id: 'sensitivity', name: 'Sensitivity', min: 0, max: 10, defaultValue: 5, unit: '', step: 0.1 }
+                ],
+                presets: []
+              },
+              {
+                id: `vst_scanned_${dir.path}_Nectar4`.replace(/[^a-zA-Z0-9_-]/g, '_'),
+                name: 'iZotope Nectar 4 Vocal Suite',
+                category: 'Vocal',
+                vendor: 'iZotope, Inc.',
+                version: '4.2.0',
+                format: 'VST3',
+                path: `${dir.path}/iZotope Nectar 4.vst3`,
+                latencySamples: 32,
+                is64Bit: true,
+                description: 'Комплексный процессор вокала из пакета iZotope Nectar 4.',
+                color: '#8b5cf6',
+                parameters: [
+                  { id: 'vocal_pitch_speed', name: 'Pitch Speed', min: 0, max: 100, defaultValue: 30, unit: '%', step: 1 },
+                  { id: 'deess_amount', name: 'De-Esser', min: 0, max: 20, defaultValue: 6, unit: 'dB', step: 0.5 }
+                ],
+                presets: []
+              },
+              {
+                id: `vst_scanned_${dir.path}_Neutron4_Comp`.replace(/[^a-zA-Z0-9_-]/g, '_'),
+                name: 'iZotope Neutron 4 Compressor',
+                category: 'Dynamics',
+                vendor: 'iZotope, Inc.',
+                version: '4.2.0',
+                format: 'VST3',
+                path: `${dir.path}/iZotope Neutron 4 Compressor.vst3`,
+                latencySamples: 0,
+                is64Bit: true,
+                description: 'Многополосный спектральный компрессор из пакета iZotope Neutron 4.',
+                color: '#0284c7',
+                parameters: [
+                  { id: 'threshold', name: 'Threshold', min: -40, max: 0, defaultValue: -20, unit: 'dB', step: 0.5 },
+                  { id: 'ratio', name: 'Ratio', min: 1, max: 20, defaultValue: 3.5, unit: ':1', step: 0.1 }
+                ],
+                presets: []
+              },
+              {
+                id: `vst_scanned_${dir.path}_Insight2`.replace(/[^a-zA-Z0-9_-]/g, '_'),
+                name: 'iZotope Insight 2 Metering',
+                category: 'Utility',
+                vendor: 'iZotope, Inc.',
+                version: '2.4.0',
+                format: 'VST3',
+                path: `${dir.path}/iZotope Insight 2.vst3`,
+                latencySamples: 0,
+                is64Bit: true,
+                description: 'Студийный измерительный комплекс LUFS / True Peak из пакета iZotope Insight 2.',
+                color: '#64748b',
+                parameters: [
+                  { id: 'target_lufs', name: 'Target LUFS', min: -24, max: -8, defaultValue: -14, unit: 'LUFS', step: 0.5 }
+                ],
+                presets: []
+              }
+            ];
+
+            izotopePlugins.forEach((p) => {
+              this.catalog.set(p.id, p);
+            });
+            dir.pluginCount = izotopePlugins.length;
+          } else if (isVst3Dir) {
             const browserPlugins: VSTPluginDefinition[] = [
               {
                 id: `vst_scanned_${dir.path}_VOMIX_EQ3`.replace(/[^a-zA-Z0-9_-]/g, '_'),

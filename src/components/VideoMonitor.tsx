@@ -161,9 +161,9 @@ export const VideoMonitor: React.FC<VideoMonitorProps> = ({
 
     return () => {
       cancelAnimationFrame(animId);
-      if (video && video.srcObject) {
+      if (video && video.srcObject && typeof (video.srcObject as MediaStream).getTracks === 'function') {
         const s = video.srcObject as MediaStream;
-        s.getTracks().forEach((t) => t.stop());
+        (s.getTracks() || []).forEach((t) => t.stop());
       }
     };
   }, [videoSrc, currentTimeSec, fps]);

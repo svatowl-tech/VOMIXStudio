@@ -892,13 +892,42 @@ bool setMasterLimiter(uintptr_t mixerPtr, bool enabled, float ceilingDb) {
 }
 
 // ============================================================================
-// Universal VST C-API: Управление слотами дорожек и мастер-шины
+// Universal VST C-API: Управление слотами дорожек, шины вокалов и мастер-шины
 // ============================================================================
+
+EMSCRIPTEN_KEEPALIVE
+bool setVocalBusVolume(uintptr_t mixerPtr, float volumeDb) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    mixer->vocalBusVolumeDb = volumeDb;
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool setVocalBusAutoDucker(uintptr_t mixerPtr, bool enabled, float thresholdDb, float duckDepthDb, float attackMs, float releaseMs) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    mixer->vocalBusAutoDucker.enabled = enabled;
+    mixer->vocalBusAutoDucker.thresholdDb = thresholdDb;
+    mixer->vocalBusAutoDucker.duckDepthDb = duckDepthDb;
+    mixer->vocalBusAutoDucker.attackMs = attackMs;
+    mixer->vocalBusAutoDucker.releaseMs = releaseMs;
+    mixer->vocalBusAutoDucker.updateConstants();
+    return true;
+}
 
 EMSCRIPTEN_KEEPALIVE
 bool loadTrackPlugin(uintptr_t mixerPtr, uint32_t trackId, int slotIdx, int pluginTypeId) {
     auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
     if (!mixer) return false;
+    if (trackId == 999) {
+        mixer->loadVocalBusPlugin(slotIdx, pluginTypeId);
+        return true;
+    }
+    if (trackId == 1000) {
+        mixer->loadMasterPlugin(slotIdx, pluginTypeId);
+        return true;
+    }
     DAWCore::Track* track = mixer->getTrack(trackId);
     if (!track) return false;
     track->loadPlugin(slotIdx, pluginTypeId);
@@ -909,6 +938,14 @@ EMSCRIPTEN_KEEPALIVE
 bool setTrackPluginParam(uintptr_t mixerPtr, uint32_t trackId, int slotIdx, int paramId, float normalizedValue) {
     auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
     if (!mixer) return false;
+    if (trackId == 999) {
+        mixer->setVocalBusPluginParam(slotIdx, paramId, normalizedValue);
+        return true;
+    }
+    if (trackId == 1000) {
+        mixer->setMasterPluginParam(slotIdx, paramId, normalizedValue);
+        return true;
+    }
     DAWCore::Track* track = mixer->getTrack(trackId);
     if (!track) return false;
     track->setPluginParam(slotIdx, paramId, normalizedValue);
@@ -919,6 +956,14 @@ EMSCRIPTEN_KEEPALIVE
 bool setTrackPluginBypass(uintptr_t mixerPtr, uint32_t trackId, int slotIdx, int bypass) {
     auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
     if (!mixer) return false;
+    if (trackId == 999) {
+        mixer->setVocalBusPluginBypass(slotIdx, bypass != 0);
+        return true;
+    }
+    if (trackId == 1000) {
+        mixer->setMasterPluginBypass(slotIdx, bypass != 0);
+        return true;
+    }
     DAWCore::Track* track = mixer->getTrack(trackId);
     if (!track) return false;
     track->setPluginBypass(slotIdx, bypass != 0);
@@ -929,6 +974,14 @@ EMSCRIPTEN_KEEPALIVE
 bool setTrackPluginWetDry(uintptr_t mixerPtr, uint32_t trackId, int slotIdx, float wetDry) {
     auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
     if (!mixer) return false;
+    if (trackId == 999) {
+        mixer->setVocalBusPluginWetDry(slotIdx, wetDry);
+        return true;
+    }
+    if (trackId == 1000) {
+        mixer->setMasterPluginWetDry(slotIdx, wetDry);
+        return true;
+    }
     DAWCore::Track* track = mixer->getTrack(trackId);
     if (!track) return false;
     track->setPluginWetDry(slotIdx, wetDry);
@@ -972,6 +1025,13 @@ float getTrackPeak(uintptr_t mixerPtr, int trackId, int channel) {
     auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
     if (!mixer) return 0.0f;
     return mixer->getPeak(trackId, channel);
+}
+
+EMSCRIPTEN_KEEPALIVE
+float getTrackRMS(uintptr_t mixerPtr, int trackId, int channel) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return 0.0f;
+    return mixer->getRMS(trackId, channel);
 }
 
 } // extern "C"

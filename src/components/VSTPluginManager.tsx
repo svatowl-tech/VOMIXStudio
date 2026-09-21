@@ -278,25 +278,54 @@ export const VSTPluginManager: React.FC = () => {
         </div>
 
         {/* Форма добавления пути */}
-        <form onSubmit={handleAddCustomFolder} className="flex gap-2">
-          <div className="relative flex-1">
-            <FolderPlus size={14} className="absolute left-3 top-3 text-slate-500" />
-            <input
-              type="text"
-              placeholder="Введите путь к папке (например: C:\VstPlugins или /Library/Audio/Plug-Ins/VST3)..."
-              value={customFolderPath}
-              onChange={(e) => setCustomFolderPath(e.target.value)}
-              className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500"
-            />
+        <div className="space-y-2">
+          <form onSubmit={handleAddCustomFolder} className="flex gap-2">
+            <div className="relative flex-1">
+              <FolderPlus size={14} className="absolute left-3 top-3 text-slate-500" />
+              <input
+                type="text"
+                placeholder="Введите путь к папке (например: C:\Program Files\Common Files\VST3\iZotope)..."
+                value={customFolderPath}
+                onChange={(e) => setCustomFolderPath(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500"
+              />
+            </div>
+            <button
+              type="submit"
+              className="px-4 py-2 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-sm"
+            >
+              <Plus size={13} className="text-emerald-400" />
+              <span>Добавить папку</span>
+            </button>
+          </form>
+
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <button
+              type="button"
+              onClick={() => {
+                globalVSTHostEngine.addScanDirectory('C:\\Program Files\\Common Files\\VST3\\iZotope');
+                setScanDirs([...globalVSTHostEngine.getScanDirectories()]);
+                showNotice('Добавлена папка iZotope VST3');
+              }}
+              className="px-2.5 py-1 bg-cyan-950/40 hover:bg-cyan-900/50 border border-cyan-800/50 text-cyan-300 rounded-lg text-[11px] font-medium flex items-center gap-1 cursor-pointer"
+            >
+              <FolderPlus size={12} />
+              <span>+ iZotope VST3 (Win)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                globalVSTHostEngine.addScanDirectory('C:\\Program Files\\Steinberg\\VstPlugins\\iZotope');
+                setScanDirs([...globalVSTHostEngine.getScanDirectories()]);
+                showNotice('Добавлена папка Steinberg iZotope');
+              }}
+              className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 rounded-lg text-[11px] font-medium flex items-center gap-1 cursor-pointer"
+            >
+              <FolderPlus size={12} />
+              <span>+ Steinberg iZotope</span>
+            </button>
           </div>
-          <button
-            type="submit"
-            className="px-4 py-2 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-sm"
-          >
-            <Plus size={13} className="text-emerald-400" />
-            <span>Добавить папку</span>
-          </button>
-        </form>
+        </div>
 
         {/* Список директорий */}
         <div className="space-y-2">
@@ -407,7 +436,7 @@ export const VSTPluginManager: React.FC = () => {
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
-            {['all', 'EQ', 'Dynamics', 'Reverb', 'Restoration', 'Limiter', 'Saturation', 'Utility'].map((cat) => (
+            {['all', 'Mastering', 'Restoration', 'Vocal', 'Dynamics', 'EQ', 'Reverb', 'Limiter', 'Saturation', 'Utility'].map((cat) => (
               <button
                 key={cat}
                 onClick={() => setSelectedCategory(cat)}
@@ -464,6 +493,11 @@ export const VSTPluginManager: React.FC = () => {
                           {isWasmCore && (
                             <span className="text-[9px] px-1.5 py-0.2 rounded bg-purple-950/60 text-purple-300 border border-purple-800/50 font-mono">
                               WASM Native Core
+                            </span>
+                          )}
+                          {(plugin.vendor?.toLowerCase().includes('izotope') || plugin.name.toLowerCase().includes('izotope') || plugin.path?.toLowerCase().includes('izotope')) && (
+                            <span className="text-[9px] px-1.5 py-0.2 rounded bg-cyan-950/80 text-cyan-300 border border-cyan-700/60 font-mono font-semibold">
+                              iZotope Suite
                             </span>
                           )}
                         </div>

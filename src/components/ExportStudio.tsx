@@ -69,7 +69,7 @@ export const ExportStudio: React.FC<ExportStudioProps> = ({ tracks, master, sour
     setIsRendering(true);
     try {
       const stems = await globalRenderManager.exportStems(tracks, master, sampleRate, bitDepth);
-      stems.forEach((item) => {
+      (stems || []).forEach((item) => {
         triggerFileDownload(item.blob, item.fileName);
       });
     } catch (e) {

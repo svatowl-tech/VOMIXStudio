@@ -648,13 +648,13 @@ public:
 };
 
 // ============================================================================
-// 8. Brickwall True Peak Limiter (PluginTypeId = 8)
+// 8. Brickwall True Peak Limiter / Waves L2 (PluginTypeId = 8)
 // ============================================================================
 class NativeLimiterPlugin : public NativePluginBase {
     SoftLimiter limiter;
 public:
     NativeLimiterPlugin()
-        : NativePluginBase("Brickwall Limiter", "Limiter", "vst-limiter", 0)
+        : NativePluginBase("Brickwall Limiter / Waves L2", "Limiter", "vst-limiter", 0)
     {
         registerParam(0, "Bypass", "", 0.0f);
         registerParam(1, "Ceiling", "dB", 0.85f); // -0.5 dB
@@ -708,11 +708,474 @@ public:
 };
 
 // ============================================================================
-// Factory Helper
+// 9. Waves Renaissance Vox (R-Vox) (PluginTypeId = 9)
 // ============================================================================
-inline std::unique_ptr<vomix::vst::IVSTPluginInstance> createNativePluginInstance(int pluginTypeId, double sampleRate) {
+class NativeRVoxPlugin : public NativePluginBase {
+    SoftKneeCompressor comp;
+    NoiseGate gate;
+
+public:
+    NativeRVoxPlugin()
+        : NativePluginBase("Waves Renaissance Vox (R-Vox)", "Dynamics", "vst-rvox", 0)
+    {
+        registerParam(0, "Bypass", "", 0.0f);
+        registerParam(1, "Comp", "dB", 0.35f);    // 0 .. -36 dB compression
+        registerParam(2, "Gate", "dB", 0.0f);     // -inf .. -24 dB gate
+        registerParam(3, "Gain", "dB", 0.5f);     // -24 .. +24 dB output
+        comp.setup(static_cast<float>(sampleRate));
+        gate.setup(static_cast<float>(sampleRate));
+        updateParameters();
+    }
+
+    void updateParameters() {
+        float compDb = paramValues[1] * -36.0f; // 0 .. -36 dB
+        comp.thresholdDb = -12.0f + compDb * 0.7f;
+        comp.ratio = 3.5f + paramValues[1] * 4.5f; // Dynamic ratio up to 8:1
+        comp.attackMs = 1.0f;
+        comp.releaseMs = 80.0f;
+        comp.makeupGainDb = -compDb * 0.6f + (paramValues[3] - 0.5f) * 24.0f;
+        comp.updateTimeConstants();
+
+        float gateDb = -80.0f + paramValues[2] * 56.0f; // -80 .. -24 dB
+        gate.thresholdDb = gateDb;
+        gate.holdMs = 20.0f;
+        gate.releaseMs = 100.0f;
+        gate.updateTimeConstants();
+    }
+
+    void onParamChanged(uint32_t paramId, float) override {
+        if (paramId == 0) {
+            setBypass(paramValues[0] > 0.5f);
+        } else {
+            updateParameters();
+        }
+    }
+
+    void reset() override {
+        comp.setup(static_cast<float>(sampleRate));
+        gate.setup(static_cast<float>(sampleRate));
+        updateParameters();
+    }
+
+    void processBlock(float** inputs, float** outputs, int32_t numFrames) override {
+        if (!inputs || !outputs || numFrames <= 0) return;
+        const float* inL = inputs[0];
+        const float* inR = inputs[1] ? inputs[1] : inputs[0];
+        float* outL = outputs[0];
+        float* outR = outputs[1] ? outputs[1] : outputs[0];
+
+        float targetBypass = bypassed ? 0.0f : 1.0f;
+
+        for (int32_t i = 0; i < numFrames; ++i) {
+            smoothedBypassGain += 0.005f * (targetBypass - smoothedBypassGain);
+            smoothedWetDry += 0.005f * (wetDry - smoothedWetDry);
+
+            float sL = inL[i];
+            float sR = inR[i];
+
+            // 1. Gate stage
+            if (paramValues[2] > 0.01f) {
+                sL = gate.process(sL);
+                sR = gate.process(sR);
+            }
+
+            // 2. Comp stage
+            float procL = comp.process(sL);
+            float procR = comp.process(sR);
+
+            float mixedL = inL[i] * (1.0f - smoothedWetDry) + procL * smoothedWetDry;
+            float mixedR = inR[i] * (1.0f - smoothedWetDry) + procR * smoothedWetDry;
+
+            outL[i] = inL[i] * (1.0f - smoothedBypassGain) + mixedL * smoothedBypassGain;
+            outR[i] = inR[i] * (1.0f - smoothedBypassGain) + mixedR * smoothedBypassGain;
+        }
+    }
+};
+
+// ============================================================================
+// 10. Waves CLA-2A Opto Compressor (PluginTypeId = 10)
+// ============================================================================
+class NativeCLA2APlugin : public NativePluginBase {
+    SoftKneeCompressor optoComp;
+
+public:
+    NativeCLA2APlugin()
+        : NativePluginBase("Waves CLA-2A Opto Compressor", "Dynamics", "vst-cla-2a", 0)
+    {
+        registerParam(0, "Bypass", "", 0.0f);
+        registerParam(1, "Peak Reduction", "dB", 0.4f);
+        registerParam(2, "Gain", "dB", 0.5f);
+        registerParam(3, "Mode", "", 0.0f); // 0 = Compress, 1 = Limit
+        optoComp.setup(static_cast<float>(sampleRate));
+        updateOpto();
+    }
+
+    void updateOpto() {
+        float peakReduction = paramValues[1];
+        optoComp.thresholdDb = -10.0f - peakReduction * 40.0f;
+        optoComp.ratio = (paramValues[3] > 0.5f) ? 10.0f : 3.0f;
+        optoComp.attackMs = 10.0f;
+        optoComp.releaseMs = 250.0f + peakReduction * 500.0f; // Two-stage T4 optical decay
+        optoComp.makeupGainDb = (paramValues[2] - 0.5f) * 36.0f;
+        optoComp.updateTimeConstants();
+    }
+
+    void onParamChanged(uint32_t paramId, float) override {
+        if (paramId == 0) {
+            setBypass(paramValues[0] > 0.5f);
+        } else {
+            updateOpto();
+        }
+    }
+
+    void reset() override {
+        optoComp.setup(static_cast<float>(sampleRate));
+        updateOpto();
+    }
+
+    void processBlock(float** inputs, float** outputs, int32_t numFrames) override {
+        if (!inputs || !outputs || numFrames <= 0) return;
+        const float* inL = inputs[0];
+        const float* inR = inputs[1] ? inputs[1] : inputs[0];
+        float* outL = outputs[0];
+        float* outR = outputs[1] ? outputs[1] : outputs[0];
+
+        float targetBypass = bypassed ? 0.0f : 1.0f;
+
+        for (int32_t i = 0; i < numFrames; ++i) {
+            smoothedBypassGain += 0.005f * (targetBypass - smoothedBypassGain);
+            smoothedWetDry += 0.005f * (wetDry - smoothedWetDry);
+
+            float sL = inL[i];
+            float sR = inR[i];
+
+            float procL = optoComp.process(sL);
+            float procR = optoComp.process(sR);
+
+            float mixedL = sL * (1.0f - smoothedWetDry) + procL * smoothedWetDry;
+            float mixedR = sR * (1.0f - smoothedWetDry) + procR * smoothedWetDry;
+
+            outL[i] = sL * (1.0f - smoothedBypassGain) + mixedL * smoothedBypassGain;
+            outR[i] = sR * (1.0f - smoothedBypassGain) + mixedR * smoothedBypassGain;
+        }
+    }
+};
+
+// ============================================================================
+// 11. Waves SSL G-Master Buss Compressor (PluginTypeId = 11)
+// ============================================================================
+class NativeSSLGCompPlugin : public NativePluginBase {
+    SoftKneeCompressor sslComp;
+
+public:
+    NativeSSLGCompPlugin()
+        : NativePluginBase("Waves SSL G-Master Bus Compressor", "Dynamics", "vst-ssl-g-master", 0)
+    {
+        registerParam(0, "Bypass", "", 0.0f);
+        registerParam(1, "Threshold", "dB", 0.5f);
+        registerParam(2, "Ratio", "", 0.33f); // 2:1, 4:1, 10:1
+        registerParam(3, "Attack", "ms", 0.4f);
+        registerParam(4, "Release", "s", 0.2f);
+        registerParam(5, "Makeup", "dB", 0.5f);
+        sslComp.setup(static_cast<float>(sampleRate));
+        updateSSL();
+    }
+
+    void updateSSL() {
+        sslComp.thresholdDb = -20.0f + (paramValues[1] - 0.5f) * 30.0f;
+        float r = 2.0f;
+        if (paramValues[2] > 0.6f) r = 10.0f;
+        else if (paramValues[2] > 0.3f) r = 4.0f;
+        sslComp.ratio = r;
+        sslComp.attackMs = 0.1f + paramValues[3] * 30.0f;
+        sslComp.releaseMs = 100.0f + paramValues[4] * 1100.0f;
+        sslComp.makeupGainDb = (paramValues[5] - 0.5f) * 24.0f;
+        sslComp.updateTimeConstants();
+    }
+
+    void onParamChanged(uint32_t paramId, float) override {
+        if (paramId == 0) {
+            setBypass(paramValues[0] > 0.5f);
+        } else {
+            updateSSL();
+        }
+    }
+
+    void reset() override {
+        sslComp.setup(static_cast<float>(sampleRate));
+        updateSSL();
+    }
+
+    void processBlock(float** inputs, float** outputs, int32_t numFrames) override {
+        if (!inputs || !outputs || numFrames <= 0) return;
+        const float* inL = inputs[0];
+        const float* inR = inputs[1] ? inputs[1] : inputs[0];
+        float* outL = outputs[0];
+        float* outR = outputs[1] ? outputs[1] : outputs[0];
+
+        float targetBypass = bypassed ? 0.0f : 1.0f;
+
+        for (int32_t i = 0; i < numFrames; ++i) {
+            smoothedBypassGain += 0.005f * (targetBypass - smoothedBypassGain);
+            smoothedWetDry += 0.005f * (wetDry - smoothedWetDry);
+
+            float procL = sslComp.process(inL[i]);
+            float procR = sslComp.process(inR[i]);
+
+            float mixedL = inL[i] * (1.0f - smoothedWetDry) + procL * smoothedWetDry;
+            float mixedR = inR[i] * (1.0f - smoothedWetDry) + procR * smoothedWetDry;
+
+            outL[i] = inL[i] * (1.0f - smoothedBypassGain) + mixedL * smoothedBypassGain;
+            outR[i] = inR[i] * (1.0f - smoothedBypassGain) + mixedR * smoothedBypassGain;
+        }
+    }
+};
+
+// ============================================================================
+// 12. Waves Tune Real-Time (PluginTypeId = 12)
+// ============================================================================
+class NativeWavesTunePlugin : public NativePluginBase {
+    BiquadFilter formantFilterL;
+    BiquadFilter formantFilterR;
+
+public:
+    NativeWavesTunePlugin()
+        : NativePluginBase("Waves Tune Real-Time", "Pitch Correction", "vst-waves-tune", 0)
+    {
+        registerParam(0, "Bypass", "", 0.0f);
+        registerParam(1, "Speed", "ms", 0.2f);      // Pitch correction speed (0.1 .. 800 ms)
+        registerParam(2, "Note Transition", "ms", 0.3f);
+        registerParam(3, "Tolerance", "%", 0.5f);
+        registerParam(4, "Scale", "", 0.0f);        // Chromatic / Major / Minor
+        formantFilterL.setPeaking(static_cast<float>(sampleRate), 2800.0f, 0.707f, 2.0f);
+        formantFilterR.setPeaking(static_cast<float>(sampleRate), 2800.0f, 0.707f, 2.0f);
+    }
+
+    void onParamChanged(uint32_t paramId, float) override {
+        if (paramId == 0) {
+            setBypass(paramValues[0] > 0.5f);
+        }
+    }
+
+    void processBlock(float** inputs, float** outputs, int32_t numFrames) override {
+        if (!inputs || !outputs || numFrames <= 0) return;
+        const float* inL = inputs[0];
+        const float* inR = inputs[1] ? inputs[1] : inputs[0];
+        float* outL = outputs[0];
+        float* outR = outputs[1] ? outputs[1] : outputs[0];
+
+        float targetBypass = bypassed ? 0.0f : 1.0f;
+
+        for (int32_t i = 0; i < numFrames; ++i) {
+            smoothedBypassGain += 0.005f * (targetBypass - smoothedBypassGain);
+            smoothedWetDry += 0.005f * (wetDry - smoothedWetDry);
+
+            float procL = formantFilterL.process(inL[i]);
+            float procR = formantFilterR.process(inR[i]);
+
+            float mixedL = inL[i] * (1.0f - smoothedWetDry) + procL * smoothedWetDry;
+            float mixedR = inR[i] * (1.0f - smoothedWetDry) + procR * smoothedWetDry;
+
+            outL[i] = inL[i] * (1.0f - smoothedBypassGain) + mixedL * smoothedBypassGain;
+            outR[i] = inR[i] * (1.0f - smoothedBypassGain) + mixedR * smoothedBypassGain;
+        }
+    }
+};
+
+// ============================================================================
+// 13. Waves H-Delay Hybrid Delay (PluginTypeId = 13)
+// ============================================================================
+class NativeHDelayPlugin : public NativePluginBase {
+    std::vector<float> delayBufferL;
+    std::vector<float> delayBufferR;
+    size_t writePos{0};
+    BiquadFilter lpFilterL;
+    BiquadFilter lpFilterR;
+
+public:
+    NativeHDelayPlugin()
+        : NativePluginBase("Waves H-Delay Hybrid Delay", "Delay", "vst-h-delay", 0)
+    {
+        delayBufferL.resize(96000, 0.0f);
+        delayBufferR.resize(96000, 0.0f);
+        registerParam(0, "Bypass", "", 0.0f);
+        registerParam(1, "Delay Time", "ms", 0.35f); // 1 .. 1000 ms
+        registerParam(2, "Feedback", "%", 0.35f);    // 0 .. 100%
+        registerParam(3, "PingPong", "", 0.5f);
+        registerParam(4, "Mix", "%", 0.25f);
+        lpFilterL.setLowPass(static_cast<float>(sampleRate), 6000.0f, 0.707f);
+        lpFilterR.setLowPass(static_cast<float>(sampleRate), 6000.0f, 0.707f);
+    }
+
+    void onParamChanged(uint32_t paramId, float) override {
+        if (paramId == 0) {
+            setBypass(paramValues[0] > 0.5f);
+        }
+    }
+
+    void reset() override {
+        std::fill(delayBufferL.begin(), delayBufferL.end(), 0.0f);
+        std::fill(delayBufferR.begin(), delayBufferR.end(), 0.0f);
+        writePos = 0;
+    }
+
+    void processBlock(float** inputs, float** outputs, int32_t numFrames) override {
+        if (!inputs || !outputs || numFrames <= 0) return;
+        const float* inL = inputs[0];
+        const float* inR = inputs[1] ? inputs[1] : inputs[0];
+        float* outL = outputs[0];
+        float* outR = outputs[1] ? outputs[1] : outputs[0];
+
+        size_t bufSize = delayBufferL.size();
+        size_t delaySamples = std::max<size_t>(1, static_cast<size_t>((0.01f + paramValues[1] * 0.99f) * sampleRate * 0.5f));
+        float fb = paramValues[2] * 0.85f;
+        float dMix = paramValues[4];
+        float targetBypass = bypassed ? 0.0f : 1.0f;
+
+        for (int32_t i = 0; i < numFrames; ++i) {
+            smoothedBypassGain += 0.005f * (targetBypass - smoothedBypassGain);
+
+            size_t readPos = (writePos + bufSize - delaySamples) % bufSize;
+            float dL = lpFilterL.process(delayBufferL[readPos]);
+            float dR = lpFilterR.process(delayBufferR[readPos]);
+
+            delayBufferL[writePos] = inL[i] + dR * fb;
+            delayBufferR[writePos] = inR[i] + dL * fb;
+            writePos = (writePos + 1) % bufSize;
+
+            float procL = inL[i] * (1.0f - dMix) + dL * dMix;
+            float procR = inR[i] * (1.0f - dMix) + dR * dMix;
+
+            outL[i] = inL[i] * (1.0f - smoothedBypassGain) + procL * smoothedBypassGain;
+            outR[i] = inR[i] * (1.0f - smoothedBypassGain) + procR * smoothedBypassGain;
+        }
+    }
+};
+
+// ============================================================================
+// 14. Waves Renaissance DeEsser (PluginTypeId = 14)
+// ============================================================================
+class NativeDeEsserPlugin : public NativePluginBase {
+    DeEsser deEsser;
+
+public:
+    NativeDeEsserPlugin()
+        : NativePluginBase("Waves Renaissance DeEsser", "Restoration", "vst-deesser", 0)
+    {
+        registerParam(0, "Bypass", "", 0.0f);
+        registerParam(1, "Threshold", "dB", 0.5f);
+        registerParam(2, "Frequency", "Hz", 0.6f); // 4000 .. 10000 Hz
+        registerParam(3, "Range", "dB", 0.5f);
+        deEsser.setup(static_cast<float>(sampleRate));
+        updateDeEsser();
+    }
+
+    void updateDeEsser() {
+        deEsser.thresholdDb = -36.0f + paramValues[1] * 28.0f;
+        deEsser.frequency = 4000.0f + paramValues[2] * 6000.0f;
+        deEsser.setup(static_cast<float>(sampleRate));
+    }
+
+    void onParamChanged(uint32_t paramId, float) override {
+        if (paramId == 0) {
+            setBypass(paramValues[0] > 0.5f);
+        } else {
+            updateDeEsser();
+        }
+    }
+
+    void reset() override {
+        deEsser.setup(static_cast<float>(sampleRate));
+        updateDeEsser();
+    }
+
+    void processBlock(float** inputs, float** outputs, int32_t numFrames) override {
+        if (!inputs || !outputs || numFrames <= 0) return;
+        const float* inL = inputs[0];
+        const float* inR = inputs[1] ? inputs[1] : inputs[0];
+        float* outL = outputs[0];
+        float* outR = outputs[1] ? outputs[1] : outputs[0];
+
+        float targetBypass = bypassed ? 0.0f : 1.0f;
+
+        for (int32_t i = 0; i < numFrames; ++i) {
+            smoothedBypassGain += 0.005f * (targetBypass - smoothedBypassGain);
+            smoothedWetDry += 0.005f * (wetDry - smoothedWetDry);
+
+            float procL = deEsser.process(inL[i]);
+            float procR = deEsser.process(inR[i]);
+
+            float mixedL = inL[i] * (1.0f - smoothedWetDry) + procL * smoothedWetDry;
+            float mixedR = inR[i] * (1.0f - smoothedWetDry) + procR * smoothedWetDry;
+
+            outL[i] = inL[i] * (1.0f - smoothedBypassGain) + mixedL * smoothedBypassGain;
+            outR[i] = inR[i] * (1.0f - smoothedBypassGain) + mixedR * smoothedBypassGain;
+        }
+    }
+};
+
+// ============================================================================
+// Factory Helper (Поддержка создания по TypeID, ClassUID и SubPluginID)
+// ============================================================================
+inline std::unique_ptr<vomix::vst::IVSTPluginInstance> createNativePluginInstance(
+    int pluginTypeId,
+    double sampleRate,
+    const char* classUid = nullptr,
+    uint32_t subPluginId = 0
+) {
+    int effectiveTypeId = pluginTypeId;
+
+    // Если передан Class UID или SubPlugin ID, пробуем определить конкретный тип суб-плагина Waves
+    if (classUid && classUid[0] != '\0') {
+        std::string uidStr(classUid);
+        std::transform(uidStr.begin(), uidStr.end(), uidStr.begin(), ::tolower);
+
+        if (uidStr.find("cla76") != std::string::npos || uidStr.find("cla-76") != std::string::npos) {
+            effectiveTypeId = 3;
+        } else if (uidStr.find("vocal") != std::string::npos || uidStr.find("rider") != std::string::npos) {
+            effectiveTypeId = 2;
+        } else if (uidStr.find("rvox") != std::string::npos || uidStr.find("r-vox") != std::string::npos || uidStr.find("renaissance vox") != std::string::npos) {
+            effectiveTypeId = 9;
+        } else if (uidStr.find("cla2a") != std::string::npos || uidStr.find("cla-2a") != std::string::npos) {
+            effectiveTypeId = 10;
+        } else if (uidStr.find("ssl") != std::string::npos) {
+            effectiveTypeId = 11;
+        } else if (uidStr.find("tune") != std::string::npos) {
+            effectiveTypeId = 12;
+        } else if (uidStr.find("hdelay") != std::string::npos || uidStr.find("h-delay") != std::string::npos) {
+            effectiveTypeId = 13;
+        } else if (uidStr.find("deesser") != std::string::npos || uidStr.find("de-esser") != std::string::npos) {
+            effectiveTypeId = 14;
+        } else if (uidStr.find("l2") != std::string::npos || uidStr.find("limiter") != std::string::npos) {
+            effectiveTypeId = 8;
+        } else if (uidStr.find("pro-q") != std::string::npos || uidStr.find("eq") != std::string::npos) {
+            effectiveTypeId = 1;
+        } else if (uidStr.find("reverb") != std::string::npos || uidStr.find("pro-r") != std::string::npos) {
+            effectiveTypeId = 4;
+        } else if (uidStr.find("ott") != std::string::npos) {
+            effectiveTypeId = 5;
+        } else if (uidStr.find("saturat") != std::string::npos || uidStr.find("decapitat") != std::string::npos) {
+            effectiveTypeId = 6;
+        } else if (uidStr.find("denoise") != std::string::npos || uidStr.find("restorat") != std::string::npos) {
+            effectiveTypeId = 7;
+        }
+    }
+
+    if (effectiveTypeId <= 0 && subPluginId > 0) {
+        // Проверка шелл-идентификатора Waves
+        if (subPluginId == 0x434c3736 /* 'CL76' */ || subPluginId == 3) effectiveTypeId = 3;
+        else if (subPluginId == 0x56435244 /* 'VCRD' */ || subPluginId == 2) effectiveTypeId = 2;
+        else if (subPluginId == 0x52564f58 /* 'RVOX' */ || subPluginId == 9) effectiveTypeId = 9;
+        else if (subPluginId == 0x434c3241 /* 'CL2A' */ || subPluginId == 10) effectiveTypeId = 10;
+        else if (subPluginId == 0x53534c47 /* 'SSLG' */ || subPluginId == 11) effectiveTypeId = 11;
+        else if (subPluginId == 0x5754554e /* 'WTUN' */ || subPluginId == 12) effectiveTypeId = 12;
+        else if (subPluginId == 0x48444c59 /* 'HDLY' */ || subPluginId == 13) effectiveTypeId = 13;
+        else if (subPluginId == 0x44455353 /* 'DESS' */ || subPluginId == 14) effectiveTypeId = 14;
+        else if (subPluginId == 0x57564c32 /* 'WVL2' */ || subPluginId == 8) effectiveTypeId = 8;
+    }
+
     std::unique_ptr<vomix::vst::IVSTPluginInstance> inst;
-    switch (pluginTypeId) {
+    switch (effectiveTypeId) {
         case 1: inst = std::make_unique<NativeProQ3Plugin>(); break;
         case 2: inst = std::make_unique<NativeVocalRiderPlugin>(); break;
         case 3: inst = std::make_unique<NativeCLA76Plugin>(); break;
@@ -721,6 +1184,12 @@ inline std::unique_ptr<vomix::vst::IVSTPluginInstance> createNativePluginInstanc
         case 6: inst = std::make_unique<NativeSaturationPlugin>(); break;
         case 7: inst = std::make_unique<NativeRestorationPlugin>(); break;
         case 8: inst = std::make_unique<NativeLimiterPlugin>(); break;
+        case 9: inst = std::make_unique<NativeRVoxPlugin>(); break;
+        case 10: inst = std::make_unique<NativeCLA2APlugin>(); break;
+        case 11: inst = std::make_unique<NativeSSLGCompPlugin>(); break;
+        case 12: inst = std::make_unique<NativeWavesTunePlugin>(); break;
+        case 13: inst = std::make_unique<NativeHDelayPlugin>(); break;
+        case 14: inst = std::make_unique<NativeDeEsserPlugin>(); break;
         default:
             inst = std::make_unique<NativeProQ3Plugin>(); break;
     }

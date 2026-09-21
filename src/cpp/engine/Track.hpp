@@ -34,6 +34,7 @@ public:
     float pan{0.0f};            // Панорама (-1.0 .. +1.0)
     bool solo{false};           // Режим соло
     bool mute{false};           // Заглушение дорожки
+    bool isOriginalAudio{false}; // Флаг оригинальной дорожки аудио/видео
     float sampleRate{48000.0f};
 
     // Набор клипов дорожки (резервируется заранее во избежание аллокаций)
@@ -71,9 +72,11 @@ public:
     alignas(16) float vstOutL[MAX_BUFFER_SIZE]{};
     alignas(16) float vstOutR[MAX_BUFFER_SIZE]{};
 
-    // Текущие пиковые значения уровня дорожки (для визуализации и телеметрии)
+    // Текущие пиковые и RMS значения уровня дорожки (для визуализации и телеметрии)
     float peakL{0.0f};
     float peakR{0.0f};
+    float rmsL{0.0f};
+    float rmsR{0.0f};
 
     Track(uint32_t trackId = 0, std::string trackName = "Track", float sr = 48000.0f);
 
@@ -89,9 +92,11 @@ public:
     void setPluginBypass(int slotIdx, bool bypass);
     void setPluginWetDry(int slotIdx, float wetDry);
 
-    // --- Пиковые уровни ---
+    // --- Пиковые и RMS уровни ---
     float getPeakL() const noexcept { return peakL; }
     float getPeakR() const noexcept { return peakR; }
+    float getRMSL() const noexcept { return rmsL; }
+    float getRMSR() const noexcept { return rmsR; }
 
     /**
      * Отрисовка клипов текущего временного среза в trackBuffer (RT-Safe)
@@ -116,8 +121,14 @@ public:
     void applyFaderAndPan(size_t numFrames) noexcept;
 
     /**
-     * Замер пиковых значений уровня сигнала после обработки
+     * Замер пиковых и RMS значений уровня сигнала по указанному стереобуферу
      */
+    void calculateBlockMeters(const float* buffer, int numFrames) noexcept;
+
+    /**
+     * Замер пиковых и RMS значений уровня сигнала после обработки (из trackBuffer)
+     */
+    void calculateBlockMeters(size_t numFrames) noexcept;
     void calculatePeaks(size_t numFrames) noexcept;
 };
 

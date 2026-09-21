@@ -305,22 +305,16 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
   useEffect(() => {
     setTrackConfigs((prev) => {
       const updated: Record<number, TrackAIConfig> = { ...prev };
-      tracks.forEach((track, index) => {
-        const isFirst = index === 0 || track.id === 1;
-        const nameLower = (track.name || '').toLowerCase();
-        const isVideoOrOrig =
+      (tracks || []).forEach((track) => {
+        // Дорожка считается оригинальным звуком видео ТОЛЬКО при наличии флага или маркера
+        const isVideoOrOrig = Boolean(
           track.isOriginalAudio ||
-          nameLower.includes('видео') ||
-          nameLower.includes('video') ||
-          nameLower.includes('оригинал') ||
-          nameLower.includes('отригал') ||
-          nameLower.includes('отригала') ||
-          nameLower.includes('orig') ||
-          nameLower.includes('original');
+          (track.name && /^(🎬|видео|video|оригинальный звук)/i.test(track.name.trim()))
+        );
 
-        const initialPurpose: AIPurposeType = isVideoOrOrig || isFirst ? 'stem_separation' : 'denoise';
+        const initialPurpose: AIPurposeType = isVideoOrOrig ? 'stem_separation' : 'denoise';
 
-        const initialSteps: AIStepNode[] = isVideoOrOrig || isFirst
+        const initialSteps: AIStepNode[] = isVideoOrOrig
           ? [
               {
                 id: `step_${Date.now()}_1`,
@@ -371,12 +365,12 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
             warmthSat: 40,
             airBandBoost: 3.5,
             steps: initialSteps,
-            outputMode: initialPurpose === 'stem_separation' ? 'stems' : 'replace',
+            outputMode: isVideoOrOrig ? 'stems' : 'replace',
             status: 'idle',
             progressPercent: 0
           };
-        } else if ((isVideoOrOrig || isFirst) && updated[track.id].purpose === 'denoise' && updated[track.id].status === 'idle') {
-          // Auto-upgrade empty/default track config if it was subsequently identified as the original video/audio track
+        } else if (isVideoOrOrig && updated[track.id].purpose === 'denoise' && updated[track.id].status === 'idle') {
+          // Автоматическое обновление конфигурации, если дорожка была идентифицирована как оригинал/видео
           updated[track.id] = {
             ...updated[track.id],
             purpose: 'stem_separation',
@@ -1331,17 +1325,14 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                           <span className="text-xs font-bold text-slate-100 font-mono">
                             CH #{track.id}: {track.name}
                           </span>
-                          {(track.isOriginalAudio ||
-                            track.id === 1 ||
-                            track.name.toLowerCase().includes('видео') ||
-                            track.name.toLowerCase().includes('video') ||
-                            track.name.toLowerCase().includes('оригинал') ||
-                            track.name.toLowerCase().includes('отригал') ||
-                            track.name.toLowerCase().includes('отригала') ||
-                            track.name.toLowerCase().includes('orig') ||
-                            track.name.toLowerCase().includes('original')) && (
+                          {Boolean(track.isOriginalAudio || track.name?.startsWith('🎬')) && (
                             <span className="text-[10px] px-2 py-0.5 rounded-full font-mono font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30 flex items-center gap-1 shadow-sm">
                               🎬 [Аудиодорожка Видеофайла]
+                            </span>
+                          )}
+                          {!track.isOriginalAudio && !track.name?.startsWith('🎬') && (
+                            <span className="text-[10px] px-2 py-0.5 rounded-full font-mono font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                              🎙️ [Голос дублера]
                             </span>
                           )}
                           <span

@@ -1,6 +1,6 @@
-import { FULL_CPP_CODE_STR } from './cppCodeContent';
+import { MODULAR_CPP_SOURCES } from './cppModulesCode';
 
-export const FULL_CPP_CODE = FULL_CPP_CODE_STR;
+export const FULL_CPP_CODE = Object.values(MODULAR_CPP_SOURCES).join('\n\n');
 
 export const BUILD_WASM_SCRIPT = `#!/bin/bash
 # ==============================================================================

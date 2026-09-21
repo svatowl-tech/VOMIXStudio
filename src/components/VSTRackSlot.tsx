@@ -1,10 +1,10 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   VSTPluginInstance,
-  VSTPluginDefinition,
-  VSTPluginCategory
+  VSTPluginDefinition
 } from '../audio/vstTypes';
 import { globalVSTHostEngine } from '../services/VSTHostEngine';
+import { TauriNativeBridge } from '../services/TauriNativeBridge';
 import { VSTGraphicalUIWindow } from './VSTGraphicalUIWindow';
 import { VSTQuickKnob } from './VSTQuickKnob';
 import { VSTGainReductionMeter } from './VSTGainReductionMeter';
@@ -13,26 +13,25 @@ import {
   Plus,
   Power,
   Trash2,
-  Sliders,
   ChevronDown,
   ChevronUp,
   X,
   Search,
   Zap,
-  SlidersHorizontal,
-  Volume2,
-  Sparkles,
-  ShieldCheck,
-  CheckCircle2,
-  ArrowUp,
-  ArrowDown,
   Maximize2,
-  Activity,
-  Copy
+  Copy,
+  ExternalLink,
+  Monitor,
+  Sparkles,
+  Info,
+  CheckCircle2,
+  SlidersHorizontal,
+  AppWindow
 } from 'lucide-react';
 
 interface VSTRackSlotProps {
   plugins: VSTPluginInstance[];
+  trackId?: number | string;
   title?: string;
   badge?: string;
   color?: string;
@@ -45,6 +44,7 @@ interface VSTRackSlotProps {
 
 export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
   plugins,
+  trackId = 1,
   title = 'VST Inserts',
   badge,
   color = '#10b981',
@@ -59,10 +59,17 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [activePluginModal, setActivePluginModal] = useState<VSTPluginInstance | null>(null);
   const [expandedSlots, setExpandedSlots] = useState<Record<string, boolean>>({});
+  const [nativeGuiInfoModal, setNativeGuiInfoModal] = useState<{ isOpen: boolean; pluginName: string; instance: VSTPluginInstance | null }>({
+    isOpen: false,
+    pluginName: '',
+    instance: null
+  });
+  const [nativeWindowsActive, setNativeWindowsActive] = useState<Record<string, boolean>>({});
 
-  // A/B Presets State Storage
+  // Хранилище состояний A/B сравнения пресетов
   const [abState, setAbState] = useState<Record<string, { current: 'A' | 'B'; stateA: Record<string, number>; stateB: Record<string, number> }>>({});
 
+  const isDesktop = TauriNativeBridge.isTauriEnvironment();
   const availableCatalog = globalVSTHostEngine.getEnabledPlugins();
 
   const filteredCatalog = availableCatalog.filter((p) => {
@@ -88,18 +95,43 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
     onUpdateChain(updated);
     setShowAddMenu(false);
     setSearchQuery('');
-    // Expand added slot by default
+    // Разворачиваем добавленный слот по умолчанию
     setExpandedSlots((prev) => ({ ...prev, [newInstance.instanceId]: true }));
-    // Open editor right away for quick tweaking
+    // Открываем графический редактор для быстрой настройки
     setActivePluginModal(newInstance);
   };
 
-  // Immediate event dispatcher for knobs without lagging parent re-renders
+  // Немедленный диспатчер событий регуляторов без задержки рендера
   const handleImmediateParamChange = useCallback((instId: string, paramId: string, value: number) => {
     onUpdateParam(instId, paramId, value);
   }, [onUpdateParam]);
 
-  // A/B Comparison Switching
+  // Открытие нативного графического окна плагина (Win32 HWND / VST Native GUI)
+  const handleOpenNativeGUI = async (inst: VSTPluginInstance, slotIndex: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const def = globalVSTHostEngine.getPluginById(inst.pluginId);
+    const pluginName = inst.name || def?.name || inst.pluginId;
+
+    if (isDesktop) {
+      const numericTrackId = typeof trackId === 'number' ? trackId : parseInt(String(trackId).replace(/\D/g, ''), 10) || 1;
+      const success = await TauriNativeBridge.openPluginGui(numericTrackId, slotIndex, inst.instanceId);
+      if (success) {
+        setNativeWindowsActive((prev) => ({ ...prev, [inst.instanceId]: true }));
+      } else {
+        // Fallback к встроенному DSP GUI окну
+        setActivePluginModal(inst);
+      }
+    } else {
+      // В Web/WASM режиме показываем информационное окно с переходом в DSP Editor
+      setNativeGuiInfoModal({
+        isOpen: true,
+        pluginName,
+        instance: inst
+      });
+    }
+  };
+
+  // Переключение A/B сравнения
   const handleToggleAB = (inst: VSTPluginInstance, target: 'A' | 'B', e: React.MouseEvent) => {
     e.stopPropagation();
     const currentAB = abState[inst.instanceId] || {
@@ -110,7 +142,6 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
 
     if (currentAB.current === target) return;
 
-    // Save current parameters to the active state before switching
     if (currentAB.current === 'A') {
       currentAB.stateA = { ...inst.parameters };
     } else {
@@ -125,12 +156,12 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
       [inst.instanceId]: currentAB
     }));
 
-    // Apply target parameters immediately to the engine
+    // Применяем параметры к движку
     Object.entries(targetParams).forEach(([pId, val]) => {
       onUpdateParam(inst.instanceId, pId, val);
     });
 
-    // Update plugin object in chain
+    // Обновляем параметры в цепочке
     const updated = plugins.map((p) =>
       p.instanceId === inst.instanceId ? { ...p, parameters: { ...targetParams } } : p
     );
@@ -157,6 +188,14 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
 
   const handleRemovePlugin = (instanceId: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    if (isDesktop && nativeWindowsActive[instanceId]) {
+      TauriNativeBridge.closePluginGui(instanceId);
+      setNativeWindowsActive((prev) => {
+        const copy = { ...prev };
+        delete copy[instanceId];
+        return copy;
+      });
+    }
     const updated = plugins.filter((p) => p.instanceId !== instanceId);
     onUpdateChain(updated);
     if (activePluginModal?.instanceId === instanceId) {
@@ -177,7 +216,7 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
 
   return (
     <div className="space-y-2">
-      {/* Header */}
+      {/* Шапка секции инсертов */}
       <div className="flex items-center justify-between text-xs">
         <div className="flex items-center gap-1.5 font-semibold text-slate-300">
           <Layers size={13} style={{ color }} />
@@ -190,7 +229,7 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
           <span className="text-[10px] text-slate-500 font-mono">({plugins.length})</span>
         </div>
 
-        {/* Add Plugin Button */}
+        {/* Кнопка добавления VST плагина */}
         <button
           onClick={() => setShowAddMenu(!showAddMenu)}
           className="px-2 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700/80 hover:border-slate-600 text-slate-200 rounded-md text-[11px] font-medium transition-all flex items-center gap-1 cursor-pointer shadow-sm"
@@ -201,7 +240,7 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
         </button>
       </div>
 
-      {/* Catalog Selector Dropdown / Popover */}
+      {/* Каталог выбора плагина */}
       {showAddMenu && (
         <div className="bg-[#0b0f19] border border-slate-700 rounded-xl p-3 shadow-2xl space-y-2.5 animate-fadeIn z-30 relative">
           <div className="flex items-center justify-between pb-1.5 border-b border-slate-800">
@@ -216,12 +255,12 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
             </button>
           </div>
 
-          {/* Search Bar */}
+          {/* Строка поиска */}
           <div className="relative">
             <Search size={12} className="absolute left-2.5 top-2.5 text-slate-500" />
             <input
               type="text"
-              placeholder="Поиск VST3 / CLAP плагина..."
+              placeholder="Поиск VST3 / CLAP / Waves плагина..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500"
@@ -229,7 +268,7 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
             />
           </div>
 
-          {/* Categories */}
+          {/* Фильтр категорий */}
           <div className="flex flex-wrap gap-1">
             {['all', 'EQ', 'Dynamics', 'Reverb', 'Restoration', 'Limiter', 'Saturation', 'Utility'].map((cat) => (
               <button
@@ -246,7 +285,7 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
             ))}
           </div>
 
-          {/* Plugin list */}
+          {/* Список плагинов */}
           <div className="max-h-48 overflow-y-auto space-y-1 pr-1 custom-scrollbar">
             {filteredCatalog.length === 0 ? (
               <div className="text-center py-4 text-xs text-slate-500">
@@ -283,7 +322,7 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
         </div>
       )}
 
-      {/* Inserted Plugins List */}
+      {/* Список добавленных в рэк плагинов */}
       {plugins.length === 0 ? (
         <div
           onClick={() => setShowAddMenu(true)}
@@ -302,8 +341,8 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
             const isExpanded = !!expandedSlots[inst.instanceId];
             const isDynamics = def?.category === 'Dynamics' || def?.category === 'Limiter' || inst.pluginId.includes('compressor') || inst.pluginId.includes('limiter') || inst.pluginId.includes('cla76') || inst.pluginId.includes('l2');
             const ab = abState[inst.instanceId] || { current: 'A' };
+            const isNativeActive = !!nativeWindowsActive[inst.instanceId];
 
-            // Gain reduction calculation simulation / read from param (e.g. threshold vs input)
             let grValue = 0;
             if (isDynamics && inst.enabled) {
               const thresh = inst.parameters['thresh'] ?? inst.parameters['threshold'] ?? inst.parameters['input'] ?? -18;
@@ -322,12 +361,12 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
                     : 'bg-[#111625] hover:bg-[#141b2e] border-slate-800/90 hover:border-cyan-500/40 shadow-sm'
                 }`}
               >
-                {/* Header bar of the slot */}
+                {/* Заголовок слота */}
                 <div
                   className="p-2 flex items-center justify-between gap-2 cursor-pointer select-none"
                   onClick={() => toggleSlotExpanded(inst.instanceId)}
                 >
-                  {/* Left: Bypass button, Index, Name, Category badge */}
+                  {/* Кнопка включения/байпаса и имя плагина */}
                   <div className="flex items-center gap-2 min-w-0">
                     <button
                       onClick={(e) => {
@@ -350,6 +389,11 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
                         <span className={isBypassed ? 'line-through text-slate-500' : 'text-slate-100'}>
                           {inst.name || def?.name || inst.pluginId}
                         </span>
+                        {isNativeActive && (
+                          <span className="text-[8px] font-mono px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                            NATIVE GUI
+                          </span>
+                        )}
                       </div>
                       <div className="text-[9px] text-slate-400 flex items-center gap-1.5 mt-0.5">
                         <span className="text-cyan-400/90 font-mono">{def?.format || 'VST3'}</span>
@@ -360,9 +404,9 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
                     </div>
                   </div>
 
-                  {/* Right: Expand arrow, GUI button, Reorder & Delete */}
+                  {/* Элементы управления справа */}
                   <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
-                    {/* A/B Quick Toggle in Header */}
+                    {/* Переключатель A/B */}
                     <div className="flex items-center bg-slate-950 p-0.5 rounded border border-slate-800 text-[9px] font-mono font-bold mr-1">
                       <button
                         onClick={(e) => handleToggleAB(inst, 'A', e)}
@@ -388,7 +432,25 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
                       </button>
                     </div>
 
-                    {/* Move buttons */}
+                    {/* Кнопка открытия оригинального нативного интерфейса (Native VST GUI Editor) */}
+                    <button
+                      onClick={(e) => handleOpenNativeGUI(inst, index, e)}
+                      className={`px-2 py-1 rounded-lg text-[10px] font-bold font-mono transition-all flex items-center gap-1 cursor-pointer border ${
+                        isNativeActive
+                          ? 'bg-amber-500/20 border-amber-500/60 text-amber-300 shadow-sm'
+                          : 'bg-slate-900 hover:bg-slate-800 border-slate-700/80 hover:border-cyan-500/60 text-slate-300 hover:text-cyan-300'
+                      }`}
+                      title={
+                        isDesktop
+                          ? 'Открыть оригинальное нативное окно VST GUI (HWND/NSView)'
+                          : 'Открыть оригинальный интерфейс плагина (Native GUI)'
+                      }
+                    >
+                      <ExternalLink size={10} className={isNativeActive ? 'text-amber-400' : 'text-cyan-400'} />
+                      <span>UI</span>
+                    </button>
+
+                    {/* Перемещение плагина вверх/вниз */}
                     {plugins.length > 1 && (
                       <div className="flex flex-col">
                         {index > 0 && (
@@ -412,16 +474,16 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
                       </div>
                     )}
 
-                    {/* Open full GUI window */}
+                    {/* Открыть графический DSP-интерфейс */}
                     <button
                       onClick={() => setActivePluginModal(inst)}
                       className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-cyan-400 border border-slate-800"
-                      title="Открыть полный GUI плагина"
+                      title="Открыть встроенный графический DSP-интерфейс"
                     >
                       <Maximize2 size={11} />
                     </button>
 
-                    {/* Toggle quick controls fold */}
+                    {/* Свернуть/развернуть быстрые регуляторы */}
                     <button
                       onClick={(e) => toggleSlotExpanded(inst.instanceId, e)}
                       className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800"
@@ -430,7 +492,7 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
                       {isExpanded ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
                     </button>
 
-                    {/* Remove button */}
+                    {/* Удалить плагин */}
                     <button
                       onClick={(e) => handleRemovePlugin(inst.instanceId, e)}
                       className="p-1.5 rounded-lg bg-slate-900 hover:bg-rose-950/40 text-slate-500 hover:text-rose-400 border border-slate-800"
@@ -441,13 +503,13 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
                   </div>
                 </div>
 
-                {/* Expanded Quick Parameters & Wet/Dry Drawer */}
+                {/* Развернутая панель быстрых регуляторов и Wet/Dry */}
                 {isExpanded && (
                   <div
                     className="px-3 pb-3 pt-1 border-t border-slate-800/80 bg-slate-950/40 space-y-2.5 rounded-b-xl"
                     onClick={(e) => e.stopPropagation()}
                   >
-                    {/* Top Row: Wet/Dry & A/B Copy Controls */}
+                    {/* Строка параметров Wet/Dry и A/B копирования */}
                     <div className="flex items-center justify-between gap-3 pt-1">
                       <div className="flex items-center gap-2 flex-1 max-w-[180px]">
                         <span className="text-[10px] font-semibold text-slate-400 shrink-0">
@@ -482,7 +544,7 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
                       </div>
                     </div>
 
-                    {/* Quick Knobs Grid for Essential Plugin Parameters */}
+                    {/* Быстрые регуляторы параметров плагина */}
                     {def?.parameters && def.parameters.length > 0 && (
                       <div className="pt-1.5 border-t border-slate-850/60">
                         <div className="flex flex-wrap items-center justify-around gap-2">
@@ -500,9 +562,7 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
                                 unit={param.unit}
                                 color={def.color || '#06b6d4'}
                                 onChange={(newVal) => {
-                                  // Immediate event dispatched to AudioWorklet and engine
                                   handleImmediateParamChange(inst.instanceId, param.id, newVal);
-                                  // Update local parameters reference for UI rendering
                                   inst.parameters[param.id] = newVal;
                                 }}
                               />
@@ -519,7 +579,73 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
         </div>
       )}
 
-      {/* Floating Dedicated VST Plugin Graphical Window (GUI) Modal */}
+      {/* Информационное модальное окно нативного GUI для Web-режима */}
+      {nativeGuiInfoModal.isOpen && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-[#0e1322] border border-cyan-500/40 rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4 text-slate-200">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2 font-bold text-sm text-cyan-300">
+                <Monitor size={16} className="text-cyan-400" />
+                <span>Оригинальный GUI: {nativeGuiInfoModal.pluginName}</span>
+              </div>
+              <button
+                onClick={() => setNativeGuiInfoModal({ isOpen: false, pluginName: '', instance: null })}
+                className="text-slate-400 hover:text-slate-200 p-1 rounded-lg hover:bg-slate-800"
+              >
+                <X size={15} />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs text-slate-300 leading-relaxed">
+              <div className="p-3 bg-cyan-950/40 border border-cyan-800/40 rounded-xl flex items-start gap-2.5">
+                <AppWindow size={18} className="text-cyan-400 shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-semibold text-cyan-200 mb-0.5">
+                    Нативный графический редактор (IPlugView / Win32 HWND)
+                  </div>
+                  <div className="text-slate-300 text-[11px]">
+                    Оригинальный интерфейс Waves, FabFilter и других VST2/VST3 плагинов с аппаратным рендерингом доступен в десктопной сборке <strong>VOMIXStudio Desktop (Tauri v2)</strong>.
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-3 bg-slate-900/70 border border-slate-800 rounded-xl space-y-1.5">
+                <div className="font-semibold text-slate-200 flex items-center gap-1.5">
+                  <Sparkles size={12} className="text-amber-400" />
+                  <span>Встроенный прецизионный DSP редактор</span>
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  В текущем режиме все 100% параметров, пресеты, кривые эквализации и динамика управляются через встроенный графический интерфейс с нулевой задержкой.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                onClick={() => setNativeGuiInfoModal({ isOpen: false, pluginName: '', instance: null })}
+                className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs transition-colors"
+              >
+                Понятно
+              </button>
+              {nativeGuiInfoModal.instance && (
+                <button
+                  onClick={() => {
+                    const inst = nativeGuiInfoModal.instance;
+                    setNativeGuiInfoModal({ isOpen: false, pluginName: '', instance: null });
+                    if (inst) setActivePluginModal(inst);
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs flex items-center gap-1.5 shadow-lg shadow-cyan-900/30 transition-all cursor-pointer"
+                >
+                  <Maximize2 size={12} />
+                  <span>Открыть DSP-интерфейс</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Встроенное плавающее графическое окно DSP-редактора плагина */}
       {activePluginModal && (
         <VSTGraphicalUIWindow
           instance={activePluginModal}

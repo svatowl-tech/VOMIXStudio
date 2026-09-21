@@ -1161,12 +1161,39 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         break;
       }
 
+      case 'SET_VOCAL_BUS': {
+        if (msg.vocalBus) {
+          Object.assign(this.vocalBus, msg.vocalBus);
+        }
+        if (typeof msg.volumeDb === 'number') {
+          this.vocalBus.volumeDb = msg.volumeDb;
+        }
+        if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
+          if (this.wasmModule._setVocalBusVolume && typeof this.vocalBus.volumeDb === 'number') {
+            this.wasmModule._setVocalBusVolume(this.mixerPtr, this.vocalBus.volumeDb);
+          }
+          if (this.wasmModule._setVocalBusAutoDucker && this.vocalBus.autoDucker) {
+            const ad = this.vocalBus.autoDucker;
+            this.wasmModule._setVocalBusAutoDucker(
+              this.mixerPtr,
+              !!ad.enabled,
+              typeof ad.thresholdDb === 'number' ? ad.thresholdDb : -30.0,
+              typeof ad.duckDepthDb === 'number' ? ad.duckDepthDb : -12.0,
+              typeof ad.attackMs === 'number' ? ad.attackMs : 15.0,
+              typeof ad.releaseMs === 'number' ? ad.releaseMs : 350.0
+            );
+          }
+        }
+        break;
+      }
+
       case 'SET_VOCAL_BUS_VST_CHAIN': {
         const plugins = Array.isArray(msg.vstPlugins) ? msg.vstPlugins : [];
         this.vocalBus.vstPlugins = plugins;
         this.vocalBusVstSlots.fill(null);
         plugins.forEach((p, idx) => {
           if (idx < 8 && p) {
+            const pluginTypeId = this.getPluginTypeId(p.pluginId);
             this.vocalBusVstSlots[idx] = {
               instanceId: p.instanceId || `${p.pluginId}-${idx}`,
               pluginId: p.pluginId,
@@ -1184,6 +1211,18 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
               latencySamples: p.latencySamples || 0,
               parameters: p.parameters ? { ...p.parameters } : {}
             };
+
+            if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._loadTrackPlugin) {
+              try {
+                this.wasmModule._loadTrackPlugin(this.mixerPtr, 999, idx, pluginTypeId);
+                if (p.enabled === false && this.wasmModule._setTrackPluginBypass) {
+                  this.wasmModule._setTrackPluginBypass(this.mixerPtr, 999, idx, 1);
+                }
+                if (typeof p.wetDry === 'number' && this.wasmModule._setTrackPluginWetDry) {
+                  this.wasmModule._setTrackPluginWetDry(this.mixerPtr, 999, idx, p.wetDry);
+                }
+              } catch (_) {}
+            }
           }
         });
         break;
@@ -1301,7 +1340,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
 
       this.meterFrameCounter++;
       if (this.meterFrameCounter >= 30) {
-        this.sendTelemetryMeters([], { peakL: 0, peakR: 0 }, 0, 0, false);
+        this.sendTelemetryMeters([], { peakL: 0, peakR: 0, rmsL: 0, rmsR: 0 }, { peakL: 0, peakR: 0, rmsL: 0, rmsR: 0 }, false);
         this.meterFrameCounter = 0;
       }
       return true;
@@ -1337,7 +1376,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
 
       this.currentTimelineSample += numFrames;
 
-      // 3. Прямое считывание пиковых уровней из C++ движка через _getTrackPeak
+      // 3. Прямое считывание пиковых и RMS уровней из C++ движка
       this.meterFrameCounter++;
       if (this.meterFrameCounter >= this.meterReportInterval) {
         const trackTelemetry = [];
@@ -1345,15 +1384,23 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         for (const [trackId, track] of this.jsTracks.entries()) {
           let tPeakL = 0;
           let tPeakR = 0;
+          let tRmsL = 0;
+          let tRmsR = 0;
 
           if (this.wasmModule._getTrackPeak) {
-            tPeakL = this.wasmModule._getTrackPeak(this.mixerPtr, trackId, 0);
-            tPeakR = this.wasmModule._getTrackPeak(this.mixerPtr, trackId, 1);
+            tPeakL = this.wasmModule._getTrackPeak(this.mixerPtr, trackId, 0) || 0;
+            tPeakR = this.wasmModule._getTrackPeak(this.mixerPtr, trackId, 1) || 0;
+          }
+          if (this.wasmModule._getTrackRMS) {
+            tRmsL = this.wasmModule._getTrackRMS(this.mixerPtr, trackId, 0) || 0;
+            tRmsR = this.wasmModule._getTrackRMS(this.mixerPtr, trackId, 1) || 0;
           }
 
           if (track.mute) {
             tPeakL = 0;
             tPeakR = 0;
+            tRmsL = 0;
+            tRmsR = 0;
           }
 
           const latencySamples = this.getTrackLatencySamples(trackId);
@@ -1363,8 +1410,8 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
             trackId,
             peakL: tPeakL,
             peakR: tPeakR,
-            rmsL: tPeakL * 0.707,
-            rmsR: tPeakR * 0.707,
+            rmsL: tRmsL,
+            rmsR: tRmsR,
             clipped: tPeakL >= 0.999 || tPeakR >= 0.999,
             latencySamples,
             pdcMs: Number(pdcMs.toFixed(2))
@@ -1373,23 +1420,33 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
 
         let masterPeakL = 0;
         let masterPeakR = 0;
+        let masterRmsL = 0;
+        let masterRmsR = 0;
         let vocalPeakL = 0;
         let vocalPeakR = 0;
+        let vocalRmsL = 0;
+        let vocalRmsR = 0;
 
         if (this.wasmModule._getTrackPeak) {
-          masterPeakL = this.wasmModule._getTrackPeak(this.mixerPtr, 1000, 0);
-          masterPeakR = this.wasmModule._getTrackPeak(this.mixerPtr, 1000, 1);
-          vocalPeakL = this.wasmModule._getTrackPeak(this.mixerPtr, 999, 0);
-          vocalPeakR = this.wasmModule._getTrackPeak(this.mixerPtr, 999, 1);
+          masterPeakL = this.wasmModule._getTrackPeak(this.mixerPtr, 1000, 0) || 0;
+          masterPeakR = this.wasmModule._getTrackPeak(this.mixerPtr, 1000, 1) || 0;
+          vocalPeakL = this.wasmModule._getTrackPeak(this.mixerPtr, 999, 0) || 0;
+          vocalPeakR = this.wasmModule._getTrackPeak(this.mixerPtr, 999, 1) || 0;
+        }
+
+        if (this.wasmModule._getTrackRMS) {
+          masterRmsL = this.wasmModule._getTrackRMS(this.mixerPtr, 1000, 0) || 0;
+          masterRmsR = this.wasmModule._getTrackRMS(this.mixerPtr, 1000, 1) || 0;
+          vocalRmsL = this.wasmModule._getTrackRMS(this.mixerPtr, 999, 0) || 0;
+          vocalRmsR = this.wasmModule._getTrackRMS(this.mixerPtr, 999, 1) || 0;
         }
 
         const isClipped = masterPeakL >= 0.999 || masterPeakR >= 0.999;
 
         this.sendTelemetryMeters(
           trackTelemetry,
-          { peakL: vocalPeakL, peakR: vocalPeakR },
-          masterPeakL,
-          masterPeakR,
+          { peakL: vocalPeakL, peakR: vocalPeakR, rmsL: vocalRmsL, rmsR: vocalRmsR },
+          { peakL: masterPeakL, peakR: masterPeakR, rmsL: masterRmsL, rmsR: masterRmsR },
           isClipped
         );
         this.meterFrameCounter = 0;
@@ -1415,7 +1472,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
   /**
    * Отправка пакета телеметрии в хост (useAudioEngine)
    */
-  sendTelemetryMeters(trackMeters, vocalBusMeter, masterPeakL, masterPeakR, clipped) {
+  sendTelemetryMeters(trackMeters, vocalBusMeter, masterMeter, clipped) {
     const vocalBusLatency = this.getVocalBusLatencySamples();
     const masterLatency = this.getMasterLatencySamples();
 
@@ -1424,14 +1481,19 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       currentTimeSec: this.currentTimelineSample / this.sampleRate,
       tracks: trackMeters,
       vocalBus: {
-        ...vocalBusMeter,
+        peakL: vocalBusMeter ? (vocalBusMeter.peakL || 0) : 0,
+        peakR: vocalBusMeter ? (vocalBusMeter.peakR || 0) : 0,
+        rmsL: vocalBusMeter ? (vocalBusMeter.rmsL || 0) : 0,
+        rmsR: vocalBusMeter ? (vocalBusMeter.rmsR || 0) : 0,
         latencySamples: vocalBusLatency,
         pdcMs: Number(((vocalBusLatency / this.sampleRate) * 1000).toFixed(2))
       },
       master: {
-        peakL: masterPeakL,
-        peakR: masterPeakR,
-        clipped,
+        peakL: masterMeter ? (masterMeter.peakL || 0) : 0,
+        peakR: masterMeter ? (masterMeter.peakR || 0) : 0,
+        rmsL: masterMeter ? (masterMeter.rmsL || 0) : 0,
+        rmsR: masterMeter ? (masterMeter.rmsR || 0) : 0,
+        clipped: !!clipped,
         latencySamples: masterLatency,
         pdcMs: Number(((masterLatency / this.sampleRate) * 1000).toFixed(2))
       },

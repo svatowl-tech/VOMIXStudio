@@ -39,9 +39,9 @@ export function detectTrackCollisions(tracks: TrackState[], sampleRate: number =
 
   const allClipsInfo: FlatClipInfo[] = [];
 
-  tracks.forEach((track) => {
+  (tracks || []).forEach((track) => {
     // Пропускаем замутированные дорожки
-    if (track.mute) return;
+    if (!track || track.mute) return;
 
     (track.clips || []).forEach((clip) => {
       if (!clip || clip.lengthSamples <= 0) return;

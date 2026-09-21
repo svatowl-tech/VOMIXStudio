@@ -128,7 +128,7 @@ if(EMSCRIPTEN)
             -s ENVIRONMENT=web,worker \
             -s MODULARIZE=1 \
             -s EXPORT_NAME='CreateDAWCoreModule' \
-            -s EXPORTED_FUNCTIONS='[\"_malloc\", \"_free\", \"_createMixerInstance\", \"_freeMixerInstance\", \"_processMixer\", \"_setTimelinePosition\", \"_addClipToTrack\", \"_setTrackVolume\", \"_setTrackPan\", \"_setTrackSolo\", \"_setTrackMute\", \"_removeAllTracks\", \"_setMasterVolume\", \"_setMasterLimiter\", \"_loadTrackPlugin\", \"_setTrackPluginParam\", \"_setTrackPluginBypass\", \"_setTrackPluginWetDry\", \"_loadMasterPlugin\", \"_setMasterPluginParam\", \"_setMasterPluginBypass\", \"_setMasterPluginWetDry\", \"_getTrackPeak\"]' \
+            -s EXPORTED_FUNCTIONS='[\"_malloc\", \"_free\", \"_createMixerInstance\", \"_freeMixerInstance\", \"_processMixer\", \"_setTimelinePosition\", \"_addClipToTrack\", \"_setTrackVolume\", \"_setTrackPan\", \"_setTrackSolo\", \"_setTrackMute\", \"_removeAllTracks\", \"_setMasterVolume\", \"_setMasterLimiter\", \"_setVocalBusVolume\", \"_setVocalBusAutoDucker\", \"_loadTrackPlugin\", \"_setTrackPluginParam\", \"_setTrackPluginBypass\", \"_setTrackPluginWetDry\", \"_loadMasterPlugin\", \"_setMasterPluginParam\", \"_setMasterPluginBypass\", \"_setMasterPluginWetDry\", \"_getTrackPeak\", \"_getTrackRMS\"]' \
             -s EXPORTED_RUNTIME_METHODS='[\"cwrap\", \"setValue\", \"getValue\", \"HEAPF32\"]' \
             -s SINGLE_FILE=0 \
         "

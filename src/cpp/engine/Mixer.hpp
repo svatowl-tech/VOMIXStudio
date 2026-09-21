@@ -36,23 +36,47 @@ public:
     size_t currentTimelineSample{0};     // Текущая позиция курсора на таймлайне (в сэмплах)
     SoftLimiter masterLimiter;           // Мастер-лимитер True Peak Guard
 
+    // Параметры вокальной шины (Vocal Bus)
+    float vocalBusVolumeDb{0.0f};        // Громкость вокальной шины (-60 .. +12 dB)
+    float vocalBusPan{0.0f};             // Панорама вокальной шины (-1.0 .. +1.0)
+    bool vocalBusMute{false};            // Mute вокальной шины
+    bool vocalBusSolo{false};            // Solo вокальной шины
+
     // Вектор дорожек (управляется микшером)
     std::vector<std::unique_ptr<Track>> tracks;
 
-    // Мастер-слоты VST (мастеринг-цепочка из 8 слотов перед Soft Limiter)
+    // Слоты VST вокальной шины (8 слотов) и мастер-цепочки (8 слотов)
+    std::array<std::unique_ptr<vomix::vst::IVSTPluginInstance>, 8> vocalBusVstSlots;
     std::array<std::unique_ptr<vomix::vst::IVSTPluginInstance>, 8> masterVstSlots;
 
-    // Пиковые уровни мастера и вокал-шины
+    // Встроенная DSP обработка вокальной шины (EQ, Glue Compressor, AutoDucker)
+    ParametricEQ3Band vocalBusEq;
+    SoftKneeCompressor vocalBusCompressor;
+    AutoDucker vocalBusAutoDucker;
+
+    // Пиковые и RMS уровни мастера (1000) и вокал-шины (999)
     float masterPeakL{0.0f};
     float masterPeakR{0.0f};
+    float masterRmsL{0.0f};
+    float masterRmsR{0.0f};
+
     float vocalBusPeakL{0.0f};
     float vocalBusPeakR{0.0f};
+    float vocalBusRmsL{0.0f};
+    float vocalBusRmsR{0.0f};
 
     // Внутренние предварительно выделенные статические буферы (Zero Malloc в аудиопотоке)
     alignas(16) float sidechainMonoBuffer[MAX_BUFFER_SIZE]{};
+    alignas(16) float vocalBusBuffer[MAX_BUFFER_SIZE * 2]{};
+    alignas(16) float originalBusBuffer[MAX_BUFFER_SIZE * 2]{};
     alignas(16) float masterMixBuffer[MAX_BUFFER_SIZE * 2]{};
 
-    // Буферы раздельных каналов для обработки мастер-плагинов
+    // Буферы раздельных каналов для обработки VST-плагинов на вокал-шине и мастер-цепочке
+    alignas(16) float vocalChanL[MAX_BUFFER_SIZE]{};
+    alignas(16) float vocalChanR[MAX_BUFFER_SIZE]{};
+    alignas(16) float vocalOutL[MAX_BUFFER_SIZE]{};
+    alignas(16) float vocalOutR[MAX_BUFFER_SIZE]{};
+
     alignas(16) float masterChanL[MAX_BUFFER_SIZE]{};
     alignas(16) float masterChanR[MAX_BUFFER_SIZE]{};
     alignas(16) float masterOutL[MAX_BUFFER_SIZE]{};
@@ -67,14 +91,21 @@ public:
     Track* getTrack(uint32_t trackId) noexcept;
     void removeAllTracks() noexcept;
 
+    // --- Управление плагинами вокальной шины ---
+    void loadVocalBusPlugin(int slotIdx, int pluginTypeId);
+    void setVocalBusPluginParam(int slotIdx, int paramId, float normalizedValue);
+    void setVocalBusPluginBypass(int slotIdx, bool bypass);
+    void setVocalBusPluginWetDry(int slotIdx, float wetDry);
+
     // --- Управление плагинами мастер-цепочки ---
     void loadMasterPlugin(int slotIdx, int pluginTypeId);
     void setMasterPluginParam(int slotIdx, int paramId, float normalizedValue);
     void setMasterPluginBypass(int slotIdx, bool bypass);
     void setMasterPluginWetDry(int slotIdx, float wetDry);
 
-    // --- Замер пиков дорожек, мастера (1000) и вокал-шины (999) ---
+    // --- Замер пиков и RMS дорожек, мастера (1000) и вокал-шины (999) ---
     float getPeak(int trackId, int channel) const noexcept;
+    float getRMS(int trackId, int channel) const noexcept;
 
     /**
      * Потоковая обработка одного блока аудиоданных в реальном времени (RT-Safe)
