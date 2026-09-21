@@ -1,6 +1,10 @@
 # Dependencies
 node_modules/
 .pnpm-store/
+bun.lock
+bun.lockb
+yarn.lock
+pnpm-lock.yaml
 
 # Production build outputs
 dist/
