@@ -71,6 +71,62 @@ public:
      */
     void updateCoefficients() noexcept;
 
+    inline void setHighPass(float sr, float freq, float q = 0.7071f) noexcept {
+        type = BiquadFilterType::HighPass;
+        sampleRate = sr;
+        frequency = freq;
+        Q = q;
+        gainDb = 0.0f;
+        updateCoefficients();
+    }
+
+    inline void setLowPass(float sr, float freq, float q = 0.7071f) noexcept {
+        type = BiquadFilterType::LowPass;
+        sampleRate = sr;
+        frequency = freq;
+        Q = q;
+        gainDb = 0.0f;
+        updateCoefficients();
+    }
+
+    inline void setLowShelf(float sr, float freq, float gain, float q = 0.7071f) noexcept {
+        type = BiquadFilterType::LowShelf;
+        sampleRate = sr;
+        frequency = freq;
+        gainDb = gain;
+        Q = q;
+        updateCoefficients();
+    }
+
+    inline void setHighShelf(float sr, float freq, float gain, float q = 0.7071f) noexcept {
+        type = BiquadFilterType::HighShelf;
+        sampleRate = sr;
+        frequency = freq;
+        gainDb = gain;
+        Q = q;
+        updateCoefficients();
+    }
+
+    inline void setPeaking(float sr, float freq, float gain, float q = 1.0f) noexcept {
+        type = BiquadFilterType::Peaking;
+        sampleRate = sr;
+        frequency = freq;
+        gainDb = gain;
+        Q = q;
+        updateCoefficients();
+    }
+
+    /**
+     * Поточечная обработка одного моно-сэмпла (использует регистры L-канала)
+     */
+    inline float process(float in) noexcept {
+        if (!enabled) return in;
+        float out = b0 * in + b1 * x1L + b2 * x2L - a1 * y1L - a2 * y2L;
+        x2L = x1L; x1L = in;
+        y2L = y1L; y1L = out;
+        return out;
+    }
+
     /**
      * Поточечная обработка одного стереосэмпла
      */

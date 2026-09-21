@@ -76,6 +76,7 @@ public:
     float sampleRate{48000.0f};
     bool enabled{true};
     float currentGainReduction{1.0f}; // Текущий коэффициент сжатия (0.0 .. 1.0)
+    float makeupGainLinear{1.0f};     // Линейный коэффициент компенсации усиления
 
     float attackCoeff{0.0f};
     float releaseCoeff{0.0f};
@@ -86,6 +87,21 @@ public:
     void setup(float sr) noexcept;
     void reset() noexcept;
     void updateTimeConstants() noexcept;
+
+    /**
+     * Поточечный расчет коэффициента сжатия для детектора пиков
+     */
+    inline float calculateGain(float inLevel) noexcept {
+        if (!enabled) return 1.0f;
+        float inDb = gainToDb(inLevel);
+        float gainReductionDb = computeGainReductionDb(inDb);
+        float targetGain = dbToGain(-gainReductionDb);
+        envelopeGain = (targetGain < envelopeGain)
+            ? attackCoeff * envelopeGain + (1.0f - attackCoeff) * targetGain
+            : releaseCoeff * envelopeGain + (1.0f - releaseCoeff) * targetGain;
+        currentGainReduction = envelopeGain;
+        return envelopeGain;
+    }
 
     /**
      * Расчет передаточной характеристики с мягким коленом

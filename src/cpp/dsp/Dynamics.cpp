@@ -133,6 +133,7 @@ void SoftKneeCompressor::updateTimeConstants() noexcept {
     float safeRelease = std::max(releaseMs, 1.0f);
     attackCoeff = std::exp(-1.0f / (safeAttack * 0.001f * sampleRate));
     releaseCoeff = std::exp(-1.0f / (safeRelease * 0.001f * sampleRate));
+    makeupGainLinear = dbToGain(makeupGainDb);
 }
 
 float SoftKneeCompressor::computeGainReductionDb(float inDb) const noexcept {

@@ -79,7 +79,7 @@ public:
 
     void terminate() override {}
     bool activate() override { activated = true; return true; }
-    void deactivate() override { activated = false; return true; }
+    void deactivate() override { activated = false; }
     bool isActivated() const override { return activated; }
     void reset() override {}
 
