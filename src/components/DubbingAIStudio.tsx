@@ -305,7 +305,9 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
   useEffect(() => {
     setTrackConfigs((prev) => {
       const updated: Record<number, TrackAIConfig> = { ...prev };
-      (tracks || []).forEach((track) => {
+      const safeTracks = Array.isArray(tracks) ? tracks.filter(Boolean) : [];
+      safeTracks.forEach((track) => {
+        if (!track) return;
         // Дорожка считается оригинальным звуком видео ТОЛЬКО при наличии флага или маркера
         const isVideoOrOrig = Boolean(
           track.isOriginalAudio ||
@@ -411,10 +413,11 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
 
   // Helper to get PCM buffer from track
   const getTrackPCM = (trackId: number): Float32Array | null => {
-    const targetTrack = tracks.find((t) => t.id === trackId);
-    if (!targetTrack || !targetTrack.clips || targetTrack.clips.length === 0) return null;
-    const clip = targetTrack.clips[0];
-    return clip.buffer || null;
+    const safeTracks = Array.isArray(tracks) ? tracks.filter(Boolean) : [];
+    const targetTrack = safeTracks.find((t) => t && t.id === trackId);
+    if (!targetTrack || !Array.isArray(targetTrack.clips) || targetTrack.clips.length === 0) return null;
+    const clip = targetTrack.clips.filter(Boolean)[0];
+    return clip ? clip.buffer || null : null;
   };
 
   // Helper to create a WAV Blob from Float32Array interleaved buffer

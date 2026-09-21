@@ -1,22 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import { systemLogger, LogEntry } from '../services/SystemLogger';
 import { LogConsole } from './LogConsole';
-import {
-  Terminal,
-  AlertCircle,
-  AlertTriangle,
-  CheckCircle2,
-  ChevronUp,
-  ChevronDown,
-  Activity,
-  Cpu
-} from 'lucide-react';
+import { Terminal, AlertCircle, ChevronUp, ChevronDown, Activity } from 'lucide-react';
 
 interface ConsoleStatusBarProps {
   isWorkletActive?: boolean;
   isAudioInitialized?: boolean;
 }
 
+/**
+ * Компактная и элегантная статусная строка в стиле Studio One / Logic Pro
+ * Объединяет жизненно важные индикаторы звукового ядра, задержки, WASM и логов.
+ */
 export const ConsoleStatusBar: React.FC<ConsoleStatusBarProps> = ({
   isWorkletActive = true,
   isAudioInitialized = true
@@ -35,10 +30,9 @@ export const ConsoleStatusBar: React.FC<ConsoleStatusBarProps> = ({
     return unsubscribe;
   }, []);
 
-  // Горячая клавиша для открытия/закрытия консоли (тильда `~` / `ё` или F12 / Escape)
+  // Горячая клавиша для открытия/закрытия консоли (тильда `~` / `ё` или Escape)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Тильда (Backquote) при фокусе не в текстовом поле
       if (e.key === '`' || e.key === 'ё' || e.key === '~') {
         const target = e.target as HTMLElement;
         if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
@@ -58,95 +52,111 @@ export const ConsoleStatusBar: React.FC<ConsoleStatusBarProps> = ({
   const errorCount = systemLogger.getErrorsCount();
   const warnCount = systemLogger.getWarningsCount();
 
+  const isEngineReady = Boolean(isWorkletActive || isAudioInitialized);
+
   return (
     <>
-      {/* 1. Всплывающий Drawer консоли (Slide-up modal/drawer) */}
+      {/* Slide-up консольный Drawer при клике на ошибки/консоль */}
       {isOpen && (
         <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/60 backdrop-blur-sm animate-fadeIn">
           <div
             className="flex-1"
             onClick={() => setIsOpen(false)}
-            title="Нажмите чтобы свернуть консоль"
+            title="Нажмите, чтобы свернуть консоль"
           />
-          <div className="w-full max-w-7xl mx-auto px-4 pb-2 h-[70vh] min-h-[450px]">
+          <div className="w-full max-w-7xl mx-auto px-4 pb-2 h-[65vh] min-h-[400px]">
             <LogConsole isDrawer={true} onClose={() => setIsOpen(false)} />
           </div>
         </div>
       )}
 
-      {/* 2. Постоянная полоса статуса внизу экрана (Docked Status Bar) */}
-      <div className="sticky bottom-0 z-40 bg-[#090d16]/95 border-t border-slate-800 backdrop-blur-md px-4 py-1.5 flex items-center justify-between text-xs font-mono select-none">
-        <div className="flex items-center gap-3">
-          {/* Кнопка открытия консоли */}
+      {/* Однострочная компактная панель состояния */}
+      <div className="sticky bottom-0 z-40 bg-[#070a12] border-t border-slate-800/80 px-3 py-1 flex items-center justify-between text-[11px] font-mono text-slate-400 select-none shrink-0 h-7">
+        {/* Левая часть: Системная консоль и индикатор ошибок */}
+        <div className="flex items-center gap-2">
           <button
             onClick={() => setIsOpen((prev) => !prev)}
-            className={`px-2.5 py-1 rounded-lg border text-xs font-semibold flex items-center gap-2 transition shadow-sm ${
+            className={`px-2 py-0.5 rounded border text-[11px] font-medium flex items-center gap-1.5 transition-colors ${
               errorCount > 0
                 ? 'bg-rose-500/20 border-rose-500/40 text-rose-300 hover:bg-rose-500/30 animate-pulse'
                 : warnCount > 0
-                ? 'bg-amber-500/20 border-amber-500/40 text-amber-300 hover:bg-amber-500/30'
-                : 'bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800'
+                ? 'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/20'
+                : 'bg-slate-900/80 border-slate-800 text-slate-300 hover:bg-slate-800 hover:text-white'
             }`}
-            title="Открыть системную консоль и журнал ошибок (горячая клавиша ~)"
+            title="Открыть системную консоль (горячая клавиша ~)"
           >
-            <Terminal size={14} className={errorCount > 0 ? 'text-rose-400' : 'text-emerald-400'} />
-            <span>Консоль & Логи</span>
+            <Terminal size={12} className={errorCount > 0 ? 'text-rose-400' : 'text-emerald-400'} />
+            <span className="hidden sm:inline">Консоль</span>
 
-            {/* Счетчики */}
+            {/* Мини-бейдж ошибок или предупреждений */}
             {errorCount > 0 ? (
-              <span className="px-1.5 py-0.2 rounded bg-rose-600 text-white text-[10px] font-bold">
-                {errorCount} {errorCount === 1 ? 'ошибка' : 'ошибок'}
+              <span className="px-1 py-0.2 rounded bg-rose-600 text-white text-[10px] font-bold">
+                [{errorCount} {errorCount === 1 ? 'ошибка' : errorCount < 5 ? 'ошибки' : 'ошибок'}]
               </span>
             ) : warnCount > 0 ? (
-              <span className="px-1.5 py-0.2 rounded bg-amber-600 text-white text-[10px] font-bold">
-                {warnCount} пред.
+              <span className="px-1 py-0.2 rounded bg-amber-600/80 text-amber-200 text-[10px] font-semibold">
+                [{warnCount} пред.]
               </span>
-            ) : (
-              <span className="text-[10px] text-slate-500">[{logs.length}]</span>
-            )}
+            ) : null}
 
-            {isOpen ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+            {isOpen ? <ChevronDown size={12} /> : <ChevronUp size={12} />}
           </button>
 
-          {/* Быстрый вывод последней ошибки */}
+          {/* Превью последней ошибки при наличии */}
           {errorCount > 0 && lastError && !isOpen && (
             <div
               onClick={() => setIsOpen(true)}
-              className="hidden sm:flex items-center gap-2 text-rose-400 text-[11px] max-w-md truncate cursor-pointer hover:underline bg-rose-950/40 px-2 py-0.5 rounded border border-rose-900/50"
+              className="hidden md:flex items-center gap-1.5 text-rose-400 text-[10px] max-w-xs truncate cursor-pointer hover:underline bg-rose-950/30 px-2 py-0.5 rounded border border-rose-900/40"
             >
-              <AlertCircle size={13} className="shrink-0" />
-              <span className="font-semibold shrink-0">[{lastError.source}]:</span>
+              <AlertCircle size={11} className="shrink-0" />
               <span className="truncate">{lastError.message}</span>
             </div>
           )}
         </div>
 
-        {/* Статус подсистем справа */}
-        <div className="flex items-center gap-4 text-[11px] text-slate-400">
-          <div className="flex items-center gap-1.5">
+        {/* Центральная часть: Компактные статус-бейджи аудио-движка */}
+        <div className="flex items-center gap-3">
+          {/* Индикатор статуса Audio Engine */}
+          <div className="flex items-center gap-1.5" title="Статус аудио-движка AudioWorklet">
             <span
               className={`w-2 h-2 rounded-full ${
-                isWorkletActive ? 'bg-emerald-500 shadow-sm shadow-emerald-500/50' : 'bg-rose-500'
+                isEngineReady
+                  ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]'
+                  : 'bg-slate-500'
               }`}
             />
-            <span className="hidden md:inline">AudioWorklet:</span>
-            <span className={isWorkletActive ? 'text-slate-200' : 'text-rose-400 font-bold'}>
-              {isWorkletActive ? 'Active' : 'Fallback'}
+            <span className="text-slate-300 font-medium">
+              Audio Engine: {isEngineReady ? 'Ready' : 'Offline'}
             </span>
           </div>
 
-          <div className="flex items-center gap-1.5">
-            <Cpu size={12} className="text-cyan-400" />
-            <span className="hidden md:inline">C++ WASM:</span>
-            <span className="text-cyan-300">48kHz SIMD</span>
+          <span className="text-slate-700">•</span>
+
+          {/* Теги аппаратных технологий WASM / WebGPU */}
+          <div className="flex items-center gap-1">
+            <span className="px-1.5 py-0.2 rounded bg-cyan-950/60 border border-cyan-800/40 text-cyan-300 text-[10px] font-semibold">
+              WASM SIMD
+            </span>
+            <span className="hidden sm:inline-block px-1.5 py-0.2 rounded bg-indigo-950/60 border border-indigo-800/40 text-indigo-300 text-[10px] font-semibold">
+              WebGPU
+            </span>
           </div>
 
-          <div className="hidden lg:flex items-center gap-1 text-slate-500 text-[10px]">
-            <span>Горячая клавиша:</span>
-            <kbd className="px-1.5 py-0.5 bg-slate-800 border border-slate-700 rounded text-slate-300">
-              ~
-            </kbd>
+          <span className="text-slate-700 hidden sm:inline">•</span>
+
+          {/* Размер буфера и задержка */}
+          <div className="hidden sm:flex items-center gap-1 text-slate-400">
+            <Activity size={11} className="text-emerald-400" />
+            <span>128 spl • 2.67ms</span>
           </div>
+        </div>
+
+        {/* Правая часть: Горячая клавиша */}
+        <div className="hidden lg:flex items-center gap-1 text-slate-500 text-[10px]">
+          <span>Консоль:</span>
+          <kbd className="px-1 py-0.2 bg-slate-900 border border-slate-800 rounded text-slate-400 font-semibold">
+            ~
+          </kbd>
         </div>
       </div>
     </>

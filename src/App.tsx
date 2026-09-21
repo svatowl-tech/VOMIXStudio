@@ -22,7 +22,7 @@ import { SubtitleLine } from './services/AudioAIEngine';
 import { SubtitleCue } from './services/ProjectManager';
 import { MediaNormalizer } from './services/MediaNormalizer';
 import { FULL_CPP_CODE, BUILD_WASM_SCRIPT } from './data/cppCode';
-import { Sparkles, Cpu, Layers, Terminal, Zap, ShieldCheck, Upload, Film, Video, Wand2, Volume2, CheckCircle2 } from 'lucide-react';
+import { Sparkles } from 'lucide-react';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavigationTab>('minimal');
@@ -61,9 +61,10 @@ export default function App() {
     performLoudnessMatching
   } = useAudioEngine();
 
-  // Локальное UI-состояние параметров треков и мастера
+  // Локальное UI-состояние параметров треков и мастера с фильтрацией валидности
   const [tracks, setTracks] = useState<TrackState[]>(() => {
-    return new LiveDAWEngine().getTracks();
+    const defaultTracks = new LiveDAWEngine().getTracks();
+    return Array.isArray(defaultTracks) ? defaultTracks.filter(Boolean) : [];
   });
 
   const [vocalBus, setVocalBusState] = useState<VocalBusState>(() => createDefaultVocalBus());
@@ -88,81 +89,98 @@ export default function App() {
     { index: 4, startSec: 12.5, endSec: 15.5, text: 'FFmpeg в браузере вшивает новый звук в видеоряд без потери качества.', speaker: 'Диктор' }
   ]);
 
-  // Синхронизация реальных пиков телеметрии из AudioWorklet
+  // Синхронизация реальных пиков телеметрии из AudioWorklet с полной защитой от null/undefined
   useEffect(() => {
-    setTracks((prevTracks) =>
-      prevTracks.map((t) => {
-        const m = trackMeters.get(t.id);
+    setTracks((prevTracks) => {
+      if (!Array.isArray(prevTracks)) return [];
+      return prevTracks.filter(Boolean).map((t) => {
+        const m = trackMeters ? trackMeters.get(t.id) : null;
         if (m) {
-          return { ...t, peakL: m.peakL, peakR: m.peakR };
+          return { ...t, peakL: m.peakL ?? 0, peakR: m.peakR ?? 0 };
         }
         return t;
-      })
-    );
+      });
+    });
   }, [trackMeters]);
 
   useEffect(() => {
+    if (!masterMeter) return;
     setMaster((prev) => ({
       ...prev,
-      peakL: masterMeter.peakL,
-      peakR: masterMeter.peakR,
-      clipped: masterMeter.clipped
+      peakL: masterMeter.peakL ?? 0,
+      peakR: masterMeter.peakR ?? 0,
+      clipped: Boolean(masterMeter.clipped)
     }));
   }, [masterMeter]);
 
   const handleUpdateTrack = (updatedTrack: TrackState) => {
-    setTracks((prev) => prev.map((t) => (t.id === updatedTrack.id ? updatedTrack : t)));
+    if (!updatedTrack) return;
+    setTracks((prev) =>
+      (Array.isArray(prev) ? prev.filter(Boolean) : []).map((t) => (t.id === updatedTrack.id ? updatedTrack : t))
+    );
 
     // Передаем изменения в AudioWorklet
-    setTrackVolume(updatedTrack.id, updatedTrack.volumeDb);
-    setTrackPan(updatedTrack.id, updatedTrack.pan);
-    setTrackSolo(updatedTrack.id, updatedTrack.solo);
-    setTrackMute(updatedTrack.id, updatedTrack.mute);
+    setTrackVolume(updatedTrack.id, updatedTrack.volumeDb ?? 0);
+    setTrackPan(updatedTrack.id, updatedTrack.pan ?? 0);
+    setTrackSolo(updatedTrack.id, Boolean(updatedTrack.solo));
+    setTrackMute(updatedTrack.id, Boolean(updatedTrack.mute));
 
-    setTrackEq(updatedTrack.id, {
-      lowGain: updatedTrack.eq.lowShelf.gainDb,
-      midGain: updatedTrack.eq.peaking.gainDb,
-      highGain: updatedTrack.eq.highShelf.gainDb
-    });
+    if (updatedTrack.eq) {
+      setTrackEq(updatedTrack.id, {
+        lowGain: updatedTrack.eq.lowShelf?.gainDb ?? 0,
+        midGain: updatedTrack.eq.peaking?.gainDb ?? 0,
+        highGain: updatedTrack.eq.highShelf?.gainDb ?? 0
+      });
+    }
 
-    setTrackCompressor(updatedTrack.id, {
-      threshold: updatedTrack.compressor.thresholdDb,
-      ratio: updatedTrack.compressor.ratio,
-      attack: updatedTrack.compressor.attackMs,
-      release: updatedTrack.compressor.releaseMs,
-      knee: updatedTrack.compressor.kneeDb,
-      makeup: updatedTrack.compressor.makeupGainDb
-    });
+    if (updatedTrack.compressor) {
+      setTrackCompressor(updatedTrack.id, {
+        threshold: updatedTrack.compressor.thresholdDb ?? -12,
+        ratio: updatedTrack.compressor.ratio ?? 4,
+        attack: updatedTrack.compressor.attackMs ?? 10,
+        release: updatedTrack.compressor.releaseMs ?? 100,
+        knee: updatedTrack.compressor.kneeDb ?? 6,
+        makeup: updatedTrack.compressor.makeupGainDb ?? 0
+      });
+    }
 
-    setTrackAutoDucker(updatedTrack.id, {
-      enabled: updatedTrack.autoDucker.enabled,
-      threshold: updatedTrack.autoDucker.thresholdDb,
-      depth: updatedTrack.autoDucker.duckDepthDb,
-      sourceTrackId: updatedTrack.autoDucker.sourceTrackId
-    });
+    if (updatedTrack.autoDucker) {
+      setTrackAutoDucker(updatedTrack.id, {
+        enabled: Boolean(updatedTrack.autoDucker.enabled),
+        threshold: updatedTrack.autoDucker.thresholdDb ?? -24,
+        depth: updatedTrack.autoDucker.duckDepthDb ?? -12,
+        sourceTrackId: updatedTrack.autoDucker.sourceTrackId ?? 1
+      });
+    }
   };
 
   const handleUpdateMaster = (updatedMaster: MasterState) => {
+    if (!updatedMaster) return;
     setMaster(updatedMaster);
-    setMasterVolume(updatedMaster.volumeDb);
-    setMasterLimiter(updatedMaster.limiterEnabled, updatedMaster.limiterCeilingDb);
+    setMasterVolume(updatedMaster.volumeDb ?? 0);
+    setMasterLimiter(Boolean(updatedMaster.limiterEnabled), updatedMaster.limiterCeilingDb ?? -0.1);
   };
 
   const handleUpdateTrackVstChain = (trackId: number, vstPlugins: VSTPluginInstance[]) => {
+    const safePlugins = Array.isArray(vstPlugins) ? vstPlugins.filter(Boolean) : [];
     setTracks((prev) =>
-      prev.map((t) => (t.id === trackId ? { ...t, vstPlugins } : t))
+      (Array.isArray(prev) ? prev.filter(Boolean) : []).map((t) =>
+        t.id === trackId ? { ...t, vstPlugins: safePlugins } : t
+      )
     );
-    setTrackVstChain(trackId, vstPlugins);
+    setTrackVstChain(trackId, safePlugins);
   };
 
   const handleUpdateVocalBusVstChain = (vstPlugins: VSTPluginInstance[]) => {
-    setVocalBusState((prev) => ({ ...prev, vstPlugins }));
-    setVocalBusVstChain(vstPlugins);
+    const safePlugins = Array.isArray(vstPlugins) ? vstPlugins.filter(Boolean) : [];
+    setVocalBusState((prev) => ({ ...prev, vstPlugins: safePlugins }));
+    setVocalBusVstChain(safePlugins);
   };
 
   const handleUpdateMasterVstChain = (vstPlugins: VSTPluginInstance[]) => {
-    setMaster((prev) => ({ ...prev, vstPlugins }));
-    setMasterVstChain(vstPlugins);
+    const safePlugins = Array.isArray(vstPlugins) ? vstPlugins.filter(Boolean) : [];
+    setMaster((prev) => ({ ...prev, vstPlugins: safePlugins }));
+    setMasterVstChain(safePlugins);
   };
 
   const handleUpdateVstParam = (
@@ -174,9 +192,9 @@ export default function App() {
   ) => {
     if (target === 'track' && trackId !== undefined) {
       setTracks((prev) =>
-        prev.map((t) => {
+        (Array.isArray(prev) ? prev.filter(Boolean) : []).map((t) => {
           if (t.id !== trackId) return t;
-          const plugins = (t.vstPlugins || []).map((p) =>
+          const plugins = (Array.isArray(t.vstPlugins) ? t.vstPlugins.filter(Boolean) : []).map((p) =>
             p.instanceId === instanceId
               ? { ...p, parameters: { ...p.parameters, [paramId]: value } }
               : p
@@ -186,7 +204,7 @@ export default function App() {
       );
     } else if (target === 'vocalBus') {
       setVocalBusState((prev) => {
-        const plugins = (prev.vstPlugins || []).map((p) =>
+        const plugins = (Array.isArray(prev.vstPlugins) ? prev.vstPlugins.filter(Boolean) : []).map((p) =>
           p.instanceId === instanceId
             ? { ...p, parameters: { ...p.parameters, [paramId]: value } }
             : p
@@ -195,7 +213,7 @@ export default function App() {
       });
     } else if (target === 'master') {
       setMaster((prev) => {
-        const plugins = (prev.vstPlugins || []).map((p) =>
+        const plugins = (Array.isArray(prev.vstPlugins) ? prev.vstPlugins.filter(Boolean) : []).map((p) =>
           p.instanceId === instanceId
             ? { ...p, parameters: { ...p.parameters, [paramId]: value } }
             : p
@@ -214,9 +232,9 @@ export default function App() {
   ) => {
     if (target === 'track' && trackId !== undefined) {
       setTracks((prev) =>
-        prev.map((t) => {
+        (Array.isArray(prev) ? prev.filter(Boolean) : []).map((t) => {
           if (t.id !== trackId) return t;
-          const plugins = (t.vstPlugins || []).map((p) =>
+          const plugins = (Array.isArray(t.vstPlugins) ? t.vstPlugins.filter(Boolean) : []).map((p) =>
             p.instanceId === instanceId ? { ...p, enabled } : p
           );
           return { ...t, vstPlugins: plugins };
@@ -224,14 +242,14 @@ export default function App() {
       );
     } else if (target === 'vocalBus') {
       setVocalBusState((prev) => {
-        const plugins = (prev.vstPlugins || []).map((p) =>
+        const plugins = (Array.isArray(prev.vstPlugins) ? prev.vstPlugins.filter(Boolean) : []).map((p) =>
           p.instanceId === instanceId ? { ...p, enabled } : p
         );
         return { ...prev, vstPlugins: plugins };
       });
     } else if (target === 'master') {
       setMaster((prev) => {
-        const plugins = (prev.vstPlugins || []).map((p) =>
+        const plugins = (Array.isArray(prev.vstPlugins) ? prev.vstPlugins.filter(Boolean) : []).map((p) =>
           p.instanceId === instanceId ? { ...p, enabled } : p
         );
         return { ...prev, vstPlugins: plugins };
@@ -248,9 +266,9 @@ export default function App() {
   ) => {
     if (target === 'track' && trackId !== undefined) {
       setTracks((prev) =>
-        prev.map((t) => {
+        (Array.isArray(prev) ? prev.filter(Boolean) : []).map((t) => {
           if (t.id !== trackId) return t;
-          const plugins = (t.vstPlugins || []).map((p) =>
+          const plugins = (Array.isArray(t.vstPlugins) ? t.vstPlugins.filter(Boolean) : []).map((p) =>
             p.instanceId === instanceId ? { ...p, wetDry } : p
           );
           return { ...t, vstPlugins: plugins };
@@ -258,14 +276,14 @@ export default function App() {
       );
     } else if (target === 'vocalBus') {
       setVocalBusState((prev) => {
-        const plugins = (prev.vstPlugins || []).map((p) =>
+        const plugins = (Array.isArray(prev.vstPlugins) ? prev.vstPlugins.filter(Boolean) : []).map((p) =>
           p.instanceId === instanceId ? { ...p, wetDry } : p
         );
         return { ...prev, vstPlugins: plugins };
       });
     } else if (target === 'master') {
       setMaster((prev) => {
-        const plugins = (prev.vstPlugins || []).map((p) =>
+        const plugins = (Array.isArray(prev.vstPlugins) ? prev.vstPlugins.filter(Boolean) : []).map((p) =>
           p.instanceId === instanceId ? { ...p, wetDry } : p
         );
         return { ...prev, vstPlugins: plugins };
@@ -275,40 +293,43 @@ export default function App() {
   };
 
   const handleApplyGlobalPreset = (preset: MVPPreset) => {
+    if (!preset) return;
     if (preset.vocalBusSettings?.vstChain) {
       handleUpdateVocalBusVstChain(preset.vocalBusSettings.vstChain);
     }
     if (preset.masterSettings?.vstChain) {
       handleUpdateMasterVstChain(preset.masterSettings.vstChain);
     }
-    if (preset.trackVstChain && (tracks || []).length > 0) {
-      (tracks || []).forEach((tr) => {
-        handleUpdateTrackVstChain(tr.id, preset.trackVstChain);
+    const safeTracks = Array.isArray(tracks) ? tracks.filter(Boolean) : [];
+    if (preset.trackVstChain && safeTracks.length > 0) {
+      safeTracks.forEach((tr) => {
+        if (tr) handleUpdateTrackVstChain(tr.id, preset.trackVstChain);
       });
     }
   };
 
   const handleLoadProjectState = (state: any) => {
+    if (!state) return;
     if (state.master) {
       setMaster((prev) => ({
         ...prev,
         volumeDb: state.master.volumeDb ?? prev.volumeDb,
         limiterEnabled: state.master.limiterEnabled ?? prev.limiterEnabled,
-        limiterCeilingDb: state.master.limiterCeilingDb ?? prev.limiterCeilingDb,
+        limiterCeilingDb: state.master.limiterCeilingDb ?? prev.limiterCeilingDb
       }));
     }
     if (Array.isArray(state.tracks)) {
       setTracks((prev) =>
-        (prev || []).map((t) => {
-          const matched = state.tracks.find((st: any) => st.id === t.id);
+        (Array.isArray(prev) ? prev.filter(Boolean) : []).map((t) => {
+          const matched = state.tracks.find((st: any) => st && st.id === t.id);
           if (matched) {
             return {
               ...t,
               name: matched.name || t.name,
               volumeDb: matched.volumeDb ?? t.volumeDb,
               pan: matched.pan ?? t.pan,
-              solo: matched.solo ?? t.solo,
-              mute: matched.mute ?? t.mute,
+              solo: Boolean(matched.solo ?? t.solo),
+              mute: Boolean(matched.mute ?? t.mute)
             };
           }
           return t;
@@ -316,21 +337,22 @@ export default function App() {
       );
     }
     if (Array.isArray(state.subtitles)) {
-      setSubtitles(state.subtitles || []);
+      setSubtitles(state.subtitles.filter(Boolean));
     }
   };
 
   const handleImportMediaFiles = async (data: { videoFile?: File; audioFiles: { file: File; name: string }[] }) => {
+    if (!data) return;
     if (data.videoFile) {
       setSourceVideoFile(data.videoFile);
     }
-    const audioList = data.audioFiles || [];
-    const currentTracks = tracks || [];
+    const audioList = Array.isArray(data.audioFiles) ? data.audioFiles.filter(Boolean) : [];
+    const currentTracks = Array.isArray(tracks) ? tracks.filter(Boolean) : [];
     for (let i = 0; i < audioList.length && i < currentTracks.length; i++) {
-      const { file } = audioList[i];
+      const item = audioList[i];
       const targetTrack = currentTracks[i];
-      if (targetTrack) {
-        await handleFileUpload(file, targetTrack.id);
+      if (item && item.file && targetTrack) {
+        await handleFileUpload(item.file, targetTrack.id);
       }
     }
   };
@@ -338,14 +360,17 @@ export default function App() {
   const [loudnessStatus, setLoudnessStatus] = useState<string | null>(null);
 
   const handleFileUpload = async (file: File, trackId: number) => {
+    if (!file) return;
     const res = await uploadAudioFileToTrack(file, trackId, Date.now(), 0);
-    setTracks((prev) =>
-      (prev || []).map((t) => {
+    setTracks((prev) => {
+      const safePrev = Array.isArray(prev) ? prev.filter(Boolean) : [];
+      return safePrev.map((t) => {
         if (t.id === trackId) {
+          const currentClips = Array.isArray(t.clips) ? t.clips.filter(Boolean) : [];
           return {
             ...t,
             clips: [
-              ...(t.clips || []),
+              ...currentClips,
               {
                 id: Date.now(),
                 name: file.name,
@@ -362,30 +387,34 @@ export default function App() {
           };
         }
         return t;
-      })
-    );
+      });
+    });
   };
 
   /**
    * Сброс дорожек при создании нового проекта
    */
   const handleResetProjectState = () => {
-    setTracks([createNewTrack(1, 'Дублер 1 (Диалоги)', '#10b981')]);
+    const initialTr = createNewTrack(1, 'Дублер 1 (Диалоги)', '#10b981');
+    initialTr.clips = [];
+    setTracks([initialTr]);
     setSourceVideoFile(null);
     setSubtitles([]);
   };
 
   /**
-   * Импорт видео через модальный хаб
+   * Импорт видео через модальный хаб с гарантией целостности структуры
    */
   const handleModalImportVideo = async (videoFile: File, audioPcm?: Float32Array) => {
+    if (!videoFile) return;
     setSourceVideoFile(videoFile);
     if (audioPcm && audioPcm.length > 0) {
       let actualTargetTrackId = 1;
-      const totalFrames = audioPcm.length / 2;
+      const totalFrames = Math.floor(audioPcm.length / 2);
       const clipId = Date.now();
 
       setTracks((prev) => {
+        const safePrev = Array.isArray(prev) ? prev.filter(Boolean) : [];
         const videoClip = {
           id: clipId,
           name: `🎬 Оригинал_${videoFile.name}`,
@@ -400,17 +429,19 @@ export default function App() {
         };
 
         // 1. Ищем, есть ли уже отдельная видео-дорожка
-        const existingVidTrack = prev.find(
+        const existingVidTrack = safePrev.find(
           (t) =>
-            t.name.includes('Звук видео') ||
-            t.name.includes('Видео-звук') ||
-            t.name.includes('Оригинал') ||
-            t.name.includes('🎬')
+            t &&
+            t.name &&
+            (t.name.includes('Звук видео') ||
+              t.name.includes('Видео-звук') ||
+              t.name.includes('Оригинал') ||
+              t.name.includes('🎬'))
         );
 
         if (existingVidTrack) {
           actualTargetTrackId = existingVidTrack.id;
-          return prev.map((t) =>
+          return safePrev.map((t) =>
             t.id === existingVidTrack.id
               ? {
                   ...t,
@@ -423,9 +454,13 @@ export default function App() {
         }
 
         // 2. Проверяем, свободна ли Первая дорожка
-        if (prev.length > 0 && (prev[0].clips || []).length === 0 && (prev[0].name.includes('Дорожка') || prev[0].name.includes('Track'))) {
-          actualTargetTrackId = prev[0].id;
-          return prev.map((t, idx) =>
+        if (
+          safePrev.length > 0 &&
+          (!Array.isArray(safePrev[0].clips) || safePrev[0].clips.length === 0) &&
+          (safePrev[0].name.includes('Дорожка') || safePrev[0].name.includes('Track'))
+        ) {
+          actualTargetTrackId = safePrev[0].id;
+          return safePrev.map((t, idx) =>
             idx === 0
               ? {
                   ...t,
@@ -439,12 +474,12 @@ export default function App() {
         }
 
         // 3. Иначе создаем новую отдельную дорожку
-        const newTrackId = prev.length > 0 ? Math.max(...prev.map((t) => t.id)) + 1 : 1;
+        const newTrackId = safePrev.length > 0 ? Math.max(...safePrev.map((t) => t.id)) + 1 : 1;
         actualTargetTrackId = newTrackId;
         const newTr = createNewTrack(newTrackId, `🎬 Оригинальный звук [${videoFile.name}]`, '#06b6d4');
         newTr.isOriginalAudio = true;
         newTr.clips = [videoClip];
-        return [newTr, ...prev];
+        return [newTr, ...safePrev];
       });
 
       uploadRawPCMToTrack(audioPcm, actualTargetTrackId, clipId, 0, 1.0, 0.0, true);
@@ -459,17 +494,19 @@ export default function App() {
     pcmBuffer: Float32Array,
     config: { name: string; trackId?: number; color?: string; replaceExisting?: boolean }
   ) => {
-    const totalFrames = pcmBuffer.length / 2;
+    if (!file || !pcmBuffer) return;
+    const totalFrames = Math.floor(pcmBuffer.length / 2);
     const clipId = Date.now();
-    let effectiveTrackId = config.trackId;
+    let effectiveTrackId = config?.trackId;
 
-    const isOriginal = /оригинал|original|видео|video|отригал|orig/i.test(config.name || file.name);
+    const isOriginal = /оригинал|original|видео|video|отригал|orig/i.test(config?.name || file.name);
 
     setTracks((prev) => {
-      if (!effectiveTrackId || !config.replaceExisting) {
-        const nextId = effectiveTrackId || (prev.length > 0 ? Math.max(...prev.map((t) => t.id)) + 1 : 1);
+      const safePrev = Array.isArray(prev) ? prev.filter(Boolean) : [];
+      if (!effectiveTrackId || !config?.replaceExisting) {
+        const nextId = effectiveTrackId || (safePrev.length > 0 ? Math.max(...safePrev.map((t) => t.id)) + 1 : 1);
         effectiveTrackId = nextId;
-        const newTrack = createNewTrack(nextId, config.name, config.color);
+        const newTrack = createNewTrack(nextId, config?.name || file.name, config?.color);
         newTrack.isOriginalAudio = isOriginal;
         newTrack.clips = [
           {
@@ -482,17 +519,17 @@ export default function App() {
             fadeInSamples: 0,
             fadeOutSamples: 0,
             buffer: pcmBuffer,
-            color: config.color || newTrack.color
+            color: config?.color || newTrack.color
           }
         ];
-        return [...prev, newTrack];
+        return [...safePrev, newTrack];
       } else {
-        return prev.map((t) =>
+        return safePrev.map((t) =>
           t.id === effectiveTrackId
             ? {
                 ...t,
-                name: config.name || t.name,
-                color: config.color || t.color,
+                name: config?.name || t.name,
+                color: config?.color || t.color,
                 isOriginalAudio: isOriginal || t.isOriginalAudio,
                 clips: [
                   {
@@ -505,7 +542,7 @@ export default function App() {
                     fadeInSamples: 0,
                     fadeOutSamples: 0,
                     buffer: pcmBuffer,
-                    color: config.color || t.color
+                    color: config?.color || t.color
                   }
                 ]
               }
@@ -520,41 +557,7 @@ export default function App() {
   };
 
   /**
-   * Импорт субтитров через модальный хаб
-   */
-  const handleModalImportSubtitles = async (cues: SubtitleCue[]) => {
-    const lines: SubtitleLine[] = cues.map((c) => ({
-      index: c.index,
-      startSec: c.startSec,
-      endSec: c.endSec,
-      text: c.text,
-      speaker: c.speaker || 'Голос'
-    }));
-    setSubtitles(lines);
-  };
-
-  /**
-   * Запуск автоматического выравнивания громкости дорожек (Loudness Matching)
-   */
-  const handleAutoMatchLoudness = (targetRmsDb = -18.0) => {
-    const result = performLoudnessMatching(tracks, targetRmsDb, -1.0);
-    setTracks(result.updatedTracks);
-
-    const activeAdjustments = result.adjustments.filter((a) => !a.isSilent);
-    if (activeAdjustments.length === 0) {
-      setLoudnessStatus('Нет активных аудиодорожек с сигналом для выравнивания.');
-    } else {
-      const summary = activeAdjustments
-        .map((a) => `${a.trackName}: ${a.gainChangeDb > 0 ? '+' : ''}${a.gainChangeDb} dB`)
-        .join(', ');
-      setLoudnessStatus(`Выровнена громкость (${targetRmsDb} dBFS): ${summary}`);
-    }
-
-    setTimeout(() => setLoudnessStatus(null), 6000);
-  };
-
-  /**
-   * Добавление сгенерированных AI стемов (Вокал + M&E) на дорожки DAW
+   * Добавление стем-дорожек (вокал + минус) с гарантированным наличием клипов
    */
   const handleAddStemTracks = (
     vocalsPcm: Float32Array,
@@ -562,14 +565,19 @@ export default function App() {
     vocalsName = 'Изолированный вокал оригинала',
     karaokeName = 'Фонограмма M&E'
   ) => {
+    if (!vocalsPcm || !karaokePcm) return;
     const vocLen = Math.floor(vocalsPcm.length / 2);
     const karLen = Math.floor(karaokePcm.length / 2);
     const vocClipId = Date.now();
     const karClipId = Date.now() + 1;
 
+    let nextId1 = 1;
+    let nextId2 = 2;
+
     setTracks((prev) => {
-      const nextId1 = prev.length > 0 ? Math.max(...prev.map((t) => t.id)) + 1 : 1;
-      const nextId2 = nextId1 + 1;
+      const safePrev = Array.isArray(prev) ? prev.filter(Boolean) : [];
+      nextId1 = safePrev.length > 0 ? Math.max(...safePrev.map((t) => t.id)) + 1 : 1;
+      nextId2 = nextId1 + 1;
 
       const trackVoc = createNewTrack(nextId1, vocalsName, '#10b981');
       trackVoc.clips = [
@@ -603,26 +611,28 @@ export default function App() {
         }
       ];
 
-      return [...prev, trackVoc, trackKar];
+      return [...safePrev, trackVoc, trackKar];
     });
 
-    uploadRawPCMToTrack(vocalsPcm, tracks.length + 1, vocClipId, 0, 1.0, 0, true);
-    uploadRawPCMToTrack(karaokePcm, tracks.length + 2, karClipId, 0, 1.0, 0, true);
+    uploadRawPCMToTrack(vocalsPcm, nextId1, vocClipId, 0, 1.0, 0, true);
+    uploadRawPCMToTrack(karaokePcm, nextId2, karClipId, 0, 1.0, 0, true);
   };
 
   /**
-   * Применение очищенного или спектрально подкорректированного аудио к существующей дорожке
+   * Замена / Наложение обработанного AI аудио на дорожку
    */
   const handleApplyProcessedAudioToTrack = (
     trackId: number,
     newPcm: Float32Array,
     clipName = 'Обработанное аудио'
   ) => {
+    if (!newPcm) return;
     const totalFrames = Math.floor(newPcm.length / 2);
     const clipId = Date.now();
 
-    setTracks((prev) =>
-      prev.map((t) =>
+    setTracks((prev) => {
+      const safePrev = Array.isArray(prev) ? prev.filter(Boolean) : [];
+      return safePrev.map((t) =>
         t.id === trackId
           ? {
               ...t,
@@ -642,306 +652,127 @@ export default function App() {
               ]
             }
           : t
-      )
-    );
+      );
+    });
 
     uploadRawPCMToTrack(newPcm, trackId, clipId, 0, 1.0, 0, true);
   };
 
+  const handleAddTrack = () => {
+    setTracks((prev) => {
+      const safePrev = Array.isArray(prev) ? prev.filter(Boolean) : [];
+      const newId = safePrev.length > 0 ? Math.max(...safePrev.map((t) => t.id)) + 1 : 1;
+      const newTr = createNewTrack(newId, `CH #${newId}: Актер / Озвучка`, '#10b981');
+      newTr.clips = [];
+      return [...safePrev, newTr];
+    });
+  };
+
+  const handleAutoMatchLoudness = () => {
+    const safeTracks = Array.isArray(tracks) ? tracks.filter(Boolean) : [];
+    const res = performLoudnessMatching(safeTracks, -18.0, -1.0);
+    setLoudnessStatus(
+      `Выровнено ${res.adjustments.length} дорожек по EBU R128 (-18 LUFS). Максимальный пик: ${(res.maxPeakDb ?? -1.0).toFixed(1)} dBFS.`
+    );
+    setTimeout(() => setLoudnessStatus(null), 5000);
+  };
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-emerald-500 selection:text-slate-950">
-      {/* Top Navigation */}
+    <div className="min-h-screen bg-[#070a10] text-slate-100 flex flex-col font-sans selection:bg-emerald-500 selection:text-black">
+      {/* Шапка приложения */}
       <Header
         activeTab={activeTab}
         onSelectTab={setActiveTab}
         onOpenImportModal={() => setShowGlobalImportModal(true)}
       />
 
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-        {/* Audio Engine Error Alert */}
-        {audioEngineError && (
-          <div className="bg-rose-500/10 border border-rose-500/30 p-4 rounded-xl text-rose-300 text-xs font-mono">
-            <strong>Ошибка аудиодвижка:</strong> {audioEngineError}
+      {/* Ошибка инициализации C++ ядра */}
+      {audioEngineError && (
+        <div className="bg-rose-950/80 border-b border-rose-800 text-rose-200 px-4 py-2 text-xs flex items-center justify-between font-mono animate-fade-in">
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" />
+            <span>{audioEngineError}</span>
           </div>
-        )}
-
-        {/* Tab 0: Minimal Studio MVP Pipeline */}
-        <div className={activeTab === 'minimal' ? 'space-y-6 animate-fadeIn' : 'hidden'}>
-          <MinimalStudio />
+          <button
+            onClick={initAudioEngine}
+            className="px-2 py-0.5 bg-rose-800 hover:bg-rose-700 text-white rounded text-[11px] transition-colors"
+          >
+            Перезапустить ядро
+          </button>
         </div>
+      )}
 
-        {/* Tab 1: Interactive Live Studio DAW */}
+      {/* Статус автобаланса громкости */}
+      {loudnessStatus && (
+        <div className="bg-emerald-950/80 border-b border-emerald-800 text-emerald-200 px-4 py-1.5 text-xs flex items-center gap-2 font-mono">
+          <Sparkles size={14} className="text-emerald-400" />
+          <span>{loudnessStatus}</span>
+        </div>
+      )}
+
+      {/* Основная рабочая область в зависимости от активной вкладки */}
+      <main className="flex-1 flex flex-col overflow-hidden relative">
+        {activeTab === 'minimal' && <MinimalStudio />}
+
         {activeTab === 'studio' && (
-          <div className="space-y-6 animate-fadeIn">
-            {/* DSP Loudness Matching Toolbar */}
-            <div className="bg-[#121622] border border-[#232d42] p-3.5 rounded-xl flex flex-wrap items-center justify-between gap-3 shadow-lg">
-              <div className="flex items-center gap-2.5">
-                <div className="p-1.5 bg-blue-500/10 border border-blue-500/20 rounded-lg text-blue-400">
-                  <Volume2 size={16} />
-                </div>
-                <div>
-                  <div className="text-xs font-semibold text-slate-200 flex items-center gap-2">
-                    DSP Loudness Matching & Peak Guard (EBU R128 / Broadcast Normalization)
-                  </div>
-                  <div className="text-[11px] text-slate-400">
-                    Автоматическое приведение дорожек к единому RMS уровню без клиппинга (True Peak ≤ -1.0 dBFS)
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <button
-                  id="btn-match-loudness-dialog"
-                  onClick={() => handleAutoMatchLoudness(-18.0)}
-                  className="px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
-                  title="Выровнять дорожки под уровень речи -18 dBFS"
-                >
-                  <Wand2 size={13} className="text-blue-400" />
-                  Auto-Match Dialog (-18 dBFS)
-                </button>
-
-                <button
-                  id="btn-match-loudness-music"
-                  onClick={() => handleAutoMatchLoudness(-14.0)}
-                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 cursor-pointer"
-                  title="Выровнять под стандарты стриминга -14 dBFS"
-                >
-                  <Wand2 size={13} className="text-purple-400" />
-                  Streaming (-14 dBFS)
-                </button>
-              </div>
-            </div>
-
-            {/* Loudness Status Toast / Banner */}
-            {loudnessStatus && (
-              <div className="bg-blue-950/40 border border-blue-500/30 p-3 rounded-lg text-blue-300 text-xs flex items-center gap-2 animate-fadeIn">
-                <CheckCircle2 size={15} className="text-blue-400 shrink-0" />
-                <span>{loudnessStatus}</span>
-              </div>
-            )}
-            <div className="bg-slate-900/90 border border-emerald-500/30 p-4 rounded-xl flex flex-wrap items-center justify-between gap-4 shadow-lg">
-              <div className="flex items-center gap-3">
-                <div className="p-2 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-emerald-400">
-                  <Sparkles size={18} />
-                </div>
-                <div>
-                  <h2 className="text-xs sm:text-sm font-bold text-slate-200 flex items-center gap-2">
-                    AudioWorklet DAW Infrastructure & WASM Bridge
-                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
-                      {isAudioWorkletActive ? 'AudioWorklet Thread Running' : 'Web Audio API Ready'}
-                    </span>
-                  </h2>
-                  <p className="text-xs text-slate-400">
-                    Многодорожечный аудиомикшер с передачей команды через MessagePort, декодированием WAV/MP3 и измерением Peak/RMS в фоновом аудиопотоке.
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-3 text-xs font-mono text-slate-400">
-                {!isInitialized && (
-                  <button
-                    onClick={initAudioEngine}
-                    className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold text-xs transition-all shadow-md shadow-emerald-900/20 flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Zap size={14} /> Инициализировать AudioWorklet
-                  </button>
-                )}
-                <span className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-950 border border-slate-800 rounded">
-                  <ShieldCheck size={13} className="text-emerald-400" />
-                  Zero Underruns
-                </span>
-              </div>
-            </div>
-
-            {/* Transport & Master Fader */}
-            <MasterSection
-              master={master}
-              isPlaying={isPlaying}
-              onTogglePlay={togglePlay}
-              onReset={() => seek(0)}
-              onUpdateMaster={handleUpdateMaster}
-              onUpdateVstChain={handleUpdateMasterVstChain}
-              onUpdateVstParam={(instanceId, paramId, value) => handleUpdateVstParam('master', instanceId, paramId, value)}
-              onUpdateVstBypass={(instanceId, enabled) => handleUpdateVstBypass('master', instanceId, enabled)}
-              onUpdateVstWetDry={(instanceId, wetDry) => handleUpdateVstWetDry('master', instanceId, wetDry)}
-            />
-
-            {/* Audio File Upload Rack for Tracks */}
-            <div className="bg-slate-900/80 border border-slate-800 p-4 rounded-xl space-y-3">
-              <h3 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
-                <Upload size={14} className="text-emerald-400" />
-                Загрузка собственных аудиофайлов (WAV / MP3) в WASM Память
-              </h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                {tracks.map((t) => (
-                  <AudioUploader
-                    key={t.id}
-                    trackId={t.id}
-                    trackName={t.name}
-                    onFileUpload={handleFileUpload}
-                  />
-                ))}
-              </div>
-            </div>
-
-            {/* Multitrack Timeline */}
+          <div className="flex-1 flex flex-col overflow-hidden">
             <TimelineView
               tracks={tracks}
               currentTimeSec={currentTimeSec}
+              totalTimeSec={30}
               isPlaying={isPlaying}
               onSeek={seek}
               onUpdateTrack={handleUpdateTrack}
               syncAllTracks={syncAllTracks}
               syncTrackClips={syncTrackClips}
+              videoFile={sourceVideoFile}
+              onTogglePlay={togglePlay}
             />
-
-            {/* Multitrack Mixer Channel Strips */}
-            <div className="space-y-3">
-              <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
-                <Cpu size={14} className="text-emerald-400" />
-                Многодорожечный микшер и C++ DSP каналы
-              </h3>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                {tracks.map((track) => (
-                  <TrackStrip
-                    key={track.id}
-                    track={track}
-                    allTracks={tracks}
-                    onUpdateTrack={handleUpdateTrack}
-                    onUpdateVstChain={(vstPlugins) => handleUpdateTrackVstChain(track.id, vstPlugins)}
-                    onUpdateVstParam={(instanceId, paramId, value) => handleUpdateVstParam('track', instanceId, paramId, value, track.id)}
-                    onUpdateVstBypass={(instanceId, enabled) => handleUpdateVstBypass('track', instanceId, enabled, track.id)}
-                    onUpdateVstWetDry={(instanceId, wetDry) => handleUpdateVstWetDry('track', instanceId, wetDry, track.id)}
-                  />
-                ))}
-              </div>
-            </div>
           </div>
         )}
 
-        {/* Tab: Industrial VST & CLAP Plugin Host / Directory Manager */}
-        <div className={activeTab === 'vst' ? 'space-y-6 animate-fadeIn' : 'hidden'}>
-          <VSTPluginManager />
-        </div>
-
-        {/* Tab: Local Project Manager (File System Access API) */}
-        <div className={activeTab === 'project' ? 'space-y-6 animate-fadeIn' : 'hidden'}>
-          <ProjectWorkspace
-            tracks={tracks}
-            master={master}
-            sourceVideoFile={sourceVideoFile}
-            onLoadProjectState={handleLoadProjectState}
-            onImportMediaFiles={handleImportMediaFiles}
-          />
-        </div>
-
-        {/* Tab 2: Video Monitor & Frame Sync */}
-        <div className={activeTab === 'video' ? 'space-y-6 animate-fadeIn' : 'hidden'}>
-          {/* Top Info Banner */}
-          <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-xl flex flex-wrap items-center justify-between gap-4 shadow-lg">
-            <div className="flex items-center gap-3">
-              <div className="p-2.5 bg-cyan-500/10 border border-cyan-500/20 rounded-xl text-cyan-400">
-                <Video size={20} />
-              </div>
-              <div>
-                <h2 className="text-xs sm:text-sm font-bold text-slate-200 flex items-center gap-2">
-                  Frame-Accurate Video Monitor
-                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 font-mono">
-                    Subtitles & Timecode Drift Auto-Correction
-                  </span>
-                </h2>
-                <p className="text-xs text-slate-400">
-                  Покадровая синхронизация видеоряда с аудиоядром DAW, просмотр субтитров в реальном времени и покадровый шаг.
-                </p>
-              </div>
-            </div>
+        {activeTab === 'ai-dubbing' && (
+          <div className="flex-1 overflow-y-auto p-4 md:p-6 bg-[#070a10]">
+            <DubbingAIStudio
+              tracks={tracks}
+              currentTimeSec={currentTimeSec}
+              onSeek={seek}
+              onAddStemTracks={handleAddStemTracks}
+              onApplyProcessedAudioToTrack={handleApplyProcessedAudioToTrack}
+            />
           </div>
+        )}
 
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-            <div className="lg:col-span-8">
-              <VideoMonitor
-                currentTimeSec={currentTimeSec}
-                isPlaying={isPlaying}
-                onSeek={seek}
-                onTogglePlay={togglePlay}
-                subtitles={subtitles}
-                onVideoLoaded={(file) => setSourceVideoFile(file)}
-              />
-            </div>
-
-            {/* Subtitles & Cue List */}
-            <div className="lg:col-span-4 bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3 flex flex-col max-h-[500px]">
-              <h3 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center justify-between border-b border-slate-800 pb-2">
-                <span>Реплики субтитров (SRT)</span>
-                <span className="text-[10px] font-mono text-cyan-400">{subtitles.length} реплик</span>
-              </h3>
-
-              <div className="flex-1 overflow-y-auto space-y-2 pr-1 scrollbar-thin scrollbar-thumb-slate-800">
-                {subtitles.map((cue) => {
-                  const isActive = currentTimeSec >= cue.startSec && currentTimeSec <= cue.endSec;
-                  return (
-                    <div
-                      key={cue.index}
-                      onClick={() => seek(cue.startSec)}
-                      className={`p-3 rounded-lg border text-xs cursor-pointer transition-all ${
-                        isActive
-                          ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-200 shadow-md'
-                          : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-200'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between font-mono text-[10px] mb-1">
-                        <span className={isActive ? 'text-emerald-400 font-bold' : 'text-slate-500'}>
-                          {cue.speaker || 'Голос'}
-                        </span>
-                        <span className="text-slate-500">
-                          {cue.startSec.toFixed(2)}s - {cue.endSec.toFixed(2)}s
-                        </span>
-                      </div>
-                      <p className={`font-sans leading-snug ${isActive ? 'text-white font-medium' : ''}`}>
-                        {cue.text}
-                      </p>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+        {activeTab === 'vst' && (
+          <div className="flex-1 overflow-y-auto p-4 md:p-6 bg-[#070a10]">
+            <VSTPluginManager />
           </div>
+        )}
 
-          {/* Quick Timeline underneath Video */}
-          <TimelineView
-            tracks={tracks}
-            currentTimeSec={currentTimeSec}
-            isPlaying={isPlaying}
-            onSeek={seek}
-            onUpdateTrack={handleUpdateTrack}
-          />
-        </div>
+        {activeTab === 'export' && (
+          <div className="flex-1 overflow-y-auto p-4 md:p-6 bg-[#070a10]">
+            <ExportStudio
+              tracks={tracks}
+              master={master}
+              sourceVideoFile={sourceVideoFile}
+            />
+          </div>
+        )}
 
-        {/* Tab 3: AI Dubbing, Silero VAD & Smart Alignment */}
-        <div className={activeTab === 'ai-dubbing' ? 'space-y-6 animate-fadeIn' : 'hidden'}>
-          <DubbingAIStudio
-            tracks={tracks}
-            currentTimeSec={currentTimeSec}
-            onSeek={seek}
-            onAddStemTracks={handleAddStemTracks}
-            onApplyProcessedAudioToTrack={handleApplyProcessedAudioToTrack}
-          />
-        </div>
+        {activeTab === 'project' && (
+          <div className="flex-1 overflow-y-auto p-4 md:p-6 bg-[#070a10]">
+            <ProjectWorkspace
+              tracks={tracks}
+              master={master}
+              sourceVideoFile={sourceVideoFile}
+              onLoadProjectState={handleLoadProjectState}
+              onImportMediaFiles={handleImportMediaFiles}
+            />
+          </div>
+        )}
 
-        {/* Tab 4: Export Studio & FFmpeg WASM Video Muxer */}
-        <div className={activeTab === 'export' ? 'space-y-6 animate-fadeIn' : 'hidden'}>
-          <ExportStudio
-            tracks={tracks}
-            master={master}
-            sourceVideoFile={sourceVideoFile}
-          />
-        </div>
-
-        {/* Tab 5 & 6: C++ Source Code & Emscripten Build Guide */}
-        {(activeTab === 'cpp' || activeTab === 'emcc') && (
-          <div className="space-y-6">
+        {activeTab === 'cpp' && (
+          <div className="flex-1 overflow-y-auto p-4 md:p-6 bg-[#070a10]">
             <CppSourceCodeViewer
               cppCode={FULL_CPP_CODE}
               buildScript={BUILD_WASM_SCRIPT}
@@ -949,56 +780,43 @@ export default function App() {
           </div>
         )}
 
-        {/* Tab 7: System Log Console & Runtime Diagnostics */}
         {activeTab === 'console' && (
-          <div className="space-y-6 animate-fadeIn">
+          <div className="flex-1 overflow-y-auto p-4 md:p-6 bg-[#070a10]">
             <LogConsole />
           </div>
         )}
       </main>
 
-      {/* Floating / Sticky Console & System Status Bar */}
+      {/* Компактный и чистый футер приложения без громоздких текстов */}
+      <footer className="bg-[#070a12] border-t border-slate-800/80 px-4 py-1 flex items-center justify-between text-[11px] font-mono text-slate-500 select-none shrink-0">
+        <div className="flex items-center gap-2">
+          <span className="font-semibold text-slate-400">VOMIXStudio</span>
+          <span className="text-slate-600">v1.0.0</span>
+          <span className="text-slate-700">•</span>
+          <span className="text-slate-500">© 2026 VOMIX DAW Labs</span>
+        </div>
+        <div className="flex items-center gap-2 text-slate-400">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+          <span>Аппаратное ускорение: WebAssembly &amp; GPU</span>
+        </div>
+      </footer>
+
+      {/* Компактная статусная строка управления */}
       <ConsoleStatusBar
         isWorkletActive={isAudioWorkletActive}
         isAudioInitialized={isInitialized}
       />
 
-      {/* Footer with Low-Latency DSP, WASM & WebGPU Status Indicators */}
-      <footer className="border-t border-slate-800 bg-slate-950 py-4 px-6 text-center text-xs text-slate-400 font-mono flex flex-col md:flex-row items-center justify-between gap-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-slate-500">Engine Core:</span>
-          <span className={`px-2.5 py-0.5 rounded text-[10px] font-bold tracking-wide ${isInitialized ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shadow-sm shadow-emerald-500/5' : 'bg-slate-900 text-slate-600 border border-slate-800'}`}>
-            daw_core.wasm: {isInitialized ? 'INSTANTIATED' : 'OFFLINE'}
-          </span>
-          <span className={`px-2.5 py-0.5 rounded text-[10px] font-bold tracking-wide ${isAudioWorkletActive ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 shadow-sm shadow-cyan-500/5' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'}`}>
-            Thread: {isAudioWorkletActive ? 'AUDIO WORKLET ACTIVE' : 'WORKLET STANDBY'}
-          </span>
-        </div>
-        <div className="text-slate-500 text-[11px] font-medium">
-          FFmpeg WASM Muxing • C++17 DSP Audio Core • AudioWorklet Bridge • Silero VAD ONNX
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-slate-500">Acceleration & Latency:</span>
-          <span className="px-2.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20 text-[10px] font-bold tracking-wide shadow-sm shadow-blue-500/5">
-            {'gpu' in navigator ? 'WebGPU Active' : 'WASM Fallback'}
-          </span>
-          <span className="px-2.5 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20 text-[10px] font-bold tracking-wide shadow-sm shadow-purple-500/5">
-            Buffer: 128 spl (~2.67ms)
-          </span>
-        </div>
-      </footer>
-
-      {/* Единый модальный хаб импорта медиаматериалов */}
-      <MediaImportModal
-        isOpen={showGlobalImportModal}
-        onClose={() => setShowGlobalImportModal(false)}
-        existingTracks={tracks}
-        currentVideoFile={sourceVideoFile}
-        onResetProjectState={handleResetProjectState}
-        onImportVideo={handleModalImportVideo}
-        onImportAudioTrack={handleModalImportAudioTrack}
-        onImportSubtitles={handleModalImportSubtitles}
-      />
+      {/* Глобальное модальное окно импорта файлов */}
+      {showGlobalImportModal && (
+        <MediaImportModal
+          isOpen={showGlobalImportModal}
+          onClose={() => setShowGlobalImportModal(false)}
+          existingTracks={tracks}
+          onImportVideo={handleModalImportVideo}
+          onImportAudioTrack={handleModalImportAudioTrack}
+        />
+      )}
     </div>
   );
 }

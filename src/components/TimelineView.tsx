@@ -270,14 +270,17 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   // Вычисление максимальной длины проекта с учетом видео, всех аудиоклипов и субтитров
   const effectiveDurationSec = useMemo(() => {
     let maxSec = Math.max(totalTimeSec || 0, videoDuration || 0);
-    (tracks || []).forEach((t) => {
-      (t.clips || []).forEach((c) => {
+    const safeTracks = Array.isArray(tracks) ? tracks.filter(Boolean) : [];
+    safeTracks.forEach((t) => {
+      const safeClips = Array.isArray(t.clips) ? t.clips.filter(Boolean) : [];
+      safeClips.forEach((c) => {
         if (!c) return;
         const endSec = ((c.offsetSamples || 0) + (c.lengthSamples || 0)) / sampleRate;
         if (endSec > maxSec) maxSec = endSec;
       });
     });
-    (subtitles || []).forEach((s) => {
+    const safeSubtitles = Array.isArray(subtitles) ? subtitles.filter(Boolean) : [];
+    safeSubtitles.forEach((s) => {
       if (s && s.endSec > maxSec) maxSec = s.endSec;
     });
     return Math.max(maxSec + 5, 20);

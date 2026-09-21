@@ -342,12 +342,15 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
                 setCurrentTimeSec(Math.max(0, smoothTimeSec));
               }
 
-              if (lastTracksData) {
+              // Жесткая проверка на массив перед вызовом итерации для предотвращения TypeError
+              if (Array.isArray(lastTracksData)) {
                 setTrackMeters((prevMap) => {
                   const newMap = new Map(prevMap);
-                  lastTracksData!.forEach((item: TrackMeterData) => {
-                    newMap.set(item.trackId, item);
-                  });
+                  for (const item of lastTracksData!) {
+                    if (item && typeof item.trackId === 'number') {
+                      newMap.set(item.trackId, item);
+                    }
+                  }
                   return newMap;
                 });
                 lastTracksData = null;
@@ -370,7 +373,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
               if (data.type === 'METERS_TELEMETRY') {
                 lastTimeSec = data.currentTimeSec || 0;
                 if (data.tracks && Array.isArray(data.tracks)) {
-                  lastTracksData = data.tracks;
+                  lastTracksData = data.tracks.filter(Boolean);
                 }
                 if (data.vocalBus) {
                   lastVocalBusData = data.vocalBus;
@@ -623,10 +626,11 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
   const syncTrackClips = useCallback((trackId: number, clips: ClipConfig[]) => {
     if (workletNodeRef.current) {
       try {
+        const safeClips = (clips || []).filter(Boolean);
         workletNodeRef.current.port.postMessage({
           type: 'SET_TRACK_CLIPS',
           trackId,
-          clips: clips.map((c) => ({
+          clips: safeClips.map((c) => ({
             id: c.id,
             name: c.name,
             offsetSamples: c.offsetSamples,
@@ -648,9 +652,10 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
   const syncAllTracks = useCallback((tracks: TrackState[]) => {
     if (workletNodeRef.current) {
       try {
+        const safeTracks = (tracks || []).filter(Boolean);
         workletNodeRef.current.port.postMessage({
           type: 'SET_ALL_TRACKS',
-          tracks: tracks.map((t) => ({
+          tracks: safeTracks.map((t) => ({
             id: t.id,
             name: t.name,
             volumeDb: t.volumeDb,
@@ -658,7 +663,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             solo: t.solo,
             mute: t.mute,
             isOriginalAudio: t.isOriginalAudio,
-            vstPlugins: t.vstPlugins || [],
+            vstPlugins: (t.vstPlugins || []).filter(Boolean),
             dsp: {
               eq: t.eq,
               compressor: t.compressor,
@@ -667,7 +672,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
               deClicker: t.deClicker,
               autoDucker: t.autoDucker
             },
-            clips: t.clips.map((c) => ({
+            clips: (t.clips || []).filter(Boolean).map((c) => ({
               id: c.id,
               name: c.name,
               offsetSamples: c.offsetSamples,
@@ -693,11 +698,12 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
       targetRmsDb: number = -18.0,
       maxPeakDb: number = -1.0
     ): LoudnessMatchingResult => {
-      const result = MediaNormalizer.autoMatchTrackVolumes(tracks, targetRmsDb, maxPeakDb);
+      const safeTracks = (tracks || []).filter(Boolean);
+      const result = MediaNormalizer.autoMatchTrackVolumes(safeTracks, targetRmsDb, maxPeakDb);
 
-      if (workletNodeRef.current) {
-        result.adjustments.forEach((adj) => {
-          if (!adj.isSilent) {
+      if (workletNodeRef.current && result && Array.isArray(result.adjustments)) {
+        (result.adjustments || []).filter(Boolean).forEach((adj) => {
+          if (adj && !adj.isSilent) {
             workletNodeRef.current?.port.postMessage({
               type: 'SET_TRACK_VOLUME',
               trackId: adj.trackId,
@@ -926,19 +932,22 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
    */
   const setTrackVstChain = useCallback((trackId: number, vstPlugins: VSTPluginInstance[]) => {
     if (workletNodeRef.current) {
-      workletNodeRef.current.port.postMessage({ type: 'SET_TRACK_VST_CHAIN', trackId, vstPlugins });
+      const safePlugins = (vstPlugins || []).filter(Boolean);
+      workletNodeRef.current.port.postMessage({ type: 'SET_TRACK_VST_CHAIN', trackId, vstPlugins: safePlugins });
     }
   }, []);
 
   const setVocalBusVstChain = useCallback((vstPlugins: VSTPluginInstance[]) => {
     if (workletNodeRef.current) {
-      workletNodeRef.current.port.postMessage({ type: 'SET_VOCAL_BUS_VST_CHAIN', vstPlugins });
+      const safePlugins = (vstPlugins || []).filter(Boolean);
+      workletNodeRef.current.port.postMessage({ type: 'SET_VOCAL_BUS_VST_CHAIN', vstPlugins: safePlugins });
     }
   }, []);
 
   const setMasterVstChain = useCallback((vstPlugins: VSTPluginInstance[]) => {
     if (workletNodeRef.current) {
-      workletNodeRef.current.port.postMessage({ type: 'SET_MASTER_VST_CHAIN', vstPlugins });
+      const safePlugins = (vstPlugins || []).filter(Boolean);
+      workletNodeRef.current.port.postMessage({ type: 'SET_MASTER_VST_CHAIN', vstPlugins: safePlugins });
     }
   }, []);
 
