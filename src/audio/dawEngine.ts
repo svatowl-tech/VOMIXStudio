@@ -335,11 +335,13 @@ export class LiveDAWEngine {
   private timelineSample: number = 0;
   private sampleRate: number = 48000;
   private tracks: TrackState[] = [];
+  private vocalBus: VocalBusState = createDefaultVocalBus();
   private master: MasterState = {
     volumeDb: 0,
     pan: 0,
     limiterCeilingDb: -0.1,
     limiterEnabled: true,
+    vstPlugins: [],
     peakL: 0,
     peakR: 0,
     clipped: false
@@ -364,90 +366,56 @@ export class LiveDAWEngine {
     ].map((t) => populateTrackDSPDefaults(t as any));
   }
 
-  // --- Генераторы демонстрационных аудио сигналов ---
-  private generateDrumBuffer(sr: number, samples: number): Float32Array {
-    const buf = new Float32Array(samples);
-    const bpm = 120;
-    const beatSamples = (60 / bpm) * sr;
+  // --- Управление параметрами и цепочками VST ---
 
-    for (let i = 0; i < samples; i++) {
-      const beatIdx = Math.floor(i / beatSamples);
-      const posInBeat = i % beatSamples;
-      const t = posInBeat / sr;
-
-      let sample = 0;
-      if (beatIdx % 2 === 0) {
-        const env = Math.exp(-t * 22);
-        const freq = 130 * Math.exp(-t * 35) + 40;
-        sample += Math.sin(2 * Math.PI * freq * t) * env * 0.8;
+  /**
+   * Заменяет или устанавливает конкретный плагин в слоте трека
+   */
+  public setTrackVstPlugin(trackId: number, slotIdx: number, plugin: VSTPluginInstance): void {
+    const track = this.tracks.find((t) => t.id === trackId);
+    if (track) {
+      if (!track.vstPlugins) {
+        track.vstPlugins = [];
       }
-      if (beatIdx % 2 === 1) {
-        const env = Math.exp(-t * 18);
-        const noise = (Math.random() * 2 - 1) * env * 0.5;
-        const tone = Math.sin(2 * Math.PI * 180 * t) * env * 0.3;
-        sample += (noise + tone);
-      }
-      const posInSubBeat = i % (beatSamples / 2);
-      const tSub = posInSubBeat / sr;
-      const hatEnv = Math.exp(-tSub * 60);
-      sample += (Math.random() * 2 - 1) * hatEnv * 0.15;
-
-      buf[i] = sample;
+      track.vstPlugins[slotIdx] = plugin;
     }
-    return buf;
   }
 
-  private generateBassBuffer(sr: number, samples: number): Float32Array {
-    const buf = new Float32Array(samples);
-    const freqs = [55, 55, 65.41, 49];
-    const noteSamples = sr * 2;
+  /**
+   * Сквозное обновление VST-параметра (Volume, Attack, Mix, WetDry, Bypass и т.д.) во внутреннем состоянии
+   */
+  public updateVstParam(
+    target: 'track' | 'vocalBus' | 'master',
+    instanceId: string,
+    paramId: string,
+    value: number,
+    trackId?: number
+  ): void {
+    let plugins: VSTPluginInstance[] | undefined;
 
-    for (let i = 0; i < samples; i++) {
-      const noteIdx = Math.floor(i / noteSamples) % freqs.length;
-      const freq = freqs[noteIdx];
-      const t = (i % noteSamples) / sr;
-      const env = Math.exp(-t * 1.5);
-      const saw = 2 * ((t * freq) - Math.floor(t * freq + 0.5));
-      const sub = Math.sin(2 * Math.PI * (freq / 2) * t);
-      buf[i] = (saw * 0.5 + sub * 0.5) * env * 0.5;
+    if (target === 'track' && trackId !== undefined) {
+      const track = this.tracks.find((t) => t.id === trackId);
+      if (track) {
+        if (!track.vstPlugins) track.vstPlugins = [];
+        plugins = track.vstPlugins;
+      }
+    } else if (target === 'vocalBus') {
+      if (!this.vocalBus.vstPlugins) this.vocalBus.vstPlugins = [];
+      plugins = this.vocalBus.vstPlugins;
+    } else if (target === 'master') {
+      if (!this.master.vstPlugins) this.master.vstPlugins = [];
+      plugins = this.master.vstPlugins;
     }
-    return buf;
-  }
 
-  private generateVoiceBuffer(sr: number, samples: number): Float32Array {
-    const buf = new Float32Array(samples);
-    for (let i = 0; i < samples; i++) {
-      const sec = i / sr;
-      const cycleSec = sec % 4.0;
-      if (cycleSec > 0.5 && cycleSec < 2.5) {
-        const t = cycleSec - 0.5;
-        const speechEnv = Math.sin((t / 2.0) * Math.PI) * (0.8 + 0.2 * Math.sin(20 * t));
-        const f0 = 150 + Math.sin(t * 8) * 30;
-        const f1 = 600;
-        const f2 = 1800;
-        const v = Math.sin(2 * Math.PI * f0 * t) * 0.4
-                + Math.sin(2 * Math.PI * f1 * t) * 0.3
-                + Math.sin(2 * Math.PI * f2 * t) * 0.2;
-        buf[i] = v * speechEnv * 0.6;
-      } else {
-        buf[i] = 0;
+    if (plugins) {
+      const plugin = plugins.find((p) => p && p.instanceId === instanceId);
+      if (plugin) {
+        if (!plugin.parameters) {
+          plugin.parameters = {};
+        }
+        plugin.parameters[paramId] = value;
       }
     }
-    return buf;
-  }
-
-  private generatePadBuffer(sr: number, samples: number): Float32Array {
-    const buf = new Float32Array(samples);
-    for (let i = 0; i < samples; i++) {
-      const t = i / sr;
-      const c1 = Math.sin(2 * Math.PI * 220 * t);
-      const c2 = Math.sin(2 * Math.PI * 261.63 * t);
-      const c3 = Math.sin(2 * Math.PI * 329.63 * t);
-      const c4 = Math.sin(2 * Math.PI * 392.00 * t);
-      const lfo = 0.7 + 0.3 * Math.sin(2 * Math.PI * 0.2 * t);
-      buf[i] = ((c1 + c2 + c3 + c4) * 0.15) * lfo;
-    }
-    return buf;
   }
 
   // --- Управление памятью WebAssembly кучи (HEAPF32) ---
@@ -513,6 +481,14 @@ export class LiveDAWEngine {
     this.tracks = this.tracks.filter((t) => t.id !== trackId);
   }
 
+  public getVocalBus(): VocalBusState {
+    return this.vocalBus;
+  }
+
+  public setVocalBus(vocalBus: VocalBusState): void {
+    this.vocalBus = vocalBus;
+  }
+
   public getMaster(): MasterState {
     return this.master;
   }
@@ -548,4 +524,3 @@ export class LiveDAWEngine {
     return { leftBuffer, rightBuffer };
   }
 }
-

@@ -407,13 +407,13 @@ export const VSTPluginManager: React.FC = () => {
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
-            {['all', 'EQ', 'Dynamics', 'Reverb', 'Saturation', 'Utility'].map((cat) => (
+            {['all', 'EQ', 'Dynamics', 'Reverb', 'Restoration', 'Limiter', 'Saturation', 'Utility'].map((cat) => (
               <button
                 key={cat}
                 onClick={() => setSelectedCategory(cat)}
                 className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-colors cursor-pointer ${
                   selectedCategory === cat
-                    ? 'bg-cyan-600 text-white'
+                    ? 'bg-cyan-600 text-white shadow-sm shadow-cyan-950/40'
                     : 'bg-slate-900 text-slate-400 hover:bg-slate-800 hover:text-slate-200 border border-slate-800'
                 }`}
               >
@@ -446,6 +446,7 @@ export const VSTPluginManager: React.FC = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 pt-2">
             {filteredCatalog.map((plugin) => {
               const isEnabled = globalVSTHostEngine.isPluginEnabled(plugin.id);
+              const isWasmCore = plugin.format === 'Native/WASM' || plugin.isBuiltIn;
               return (
                 <div
                   key={plugin.id}
@@ -458,8 +459,15 @@ export const VSTPluginManager: React.FC = () => {
                   <div>
                     <div className="flex items-start justify-between gap-2 mb-2">
                       <div className="min-w-0">
-                        <h4 className="text-xs font-bold text-slate-100 truncate">{plugin.name}</h4>
-                        <div className="text-[10px] text-slate-400 mt-0.5 flex items-center gap-1.5">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <h4 className="text-xs font-bold text-slate-100 truncate">{plugin.name}</h4>
+                          {isWasmCore && (
+                            <span className="text-[9px] px-1.5 py-0.2 rounded bg-purple-950/60 text-purple-300 border border-purple-800/50 font-mono">
+                              WASM Native Core
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[10px] text-slate-400 mt-1 flex items-center gap-1.5">
                           <span>{plugin.vendor}</span>
                           <span>•</span>
                           <span className="text-cyan-400 font-mono">{plugin.format}</span>

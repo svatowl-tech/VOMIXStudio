@@ -122,6 +122,7 @@ export class AudioAIEngine {
       ort.env.wasm.numThreads = Math.min(4, Math.max(1, (navigator.hardwareConcurrency || 2) - 1));
       ort.env.wasm.simd = true;
       ort.env.wasm.proxy = false;
+      ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/';
       this.isWasmConfigured = true;
     } catch (e) {
       console.warn('[AudioAIEngine] Предупреждение настройки ONNX Web WASM:', e);
@@ -178,6 +179,36 @@ export class AudioAIEngine {
       return [];
     }
 
+    // ========================================================================
+    // ЭКСТРЕННЫЙ ФОЛБЕК НА НАТИВНЫЙ C++ STRIP SILENCE (БЕЗ ONNX)
+    // ========================================================================
+    if (!this.vadSession) {
+      console.log('[AudioAIEngine] ONNX сессия VAD неактивна. Мгновенный запуск высокопроизводительного C++ stripSilenceNative...');
+      try {
+        const thresholdDb = config.threshold ? -45.0 + (config.threshold - 0.5) * 20.0 : -45.0;
+        const nativeSegments = globalNativeDAWBridge.stripSilenceNative(
+          audio16k,
+          thresholdDb,
+          config.minSilenceDurationMs,
+          config.speechPadMs,
+          false,
+          16000
+        );
+
+        return nativeSegments.map((seg, idx) => ({
+          id: idx + 1,
+          startSample: Math.floor((seg.offsetSamples / 16000) * inputSampleRate),
+          endSample: Math.floor(((seg.offsetSamples + seg.lengthSamples) / 16000) * inputSampleRate),
+          startSec: seg.offsetSamples / 16000,
+          endSec: (seg.offsetSamples + seg.lengthSamples) / 16000,
+          durationSec: seg.durationSec,
+          confidence: 0.95
+        }));
+      } catch (err) {
+        console.warn('[AudioAIEngine] Ошибка нативного C++ VAD, переход к базовому расчету энергии:', err);
+      }
+    }
+
     const minSpeechSamples = (config.minSpeechDurationMs * 16000) / 1000;
     const minSilenceSamples = (config.minSilenceDurationMs * 16000) / 1000;
     const speechPadSamples = (config.speechPadMs * 16000) / 1000;
@@ -221,6 +252,7 @@ export class AudioAIEngine {
           if (results['hn']) hState = new Float32Array(results['hn'].data as ArrayLike<number>);
           if (results['cn']) cState = new Float32Array(results['cn'].data as ArrayLike<number>);
         } catch (e) {
+          console.warn('[AudioAIEngine] Сбой инференса ONNX VAD, переключение на C++ энергодайджест:', e);
           speechProb = this.calculateEnergyVoiceProbability(chunk);
         }
       } else {

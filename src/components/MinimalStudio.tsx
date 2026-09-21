@@ -904,8 +904,7 @@ export const MinimalStudio: React.FC = () => {
     const clipId = Date.now();
 
     const targetTrackId = config.trackId || (tracks.length > 0 ? Math.max(...tracks.map((t) => t.id)) + 1 : 1);
-    const isOriginal = targetTrackId === 1 ||
-      /оригинал|original|видео|video|отригал|orig/i.test(config.name || file.name);
+    const isOriginal = /оригинал|original|видео|video|отригал|orig/i.test(config.name || file.name);
 
     setTracks((prev) => {
       const existing = prev.find((t) => t.id === targetTrackId);
@@ -1327,18 +1326,21 @@ export const MinimalStudio: React.FC = () => {
     // Шаг 1. Нормализуем громкость на всех дорожках на уровне файлов/буферов
     try {
       const normResult = MediaNormalizer.autoMatchTrackVolumes(currentTracks, -18.0, -1.0);
-      const normalizedTracks = await Promise.all(currentTracks.map(async (track) => {
+      const normalizedTracks: TrackState[] = [];
+      for (const track of currentTracks) {
         const adj = normResult.adjustments.find((a) => a.trackId === track.id);
         if (!adj || adj.isSilent || Math.abs(adj.gainChangeDb) < 0.01) {
-          return { ...track, volumeDb: 0.0 }; // Сбрасываем фейдер в 0 дБ, так как дорожка нормализована (или тихая)
+          normalizedTracks.push({ ...track, volumeDb: 0.0 });
+          continue;
         }
-        
-        const updatedClips = await Promise.all((track.clips || []).map(async (clip) => {
+
+        const updatedClips: ClipConfig[] = [];
+        for (const clip of (track.clips || [])) {
           let newBuf = clip.buffer;
           let newUntrimmed = clip.untrimmedBuffer;
-          
+
           if (clip.buffer && clip.buffer.length > 0) {
-            newBuf = MediaNormalizer.applyGain(clip.buffer, adj.gainChangeDb, false);
+            newBuf = MediaNormalizer.applyGain(clip.buffer, adj.gainChangeDb, true);
             // Загружаем нормализованный буфер в C++ аудио ядро
             await uploadRawPCMToTrack(
               newBuf,
@@ -1351,23 +1353,23 @@ export const MinimalStudio: React.FC = () => {
             );
           }
           if (clip.untrimmedBuffer && clip.untrimmedBuffer.length > 0) {
-            newUntrimmed = MediaNormalizer.applyGain(clip.untrimmedBuffer, adj.gainChangeDb, false);
+            newUntrimmed = MediaNormalizer.applyGain(clip.untrimmedBuffer, adj.gainChangeDb, true);
           }
-          
-          return {
+
+          updatedClips.push({
             ...clip,
             gain: 1.0, // Гейн клипа также сбрасываем в 1.0
             buffer: newBuf,
             untrimmedBuffer: newUntrimmed
-          };
-        }));
-        
-        return {
+          });
+        }
+
+        normalizedTracks.push({
           ...track,
           clips: updatedClips,
           volumeDb: 0.0 // fader сбрасывается в 0, так как гейн уже в файлах
-        };
-      }));
+        });
+      }
       
       currentTracks = normalizedTracks;
       setTracks(currentTracks);

@@ -24,6 +24,7 @@
 
 import { TrackState, MasterState, ClipConfig, VocalBusState } from '../audio/dawEngine';
 import { EMBEDDED_WASM_CORE_BASE64 } from '../data/embeddedWasmCore';
+import { systemLogger } from './SystemLogger';
 
 export type WavBitDepth = 16 | 24 | 32;
 
@@ -306,6 +307,10 @@ export class NativeDAWBridge {
 
   public get isReady(): boolean {
     return this.isModuleReady;
+  }
+
+  public get isSimdEnabled(): boolean {
+    return this.isSimdSupported;
   }
 
   private constructor() {
@@ -2259,6 +2264,89 @@ export class NativeDAWBridge {
 
     return result;
   }
+
+  /**
+   * Применение нативного/высокопроизводительного C++ NoiseGate к PCM-данным
+   */
+  public applyNoiseGate(
+    samplesL: Float32Array,
+    samplesR: Float32Array,
+    thresholdDb: number = -48.0,
+    floorDb: number = -60.0,
+    attackMs: number = 2.0,
+    releaseMs: number = 100.0,
+    sampleRate: number = 48000
+  ): { samplesL: Float32Array; samplesR: Float32Array } {
+    const len = samplesL.length;
+    const outL = new Float32Array(samplesL);
+    const outR = new Float32Array(samplesR);
+
+    const blockSize = 512;
+    const gate = {
+      enabled: true,
+      thresholdDb,
+      floorDb,
+      attackMs,
+      releaseMs
+    };
+    const gateState = {
+      gain: 1.0,
+      env: 0.0
+    };
+
+    for (let offset = 0; offset < len; offset += blockSize) {
+      const currentBlockFrames = Math.min(blockSize, len - offset);
+      const subL = outL.subarray(offset, offset + currentBlockFrames);
+      const subR = outR.subarray(offset, offset + currentBlockFrames);
+      processNoiseGateBlock(subL, subR, currentBlockFrames, gate, gateState, sampleRate);
+    }
+
+    return { samplesL: outL, samplesR: outR };
+  }
+
+  /**
+   * Применение нативного/высокопроизводительного C++ DeEsser к PCM-данным
+   */
+  public applyDeEsser(
+    samplesL: Float32Array,
+    samplesR: Float32Array,
+    thresholdDb: number = -22.0,
+    frequency: number = 6000.0,
+    ratio: number = 4.0,
+    attackMs: number = 1.0,
+    releaseMs: number = 40.0,
+    sampleRate: number = 48000
+  ): { samplesL: Float32Array; samplesR: Float32Array } {
+    const len = samplesL.length;
+    const outL = new Float32Array(samplesL);
+    const outR = new Float32Array(samplesR);
+
+    const blockSize = 512;
+    const deEsser = {
+      enabled: true,
+      thresholdDb,
+      frequency,
+      ratio,
+      attackMs,
+      releaseMs
+    };
+    const deEssState = {
+      bpCoeffs: null as any,
+      lastFreq: 0,
+      stL: null as any,
+      stR: null as any,
+      env: 0
+    };
+
+    for (let offset = 0; offset < len; offset += blockSize) {
+      const currentBlockFrames = Math.min(blockSize, len - offset);
+      const subL = outL.subarray(offset, offset + currentBlockFrames);
+      const subR = outR.subarray(offset, offset + currentBlockFrames);
+      processDeEsserBlock(subL, subR, currentBlockFrames, deEsser, deEssState, sampleRate);
+    }
+
+    return { samplesL: outL, samplesR: outR };
+  }
 }
 
 // ============================================================================
@@ -2588,6 +2676,7 @@ function processVSTBlock(bufL: Float32Array, bufR: Float32Array, numFrames: numb
         break;
       }
 
+      case 'vst-cla-76':
       case 'vst-cla76': {
         const inputDriveDb = params.input ?? -18;
         const outputGainDb = params.output ?? 2;
@@ -2637,6 +2726,7 @@ function processVSTBlock(bufL: Float32Array, bufR: Float32Array, numFrames: numb
         break;
       }
 
+      case 'vst-pro-r':
       case 'vst-valhalla-verb': {
         const decay = params.decay || 1.2;
         const mixPct = (params.mix !== undefined ? params.mix : 15) / 100;
@@ -2706,6 +2796,7 @@ function processVSTBlock(bufL: Float32Array, bufR: Float32Array, numFrames: numb
         break;
       }
 
+      case 'vst-saturation':
       case 'vst-decapitator': {
         const drive = (params.drive ?? 2.2) * (params.punish ? 3.5 : 1.0);
         const tone = params.tone ?? 1.0;
@@ -2754,6 +2845,7 @@ function processVSTBlock(bufL: Float32Array, bufR: Float32Array, numFrames: numb
         break;
       }
 
+      case 'vst-ott':
       case 'vst-ott-multiband': {
         const depthPct = (params.depth ?? 25) / 100;
         for (let i = 0; i < numFrames; i++) {

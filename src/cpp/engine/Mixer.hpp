@@ -8,7 +8,7 @@
  * 1. Управление коллекцией дорожек Track.
  * 2. Многопоточный / пакетный сумматор аудиопотоков с поддержкой Solo/Mute.
  * 3. Сайдчейн-маршрутизацию между дорожками без аллокаций памяти.
- * 4. Мастер-секцию (Master Fader, Constant Power Pan, SoftLimiter).
+ * 4. Мастер-секцию (Master VST Rack, Master Fader, Constant Power Pan, SoftLimiter).
  * 5. Офлайн-рендеринг всего проекта и отдельных изолированных стемов (Stems).
  * 6. Автоматическое поканальное выравнивание громкости (Auto Loudness Match).
  * ============================================================================
@@ -18,7 +18,9 @@
 #include "../dsp/AudioMath.hpp"
 #include "../dsp/AudioUtils.hpp"
 #include "../dsp/Dynamics.hpp"
+#include "../../../c_src/vst/IVSTPluginInstance.hpp"
 #include <vector>
+#include <array>
 #include <memory>
 
 namespace DAWCore {
@@ -37,9 +39,24 @@ public:
     // Вектор дорожек (управляется микшером)
     std::vector<std::unique_ptr<Track>> tracks;
 
+    // Мастер-слоты VST (мастеринг-цепочка из 8 слотов перед Soft Limiter)
+    std::array<std::unique_ptr<vomix::vst::IVSTPluginInstance>, 8> masterVstSlots;
+
+    // Пиковые уровни мастера и вокал-шины
+    float masterPeakL{0.0f};
+    float masterPeakR{0.0f};
+    float vocalBusPeakL{0.0f};
+    float vocalBusPeakR{0.0f};
+
     // Внутренние предварительно выделенные статические буферы (Zero Malloc в аудиопотоке)
     alignas(16) float sidechainMonoBuffer[MAX_BUFFER_SIZE]{};
     alignas(16) float masterMixBuffer[MAX_BUFFER_SIZE * 2]{};
+
+    // Буферы раздельных каналов для обработки мастер-плагинов
+    alignas(16) float masterChanL[MAX_BUFFER_SIZE]{};
+    alignas(16) float masterChanR[MAX_BUFFER_SIZE]{};
+    alignas(16) float masterOutL[MAX_BUFFER_SIZE]{};
+    alignas(16) float masterOutR[MAX_BUFFER_SIZE]{};
 
     explicit Mixer(float sr = 48000.0f);
 
@@ -49,6 +66,15 @@ public:
     void addTrack(Track* track);
     Track* getTrack(uint32_t trackId) noexcept;
     void removeAllTracks() noexcept;
+
+    // --- Управление плагинами мастер-цепочки ---
+    void loadMasterPlugin(int slotIdx, int pluginTypeId);
+    void setMasterPluginParam(int slotIdx, int paramId, float normalizedValue);
+    void setMasterPluginBypass(int slotIdx, bool bypass);
+    void setMasterPluginWetDry(int slotIdx, float wetDry);
+
+    // --- Замер пиков дорожек, мастера (1000) и вокал-шины (999) ---
+    float getPeak(int trackId, int channel) const noexcept;
 
     /**
      * Потоковая обработка одного блока аудиоданных в реальном времени (RT-Safe)

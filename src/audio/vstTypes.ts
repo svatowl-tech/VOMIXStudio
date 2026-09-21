@@ -11,6 +11,8 @@ export type VSTPluginCategory =
   | 'EQ'
   | 'Dynamics'
   | 'Reverb'
+  | 'Restoration'
+  | 'Limiter'
   | 'Delay'
   | 'Vocal'
   | 'Saturation'
@@ -57,6 +59,11 @@ export interface VSTPluginDefinition {
   isBuiltIn?: boolean;
   isCustomInstalled?: boolean;
 }
+
+/**
+ * Дескриптор VST-плагина по стандарту Universal VST Contract
+ */
+export type VSTPluginDescriptor = VSTPluginDefinition;
 
 export interface VSTPluginInstance {
   instanceId: string;

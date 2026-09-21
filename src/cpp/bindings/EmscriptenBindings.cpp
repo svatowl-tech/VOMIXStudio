@@ -891,4 +891,87 @@ bool setMasterLimiter(uintptr_t mixerPtr, bool enabled, float ceilingDb) {
     return true;
 }
 
+// ============================================================================
+// Universal VST C-API: Управление слотами дорожек и мастер-шины
+// ============================================================================
+
+EMSCRIPTEN_KEEPALIVE
+bool loadTrackPlugin(uintptr_t mixerPtr, uint32_t trackId, int slotIdx, int pluginTypeId) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    DAWCore::Track* track = mixer->getTrack(trackId);
+    if (!track) return false;
+    track->loadPlugin(slotIdx, pluginTypeId);
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool setTrackPluginParam(uintptr_t mixerPtr, uint32_t trackId, int slotIdx, int paramId, float normalizedValue) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    DAWCore::Track* track = mixer->getTrack(trackId);
+    if (!track) return false;
+    track->setPluginParam(slotIdx, paramId, normalizedValue);
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool setTrackPluginBypass(uintptr_t mixerPtr, uint32_t trackId, int slotIdx, int bypass) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    DAWCore::Track* track = mixer->getTrack(trackId);
+    if (!track) return false;
+    track->setPluginBypass(slotIdx, bypass != 0);
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool setTrackPluginWetDry(uintptr_t mixerPtr, uint32_t trackId, int slotIdx, float wetDry) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    DAWCore::Track* track = mixer->getTrack(trackId);
+    if (!track) return false;
+    track->setPluginWetDry(slotIdx, wetDry);
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool loadMasterPlugin(uintptr_t mixerPtr, int slotIdx, int pluginTypeId) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    mixer->loadMasterPlugin(slotIdx, pluginTypeId);
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool setMasterPluginParam(uintptr_t mixerPtr, int slotIdx, int paramId, float normalizedValue) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    mixer->setMasterPluginParam(slotIdx, paramId, normalizedValue);
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool setMasterPluginBypass(uintptr_t mixerPtr, int slotIdx, int bypass) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    mixer->setMasterPluginBypass(slotIdx, bypass != 0);
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool setMasterPluginWetDry(uintptr_t mixerPtr, int slotIdx, float wetDry) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    mixer->setMasterPluginWetDry(slotIdx, wetDry);
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+float getTrackPeak(uintptr_t mixerPtr, int trackId, int channel) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return 0.0f;
+    return mixer->getPeak(trackId, channel);
+}
+
 } // extern "C"

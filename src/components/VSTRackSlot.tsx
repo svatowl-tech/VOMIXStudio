@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import {
   VSTPluginInstance,
   VSTPluginDefinition,
@@ -6,6 +6,8 @@ import {
 } from '../audio/vstTypes';
 import { globalVSTHostEngine } from '../services/VSTHostEngine';
 import { VSTGraphicalUIWindow } from './VSTGraphicalUIWindow';
+import { VSTQuickKnob } from './VSTQuickKnob';
+import { VSTGainReductionMeter } from './VSTGainReductionMeter';
 import {
   Layers,
   Plus,
@@ -23,7 +25,10 @@ import {
   ShieldCheck,
   CheckCircle2,
   ArrowUp,
-  ArrowDown
+  ArrowDown,
+  Maximize2,
+  Activity,
+  Copy
 } from 'lucide-react';
 
 interface VSTRackSlotProps {
@@ -53,6 +58,10 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [activePluginModal, setActivePluginModal] = useState<VSTPluginInstance | null>(null);
+  const [expandedSlots, setExpandedSlots] = useState<Record<string, boolean>>({});
+
+  // A/B Presets State Storage
+  const [abState, setAbState] = useState<Record<string, { current: 'A' | 'B'; stateA: Record<string, number>; stateB: Record<string, number> }>>({});
 
   const availableCatalog = globalVSTHostEngine.getEnabledPlugins();
 
@@ -65,14 +74,85 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
     return matchesSearch && matchesCat;
   });
 
+  const toggleSlotExpanded = (instanceId: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setExpandedSlots((prev) => ({
+      ...prev,
+      [instanceId]: !prev[instanceId]
+    }));
+  };
+
   const handleAddPlugin = (def: VSTPluginDefinition) => {
     const newInstance = globalVSTHostEngine.createPluginInstance(def.id);
     const updated = [...plugins, newInstance];
     onUpdateChain(updated);
     setShowAddMenu(false);
     setSearchQuery('');
+    // Expand added slot by default
+    setExpandedSlots((prev) => ({ ...prev, [newInstance.instanceId]: true }));
     // Open editor right away for quick tweaking
     setActivePluginModal(newInstance);
+  };
+
+  // Immediate event dispatcher for knobs without lagging parent re-renders
+  const handleImmediateParamChange = useCallback((instId: string, paramId: string, value: number) => {
+    onUpdateParam(instId, paramId, value);
+  }, [onUpdateParam]);
+
+  // A/B Comparison Switching
+  const handleToggleAB = (inst: VSTPluginInstance, target: 'A' | 'B', e: React.MouseEvent) => {
+    e.stopPropagation();
+    const currentAB = abState[inst.instanceId] || {
+      current: 'A',
+      stateA: { ...inst.parameters },
+      stateB: { ...inst.parameters }
+    };
+
+    if (currentAB.current === target) return;
+
+    // Save current parameters to the active state before switching
+    if (currentAB.current === 'A') {
+      currentAB.stateA = { ...inst.parameters };
+    } else {
+      currentAB.stateB = { ...inst.parameters };
+    }
+
+    currentAB.current = target;
+    const targetParams = target === 'A' ? currentAB.stateA : currentAB.stateB;
+
+    setAbState((prev) => ({
+      ...prev,
+      [inst.instanceId]: currentAB
+    }));
+
+    // Apply target parameters immediately to the engine
+    Object.entries(targetParams).forEach(([pId, val]) => {
+      onUpdateParam(inst.instanceId, pId, val);
+    });
+
+    // Update plugin object in chain
+    const updated = plugins.map((p) =>
+      p.instanceId === inst.instanceId ? { ...p, parameters: { ...targetParams } } : p
+    );
+    onUpdateChain(updated);
+  };
+
+  const handleCopyAtoB = (inst: VSTPluginInstance, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setAbState((prev) => {
+      const current = prev[inst.instanceId] || {
+        current: 'A',
+        stateA: { ...inst.parameters },
+        stateB: { ...inst.parameters }
+      };
+      return {
+        ...prev,
+        [inst.instanceId]: {
+          ...current,
+          stateB: { ...inst.parameters }
+        }
+      };
+    });
   };
 
   const handleRemovePlugin = (instanceId: string, e: React.MouseEvent) => {
@@ -151,7 +231,7 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
 
           {/* Categories */}
           <div className="flex flex-wrap gap-1">
-            {['all', 'EQ', 'Dynamics', 'Reverb', 'Tape/Saturation', 'Tools'].map((cat) => (
+            {['all', 'EQ', 'Dynamics', 'Reverb', 'Restoration', 'Limiter', 'Saturation', 'Utility'].map((cat) => (
               <button
                 key={cat}
                 onClick={() => setSelectedCategory(cat)}
@@ -219,31 +299,47 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
           {plugins.map((inst, index) => {
             const def = globalVSTHostEngine.getPluginById(inst.pluginId);
             const isBypassed = !inst.enabled;
+            const isExpanded = !!expandedSlots[inst.instanceId];
+            const isDynamics = def?.category === 'Dynamics' || def?.category === 'Limiter' || inst.pluginId.includes('compressor') || inst.pluginId.includes('limiter') || inst.pluginId.includes('cla76') || inst.pluginId.includes('l2');
+            const ab = abState[inst.instanceId] || { current: 'A' };
+
+            // Gain reduction calculation simulation / read from param (e.g. threshold vs input)
+            let grValue = 0;
+            if (isDynamics && inst.enabled) {
+              const thresh = inst.parameters['thresh'] ?? inst.parameters['threshold'] ?? inst.parameters['input'] ?? -18;
+              const ratio = inst.parameters['ratio'] ?? 4;
+              grValue = Math.min(0, Math.max(-24, (thresh + 14) * 0.8 * (ratio > 2 ? 1.2 : 0.8)));
+            }
+
+            const wetDryPct = Math.round((inst.wetDry ?? 1.0) * 100);
 
             return (
               <div
                 key={inst.instanceId}
-                onClick={() => setActivePluginModal(inst)}
-                className={`p-2 rounded-lg border transition-all cursor-pointer group ${
+                className={`rounded-xl border transition-all ${
                   isBypassed
                     ? 'bg-slate-950/60 border-slate-800/60 opacity-60'
-                    : 'bg-[#121826] hover:bg-[#172033] border-slate-800 hover:border-cyan-500/40 shadow-sm'
+                    : 'bg-[#111625] hover:bg-[#141b2e] border-slate-800/90 hover:border-cyan-500/40 shadow-sm'
                 }`}
               >
-                <div className="flex items-center justify-between gap-2">
-                  {/* Left: Index & Name & Format */}
+                {/* Header bar of the slot */}
+                <div
+                  className="p-2 flex items-center justify-between gap-2 cursor-pointer select-none"
+                  onClick={() => toggleSlotExpanded(inst.instanceId)}
+                >
+                  {/* Left: Bypass button, Index, Name, Category badge */}
                   <div className="flex items-center gap-2 min-w-0">
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
                         onUpdateBypass(inst.instanceId, !inst.enabled);
                       }}
-                      className={`p-1 rounded transition-colors ${
+                      className={`p-1.5 rounded-lg transition-colors cursor-pointer shrink-0 ${
                         inst.enabled
                           ? 'bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30'
                           : 'bg-slate-900 text-slate-600 hover:text-slate-400'
                       }`}
-                      title={inst.enabled ? 'Включен (Bypass)' : 'Выключен (Bypassed)'}
+                      title={inst.enabled ? 'Плагин активен (клик для Bypass)' : 'Bypassed (клик для включения)'}
                     >
                       <Power size={11} />
                     </button>
@@ -251,20 +347,47 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
                     <div className="min-w-0">
                       <div className="text-xs font-semibold text-slate-200 truncate flex items-center gap-1.5">
                         <span className="text-[10px] text-slate-500 font-mono">{index + 1}.</span>
-                        <span className={isBypassed ? 'line-through text-slate-500' : ''}>
+                        <span className={isBypassed ? 'line-through text-slate-500' : 'text-slate-100'}>
                           {inst.name || def?.name || inst.pluginId}
                         </span>
                       </div>
-                      <div className="text-[9px] text-slate-500 flex items-center gap-1">
-                        <span className="text-cyan-400/80 font-mono">{def?.format || 'VST3'}</span>
+                      <div className="text-[9px] text-slate-400 flex items-center gap-1.5 mt-0.5">
+                        <span className="text-cyan-400/90 font-mono">{def?.format || 'VST3'}</span>
                         <span>•</span>
-                        <span>Wet: {Math.round((inst.wetDry ?? 1.0) * 100)}%</span>
+                        <span className="text-slate-500">{def?.category || 'DSP'}</span>
+                        {isDynamics && <VSTGainReductionMeter grDb={grValue} active={inst.enabled} />}
                       </div>
                     </div>
                   </div>
 
-                  {/* Right: Controls (Reorder, GUI/Params, Delete) */}
+                  {/* Right: Expand arrow, GUI button, Reorder & Delete */}
                   <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                    {/* A/B Quick Toggle in Header */}
+                    <div className="flex items-center bg-slate-950 p-0.5 rounded border border-slate-800 text-[9px] font-mono font-bold mr-1">
+                      <button
+                        onClick={(e) => handleToggleAB(inst, 'A', e)}
+                        className={`px-1.5 py-0.2 rounded transition-colors ${
+                          ab.current === 'A'
+                            ? 'bg-cyan-600 text-white shadow-xs'
+                            : 'text-slate-500 hover:text-slate-300'
+                        }`}
+                        title="Сравнение A"
+                      >
+                        A
+                      </button>
+                      <button
+                        onClick={(e) => handleToggleAB(inst, 'B', e)}
+                        className={`px-1.5 py-0.2 rounded transition-colors ${
+                          ab.current === 'B'
+                            ? 'bg-cyan-600 text-white shadow-xs'
+                            : 'text-slate-500 hover:text-slate-300'
+                        }`}
+                        title="Сравнение B"
+                      >
+                        B
+                      </button>
+                    </div>
+
                     {/* Move buttons */}
                     {plugins.length > 1 && (
                       <div className="flex flex-col">
@@ -289,25 +412,107 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
                       </div>
                     )}
 
-                    {/* Edit params button */}
+                    {/* Open full GUI window */}
                     <button
                       onClick={() => setActivePluginModal(inst)}
-                      className="p-1.5 rounded bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-cyan-400 border border-slate-800"
-                      title="Настройки параметров плагина"
+                      className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-cyan-400 border border-slate-800"
+                      title="Открыть полный GUI плагина"
                     >
-                      <Sliders size={11} />
+                      <Maximize2 size={11} />
+                    </button>
+
+                    {/* Toggle quick controls fold */}
+                    <button
+                      onClick={(e) => toggleSlotExpanded(inst.instanceId, e)}
+                      className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800"
+                      title={isExpanded ? 'Свернуть быстрые регуляторы' : 'Развернуть быстрые регуляторы'}
+                    >
+                      {isExpanded ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
                     </button>
 
                     {/* Remove button */}
                     <button
                       onClick={(e) => handleRemovePlugin(inst.instanceId, e)}
-                      className="p-1.5 rounded bg-slate-900 hover:bg-rose-950/40 text-slate-500 hover:text-rose-400 border border-slate-800"
+                      className="p-1.5 rounded-lg bg-slate-900 hover:bg-rose-950/40 text-slate-500 hover:text-rose-400 border border-slate-800"
                       title="Удалить из цепочки"
                     >
                       <Trash2 size={11} />
                     </button>
                   </div>
                 </div>
+
+                {/* Expanded Quick Parameters & Wet/Dry Drawer */}
+                {isExpanded && (
+                  <div
+                    className="px-3 pb-3 pt-1 border-t border-slate-800/80 bg-slate-950/40 space-y-2.5 rounded-b-xl"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {/* Top Row: Wet/Dry & A/B Copy Controls */}
+                    <div className="flex items-center justify-between gap-3 pt-1">
+                      <div className="flex items-center gap-2 flex-1 max-w-[180px]">
+                        <span className="text-[10px] font-semibold text-slate-400 shrink-0">
+                          Wet / Dry:
+                        </span>
+                        <input
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                          value={inst.wetDry ?? 1.0}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            onUpdateWetDry(inst.instanceId, val);
+                          }}
+                          className="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-400"
+                        />
+                        <span className="text-[10px] font-mono text-cyan-400 font-bold shrink-0 w-8 text-right">
+                          {wetDryPct}%
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={(e) => handleCopyAtoB(inst, e)}
+                          className="px-2 py-0.5 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800 rounded text-[9px] flex items-center gap-1 cursor-pointer"
+                          title="Скопировать текущие параметры в слот B"
+                        >
+                          <Copy size={9} />
+                          <span>Копия A → B</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Quick Knobs Grid for Essential Plugin Parameters */}
+                    {def?.parameters && def.parameters.length > 0 && (
+                      <div className="pt-1.5 border-t border-slate-850/60">
+                        <div className="flex flex-wrap items-center justify-around gap-2">
+                          {def.parameters.slice(0, 5).map((param) => {
+                            const currentVal = inst.parameters[param.id] ?? param.defaultValue ?? 0;
+                            return (
+                              <VSTQuickKnob
+                                key={param.id}
+                                id={`${inst.instanceId}-${param.id}`}
+                                name={param.name}
+                                value={currentVal}
+                                min={param.min}
+                                max={param.max}
+                                step={param.step}
+                                unit={param.unit}
+                                color={def.color || '#06b6d4'}
+                                onChange={(newVal) => {
+                                  // Immediate event dispatched to AudioWorklet and engine
+                                  handleImmediateParamChange(inst.instanceId, param.id, newVal);
+                                  // Update local parameters reference for UI rendering
+                                  inst.parameters[param.id] = newVal;
+                                }}
+                              />
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             );
           })}

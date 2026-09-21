@@ -459,8 +459,7 @@ export default function App() {
     const clipId = Date.now();
     let effectiveTrackId = config.trackId;
 
-    const isOriginal = effectiveTrackId === 1 ||
-      /оригинал|original|видео|video|отригал|orig/i.test(config.name || file.name);
+    const isOriginal = /оригинал|original|видео|video|отригал|orig/i.test(config.name || file.name);
 
     setTracks((prev) => {
       if (!effectiveTrackId || !config.replaceExisting) {
@@ -758,6 +757,10 @@ export default function App() {
               onTogglePlay={togglePlay}
               onReset={() => seek(0)}
               onUpdateMaster={handleUpdateMaster}
+              onUpdateVstChain={handleUpdateMasterVstChain}
+              onUpdateVstParam={(instanceId, paramId, value) => handleUpdateVstParam('master', instanceId, paramId, value)}
+              onUpdateVstBypass={(instanceId, enabled) => handleUpdateVstBypass('master', instanceId, enabled)}
+              onUpdateVstWetDry={(instanceId, wetDry) => handleUpdateVstWetDry('master', instanceId, wetDry)}
             />
 
             {/* Audio File Upload Rack for Tracks */}
@@ -803,6 +806,10 @@ export default function App() {
                     track={track}
                     allTracks={tracks}
                     onUpdateTrack={handleUpdateTrack}
+                    onUpdateVstChain={(vstPlugins) => handleUpdateTrackVstChain(track.id, vstPlugins)}
+                    onUpdateVstParam={(instanceId, paramId, value) => handleUpdateVstParam('track', instanceId, paramId, value, track.id)}
+                    onUpdateVstBypass={(instanceId, enabled) => handleUpdateVstBypass('track', instanceId, enabled, track.id)}
+                    onUpdateVstWetDry={(instanceId, wetDry) => handleUpdateVstWetDry('track', instanceId, wetDry, track.id)}
                   />
                 ))}
               </div>
@@ -952,9 +959,29 @@ export default function App() {
         isAudioInitialized={isInitialized}
       />
 
-      {/* Footer */}
-      <footer className="border-t border-slate-800 bg-slate-950 py-3 px-6 text-center text-xs text-slate-500 font-mono">
-        FFmpeg WASM Video Muxing • C++17 DSP Audio Core • AudioWorklet Bridge • Silero VAD ONNX Web
+      {/* Footer with Low-Latency DSP, WASM & WebGPU Status Indicators */}
+      <footer className="border-t border-slate-800 bg-slate-950 py-4 px-6 text-center text-xs text-slate-400 font-mono flex flex-col md:flex-row items-center justify-between gap-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-slate-500">Engine Core:</span>
+          <span className={`px-2.5 py-0.5 rounded text-[10px] font-bold tracking-wide ${isInitialized ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shadow-sm shadow-emerald-500/5' : 'bg-slate-900 text-slate-600 border border-slate-800'}`}>
+            daw_core.wasm: {isInitialized ? 'INSTANTIATED' : 'OFFLINE'}
+          </span>
+          <span className={`px-2.5 py-0.5 rounded text-[10px] font-bold tracking-wide ${isAudioWorkletActive ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 shadow-sm shadow-cyan-500/5' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'}`}>
+            Thread: {isAudioWorkletActive ? 'AUDIO WORKLET ACTIVE' : 'WORKLET STANDBY'}
+          </span>
+        </div>
+        <div className="text-slate-500 text-[11px] font-medium">
+          FFmpeg WASM Muxing • C++17 DSP Audio Core • AudioWorklet Bridge • Silero VAD ONNX
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-slate-500">Acceleration & Latency:</span>
+          <span className="px-2.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20 text-[10px] font-bold tracking-wide shadow-sm shadow-blue-500/5">
+            {'gpu' in navigator ? 'WebGPU Active' : 'WASM Fallback'}
+          </span>
+          <span className="px-2.5 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20 text-[10px] font-bold tracking-wide shadow-sm shadow-purple-500/5">
+            Buffer: 128 spl (~2.67ms)
+          </span>
+        </div>
       </footer>
 
       {/* Единый модальный хаб импорта медиаматериалов */}

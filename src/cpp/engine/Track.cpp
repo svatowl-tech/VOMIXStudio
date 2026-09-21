@@ -5,8 +5,10 @@
  */
 
 #include "Track.hpp"
+#include "../vst/NativeDSPPlugins.hpp"
 #include <algorithm>
 #include <cstring>
+#include <cmath>
 
 namespace DAWCore {
 
@@ -24,12 +26,21 @@ Track::Track(uint32_t trackId, std::string trackName, float sr)
 {
     clips.reserve(MAX_CLIPS_PER_TRACK);
     std::memset(trackBuffer, 0, sizeof(trackBuffer));
+    std::memset(vstChanL, 0, sizeof(vstChanL));
+    std::memset(vstChanR, 0, sizeof(vstChanR));
+    std::memset(vstOutL, 0, sizeof(vstOutL));
+    std::memset(vstOutR, 0, sizeof(vstOutR));
     vocalRack.setup(sr);
 }
 
 void Track::setSampleRate(float sr) noexcept {
     sampleRate = sr;
     vocalRack.setup(sr);
+    for (auto& slot : vstSlots) {
+        if (slot) {
+            slot->initialize(static_cast<double>(sr), MAX_BUFFER_SIZE);
+        }
+    }
 }
 
 void Track::addClip(const Clip& clip) {
@@ -56,6 +67,42 @@ Clip* Track::getClip(uint32_t clipId) noexcept {
         if (clip.id == clipId) return &clip;
     }
     return nullptr;
+}
+
+void Track::loadPlugin(int slotIdx, int pluginTypeId) {
+    if (slotIdx < 0 || slotIdx >= 8) return;
+    vstSlots[slotIdx] = createNativePluginInstance(pluginTypeId, static_cast<double>(sampleRate));
+}
+
+void Track::setPluginParam(int slotIdx, int paramId, float normalizedValue) {
+    if (slotIdx < 0 || slotIdx >= 8) return;
+    if (vstSlots[slotIdx]) {
+        vstSlots[slotIdx]->setParameter(static_cast<uint32_t>(paramId), normalizedValue);
+    }
+}
+
+void Track::setPluginBypass(int slotIdx, bool bypass) {
+    if (slotIdx < 0 || slotIdx >= 8) return;
+    if (vstSlots[slotIdx]) {
+        // Проверяем возможность приведения к NativePluginBase
+        auto* nativePlugin = dynamic_cast<NativePluginBase*>(vstSlots[slotIdx].get());
+        if (nativePlugin) {
+            nativePlugin->setBypass(bypass);
+        } else {
+            // Резервный параметр 0 = bypass
+            vstSlots[slotIdx]->setParameter(0, bypass ? 1.0f : 0.0f);
+        }
+    }
+}
+
+void Track::setPluginWetDry(int slotIdx, float wetDry) {
+    if (slotIdx < 0 || slotIdx >= 8) return;
+    if (vstSlots[slotIdx]) {
+        auto* nativePlugin = dynamic_cast<NativePluginBase*>(vstSlots[slotIdx].get());
+        if (nativePlugin) {
+            nativePlugin->setWetDryMix(wetDry);
+        }
+    }
 }
 
 void Track::renderClipsToBuffer(size_t timelinePosition, size_t numFrames) noexcept {
@@ -115,6 +162,45 @@ void Track::processVocalRack(const float* sidechainMono, size_t numFrames) noexc
     vocalRack.process(trackBuffer, sidechainMono, safeFrames);
 }
 
+void Track::processVSTSlots(size_t numFrames) noexcept {
+    size_t safeFrames = std::min(numFrames, MAX_BUFFER_SIZE);
+    if (safeFrames == 0) return;
+
+    bool hasActivePlugin = false;
+    for (const auto& slot : vstSlots) {
+        if (slot && slot->isActivated()) {
+            hasActivePlugin = true;
+            break;
+        }
+    }
+    if (!hasActivePlugin) return;
+
+    // 1. Деинтерливинг стерео буфера в vstChanL и vstChanR
+    for (size_t i = 0; i < safeFrames; ++i) {
+        vstChanL[i] = trackBuffer[i * 2];
+        vstChanR[i] = trackBuffer[i * 2 + 1];
+    }
+
+    float* inPtrs[2] = { vstChanL, vstChanR };
+    float* outPtrs[2] = { vstOutL, vstOutR };
+
+    // 2. Последовательный прогон через все 8 слотов
+    for (auto& slot : vstSlots) {
+        if (slot && slot->isActivated()) {
+            slot->processBlock(inPtrs, outPtrs, static_cast<int32_t>(safeFrames));
+            // Копируем результат как вход для следующего слота
+            std::memcpy(vstChanL, vstOutL, safeFrames * sizeof(float));
+            std::memcpy(vstChanR, vstOutR, safeFrames * sizeof(float));
+        }
+    }
+
+    // 3. Интерливинг обратно в trackBuffer
+    for (size_t i = 0; i < safeFrames; ++i) {
+        trackBuffer[i * 2]     = vstChanL[i];
+        trackBuffer[i * 2 + 1] = vstChanR[i];
+    }
+}
+
 void Track::applyFaderAndPan(size_t numFrames) noexcept {
     size_t safeFrames = std::min(numFrames, MAX_BUFFER_SIZE);
     float volGain = dbToGain(volumeDb);
@@ -145,6 +231,23 @@ void Track::applyFaderAndPan(size_t numFrames) noexcept {
         trackBuffer[i * 2 + 1] *= finalGainR;
     }
 #endif
+}
+
+void Track::calculatePeaks(size_t numFrames) noexcept {
+    size_t safeFrames = std::min(numFrames, MAX_BUFFER_SIZE);
+    float pL = 0.0f;
+    float pR = 0.0f;
+
+    for (size_t i = 0; i < safeFrames; ++i) {
+        float absL = std::abs(trackBuffer[i * 2]);
+        float absR = std::abs(trackBuffer[i * 2 + 1]);
+        if (absL > pL) pL = absL;
+        if (absR > pR) pR = absR;
+    }
+
+    // Плавный спад пиков (decay envelope)
+    peakL = std::max(pL, peakL * 0.85f);
+    peakR = std::max(pR, peakR * 0.85f);
 }
 
 } // namespace DAWCore

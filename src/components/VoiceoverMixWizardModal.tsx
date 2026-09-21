@@ -13,6 +13,7 @@
 import React, { useState, useEffect } from 'react';
 import { TrackState, VocalBusState, MasterState } from '../audio/dawEngine';
 import { detectTrackCollisions, ClipCollisionInfo } from '../utils/collisionDetector';
+import { systemLogger } from '../services/SystemLogger';
 import {
   Sparkles,
   AlertTriangle,
@@ -120,6 +121,7 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
     setProgressPercent(10);
     setStatusMessage('Шаг 1/4: AI-обработка, очистка шумов и EBU R128 нормализация громкости (-18 dBFS)...');
     addLog('Запуск конвейера сведения заказадрового озвучания...');
+    systemLogger.info('MVPPipeline', 'Запуск сквозного конвейера сведения закадрового озвучания (Шаг 1: AI и нормализация)');
 
     try {
       // 1. Применение AI и нормализация
@@ -130,6 +132,7 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
       });
       setTracks(processedTracks);
       addLog('AI обработка и EBU R128 нормализация всех дорожек успешно завершена.');
+      systemLogger.info('MVPPipeline', 'AI обработка и EBU R128 нормализация всех дорожек успешно завершена.');
       setProgressPercent(35);
 
       // 2. Детекция коллизий
@@ -144,13 +147,16 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
       if (detectedCollisions.length > 0) {
         addLog(`⚠️ ВНИМАНИЕ: Обнаружено ${detectedCollisions.length} коллизий / наездов фраз! Конвейер приостановлен.`);
         setStatusMessage(`Обнаружено коллизий: ${detectedCollisions.length} шт. Конвейер приостановлен для проверки.`);
+        systemLogger.warn('MVPPipeline', `Обнаружено ${detectedCollisions.length} коллизий / наездов фраз. Конвейер переведен в режим паузы для правки на таймлайне.`);
       } else {
         addLog('✅ Коллизий и наездов фраз не обнаружено.');
         setStatusMessage('Коллизий не обнаружено. Переходим к калибровке громкости.');
+        systemLogger.info('MVPPipeline', 'Коллизий и наездов фраз не обнаружено. Переход к калибровке громкости.');
       }
     } catch (err: any) {
       addLog(`❌ Ошибка на Шаге 1: ${err?.message || err}`);
       setErrorMessage(err?.message || 'Ошибка обработки аудио');
+      systemLogger.error('MVPPipeline', `Ошибка на Шаге 1 (AI / Нормализация): ${err?.message || err}`);
       setStage('error');
     }
   };
@@ -163,8 +169,10 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
     if (rechecked.length === 0) {
       addLog('✅ Все коллизии успешно устранены!');
       setStatusMessage('Коллизии устранены. Можно продолжать конвейер.');
+      systemLogger.info('MVPPipeline', 'Коллизии успешно устранены пользователем на таймлайне.');
     } else {
       addLog(`Осталось коллизий: ${rechecked.length} шт.`);
+      systemLogger.warn('MVPPipeline', `Повторная проверка: осталось ${rechecked.length} коллизий.`);
     }
   };
 
@@ -174,6 +182,7 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
     setProgressPercent(70);
     setStatusMessage('Шаг 3/4: Калибровка общего баланса громкости с начала проекта и Шина Вокала.');
     addLog('Приостановка конвейера: Ожидание калибровки громкости пользователем.');
+    systemLogger.info('MVPPipeline', 'Шаг 3/4: Калибровка баланса громкости через Шину Вокала и дорожки.');
   };
 
   // Завершение и запуск мастеринга + FFmpeg муксинга
@@ -182,6 +191,7 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
     setProgressPercent(85);
     setStatusMessage('Шаг 4/4: Применение мастер-эффектов, C++ рендеринг и вшивание аудио в видео...');
     addLog('Старт финального C++ мастеринга и FFmpeg видео-муксинга...');
+    systemLogger.info('MVPPipeline', 'Шаг 4/4: Старт финального C++ мастеринга и FFmpeg видео-муксинга.');
 
     try {
       const res = await onRunFinalMasterAndMux(tracks, vocalBus);
@@ -193,9 +203,11 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
       setStage('completed');
       setStatusMessage(`Готово! Видео успешно сведено и зашито: ${res.outputFileName}`);
       addLog(`🎉 Сквозной конвейер успешно завершен! Файл ${res.outputFileName} сохранен в project/.`);
+      systemLogger.info('MVPPipeline', `Конвейер успешно завершен! Создан сшитый файл: ${res.outputFileName}`);
     } catch (err: any) {
       addLog(`❌ Ошибка мастеринга/муксинга: ${err?.message || err}`);
       setErrorMessage(err?.message || 'Ошибка финального рендеринга');
+      systemLogger.error('MVPPipeline', `Ошибка на Шаге 4 (Мастеринг / FFmpeg муксинг): ${err?.message || err}`);
       setStage('error');
     }
   };

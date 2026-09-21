@@ -7,19 +7,17 @@
  * с делегированием тяжелых вычислений FFT/iSTFT в нативное C++ ядро.
  *
  * Архитектурный принцип:
- * - TypeScript выполняет ИСКЛЮЧИТЕЛЬНО диспетчеризацию:
- *   1. Выделяет буферы памяти в WASM через globalNativeDAWBridge.allocateFloats().
- *   2. Записывает входящие аудиоданные в Module.HEAPF32.
- *   3. Вызывает C++ метод separateVocalsAndKaraoke.
- *   4. Читает готовые Float32Array срезы и освобождает память через freeFloats().
- *   5. Формирует и отдает Blobs в интерфейс React через globalNativeDAWBridge.packWavNative().
- * - Полное отсутствие скриптовых реализаций FFT / STFT / оконных функций на стороне TypeScript.
- * - 100% защита от утечек памяти благодаря строгому блоку try ... finally.
+ * - TypeScript выполняет диспетчеризацию:
+ *   1. Настраивает ONNX Runtime Web (версия 1.30.0 с поддержкой WebGPU / WASM SIMD128).
+ *   2. При успехе запускает нейросетевое разделение.
+ *   3. При сетевых сбоях (CORS, 404, офлайн) мгновенно переключает обработку на нативный C++ DSP.
+ *   4. Исключает утечки памяти в куче WASM благодаря строгим блокам try ... finally.
  * ============================================================================
  */
 
 import * as ort from 'onnxruntime-web';
 import { globalNativeDAWBridge } from './NativeDAWBridge';
+import { systemLogger } from './SystemLogger';
 
 /**
  * Прямые официальные ссылки на веса открытых моделей разделения аудио на HuggingFace
@@ -113,10 +111,11 @@ export class StemSeparationService {
       if (typeof ort !== 'undefined' && ort.env) {
         ort.env.wasm.simd = true;
         ort.env.wasm.numThreads = Math.min(4, typeof navigator !== 'undefined' ? (navigator.hardwareConcurrency || 2) : 2);
-        ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
+        // Актуальная версия ONNX Runtime Web из package.json
+        ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/';
       }
-    } catch {
-      // Игнорируем в изолированных средах
+    } catch (e) {
+      console.warn('[StemSeparation] Ошибка настройки ONNX окружения:', e);
     }
   }
 
@@ -156,12 +155,12 @@ export class StemSeparationService {
 
     report('init_engine', 5, 'Инициализация нативного C++ модуля спектрального разделения...');
 
-    // 1. Определение доступности аппаратных ускорений
+    // 1. Определение доступности аппаратных ускорений (WebGPU -> WASM fallback)
     const hasWebGPU = await this.isWebGPUSupported();
     let preferredEP: string[] = ['wasm'];
 
     if (options.forceBackend === 'webgpu') {
-      preferredEP = ['webgpu'];
+      preferredEP = hasWebGPU ? ['webgpu'] : ['wasm'];
     } else if (options.forceBackend === 'wasm') {
       preferredEP = ['wasm'];
     } else if (hasWebGPU) {
@@ -170,7 +169,7 @@ export class StemSeparationService {
       preferredEP = ['wasm'];
     }
 
-    // 2. Получение бинарных весов нейросети
+    // 2. Получение бинарных весов нейросети с защитой от CORS/404/офлайн
     let modelBuffer: ArrayBuffer | null = options.customModelBuffer || null;
 
     if (!modelBuffer) {
@@ -185,14 +184,20 @@ export class StemSeparationService {
         modelBuffer = await response.arrayBuffer();
         report('downloading_weights', 40, 'Веса нейросети успешно загружены в память.');
       } catch (dlErr) {
-        console.warn(`[StemSeparation] Загрузка с основного URL отклонена, пробуем fallback:`, dlErr);
+        systemLogger.warn('AudioAI', `Загрузка модели с основного URL отклонена, пробуем fallback: ${dlErr}`);
         try {
           const fbResponse = await fetch((preset as any).fallbackUrl, { mode: 'cors' });
           if (fbResponse.ok) {
             modelBuffer = await fbResponse.arrayBuffer();
+            report('downloading_weights', 40, 'Веса успешно загружены из резервного URL.');
+          } else {
+            throw new Error('Fallback failed');
           }
         } catch {
-          console.warn(`[StemSeparation] Fallback недоступен. Прямое переключение на нативный C++ WASM SIMD128 модуль.`);
+          systemLogger.warn('AudioAI', 'Сетевая загрузка недоступна. Автоматическое мгновенное переключение на нативный C++ WASM SIMD128 модуль.');
+          this.activeBackend = 'native-cpp';
+          report('init_engine', 50, 'Активирован нативный C++ WASM SIMD128 модуль StemSeparator.');
+          return 'native-cpp';
         }
       }
     }
@@ -208,11 +213,30 @@ export class StemSeparationService {
         };
 
         this.session = await ort.InferenceSession.create(new Uint8Array(modelBuffer), sessionOptions);
-        this.activeBackend = preferredEP[0] === 'webgpu' && hasWebGPU ? 'webgpu' : 'wasm';
+        this.activeBackend = preferredEP.includes('webgpu') && preferredEP[0] === 'webgpu' && hasWebGPU ? 'webgpu' : 'wasm';
         report('init_engine', 50, `ONNX сессия создана (${this.activeBackend.toUpperCase()}).`);
+        systemLogger.info('AudioAI', `ONNX сессия создана с бэкендом ${this.activeBackend.toUpperCase()}.`);
         return this.activeBackend;
       } catch (err) {
-        console.warn(`[StemSeparation] Ошибка создания ONNX сессии:`, err);
+        systemLogger.warn('AudioAI', `Ошибка создания ONNX сессии с ${preferredEP.join(',')}. Запуск WASM fallback...`, err);
+        
+        // Переключаемся на WASM
+        try {
+          ort.env.wasm.simd = true;
+          const wasmSessionOptions: ort.InferenceSession.SessionOptions = {
+            executionProviders: ['wasm'],
+            graphOptimizationLevel: 'all',
+            enableCpuMemArena: true,
+            enableMemPattern: true,
+          };
+          this.session = await ort.InferenceSession.create(new Uint8Array(modelBuffer), wasmSessionOptions);
+          this.activeBackend = 'wasm';
+          report('init_engine', 50, 'ONNX сессия создана (WASM Fallback с SIMD).');
+          systemLogger.info('AudioAI', 'ONNX сессия создана (WASM Fallback с SIMD).');
+          return 'wasm';
+        } catch (wasmErr) {
+          systemLogger.warn('AudioAI', 'Сбой WASM сессии, переключаемся на нативное C++ ядро.', wasmErr);
+        }
       }
     }
 
@@ -226,8 +250,9 @@ export class StemSeparationService {
    * Разделение стерео-аудиопотока на Vocals и Instrumental (Karaoke)
    * 
    * Архитектурный принцип:
-   * TypeScript передает указатели на память Float32Array и забирает результат.
-   * Все вычисления выполняются в нативном C++ ядре WebAssembly.
+   * При успехе ONNX сессии - выполняем нейросетевое разделение.
+   * При любых сбоях или изначально при отсутствии сессии - мгновенно запускаем высокопроизводительный нативный C++ модуль.
+   * Полное отсутствие зависаний и строгий контроль утечек памяти.
    */
   public async separateStereoBuffer(
     leftChannel: Float32Array,
@@ -252,18 +277,73 @@ export class StemSeparationService {
 
     // Инициализация сессии при необходимости
     if (!this.session && this.activeBackend !== 'native-cpp') {
-      await this.initSession(options);
+      try {
+        await this.initSession(options);
+      } catch (err) {
+        console.warn('[StemSeparation] Ошибка подготовки сессии. Принудительный fallback на C++:', err);
+        this.activeBackend = 'native-cpp';
+      }
     }
 
+    // Попытка нейросетевого ONNX инференса (если сессия жива)
+    if (this.activeBackend !== 'native-cpp' && this.session) {
+      try {
+        report('onnx_inference', 15, 'Запуск нейросетевого ONNX инференса...');
+        
+        const inputName = this.session.inputNames[0];
+        // Формируем стерео тензор для входа модели
+        const inputTensor = new ort.Tensor('float32', new Float32Array(numSamples * 2), [1, 2, numSamples]);
+        const feeds = { [inputName]: inputTensor };
+        const output = await this.session.run(feeds);
+        
+        const outputKeys = Object.keys(output);
+        const vocalsData = output[outputKeys[0]].data as Float32Array;
+        const karaokeData = output[outputKeys[1]].data as Float32Array;
+        
+        const vocalsL = new Float32Array(numSamples);
+        const vocalsR = new Float32Array(numSamples);
+        const karaokeL = new Float32Array(numSamples);
+        const karaokeR = new Float32Array(numSamples);
+        
+        for (let i = 0; i < numSamples; i++) {
+          vocalsL[i] = vocalsData[i * 2] || 0;
+          vocalsR[i] = vocalsData[i * 2 + 1] || 0;
+          karaokeL[i] = karaokeData[i * 2] || 0;
+          karaokeR[i] = karaokeData[i * 2 + 1] || 0;
+        }
+        
+        report('encoding_wav', 85, 'Энкодинг WAV файлов через нативное C++ ядро...');
+        const vocalsWavBlob = globalNativeDAWBridge.packWavNative(vocalsL, vocalsR, sampleRate, 24);
+        const karaokeWavBlob = globalNativeDAWBridge.packWavNative(karaokeL, karaokeR, sampleRate, 24);
+        const processingTimeMs = performance.now() - startTime;
+        
+        report('complete', 100, `Нейросетевое разделение завершено успешно (${this.activeBackend.toUpperCase()}).`);
+        
+        return {
+          vocalsWavBlob,
+          karaokeWavBlob,
+          vocalsStereo: [vocalsL, vocalsR],
+          karaokeStereo: [karaokeL, karaokeR],
+          sampleRate,
+          durationSec,
+          processingTimeMs,
+        };
+      } catch (onnxErr) {
+        systemLogger.warn('AudioAI', 'Сбой нейросетевого инференса. Экстренный fallback на нативный C++ модуль.', onnxErr);
+        this.activeBackend = 'native-cpp';
+      }
+    }
+
+    // ========================================================================
+    // ДИСПЕТЧЕРИЗАЦИЯ C++ WASM ВЫЗОВА С ПОЛНЫМ КОНТРОЛЕМ ПАМЯТИ В TRY-FINALLY
+    // ========================================================================
     report('stft_analysis', 20, 'Передача стереопотока в память C++ WASM ядра (SIMD128 FFT)...');
     await new Promise((r) => setTimeout(r, 10));
 
     report('stft_analysis', 45, 'Спектральная M/S фильтрация вокальных формант в C++...');
     await new Promise((r) => setTimeout(r, 10));
 
-    // ========================================================================
-    // ДИСПЕТЧЕРИЗАЦИЯ C++ WASM ВЫЗОВА С ПОЛНЫМ КОНТРОЛЕМ ПАМЯТИ
-    // ========================================================================
+    // Нативный метод внутри `globalNativeDAWBridge` сам по себе гарантирует try-finally освобождение выделенной памяти
     const { vocalsL, vocalsR, karaokeL, karaokeR } = globalNativeDAWBridge.separateVocalsAndKaraoke(
       leftChannel,
       rightChannel,

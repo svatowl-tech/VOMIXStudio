@@ -5,6 +5,7 @@
  */
 
 #include "Mixer.hpp"
+#include "../vst/NativeDSPPlugins.hpp"
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -16,6 +17,10 @@ Mixer::Mixer(float sr)
 {
     std::memset(sidechainMonoBuffer, 0, sizeof(sidechainMonoBuffer));
     std::memset(masterMixBuffer, 0, sizeof(masterMixBuffer));
+    std::memset(masterChanL, 0, sizeof(masterChanL));
+    std::memset(masterChanR, 0, sizeof(masterChanR));
+    std::memset(masterOutL, 0, sizeof(masterOutL));
+    std::memset(masterOutR, 0, sizeof(masterOutR));
 }
 
 void Mixer::setSampleRate(float sr) noexcept {
@@ -23,6 +28,11 @@ void Mixer::setSampleRate(float sr) noexcept {
     for (auto& track : tracks) {
         if (track) {
             track->setSampleRate(sr);
+        }
+    }
+    for (auto& slot : masterVstSlots) {
+        if (slot) {
+            slot->initialize(static_cast<double>(sr), MAX_BUFFER_SIZE);
         }
     }
 }
@@ -49,6 +59,55 @@ Track* Mixer::getTrack(uint32_t trackId) noexcept {
 
 void Mixer::removeAllTracks() noexcept {
     tracks.clear();
+}
+
+void Mixer::loadMasterPlugin(int slotIdx, int pluginTypeId) {
+    if (slotIdx < 0 || slotIdx >= 8) return;
+    masterVstSlots[slotIdx] = createNativePluginInstance(pluginTypeId, static_cast<double>(sampleRate));
+}
+
+void Mixer::setMasterPluginParam(int slotIdx, int paramId, float normalizedValue) {
+    if (slotIdx < 0 || slotIdx >= 8) return;
+    if (masterVstSlots[slotIdx]) {
+        masterVstSlots[slotIdx]->setParameter(static_cast<uint32_t>(paramId), normalizedValue);
+    }
+}
+
+void Mixer::setMasterPluginBypass(int slotIdx, bool bypass) {
+    if (slotIdx < 0 || slotIdx >= 8) return;
+    if (masterVstSlots[slotIdx]) {
+        auto* nativePlugin = dynamic_cast<NativePluginBase*>(masterVstSlots[slotIdx].get());
+        if (nativePlugin) {
+            nativePlugin->setBypass(bypass);
+        } else {
+            masterVstSlots[slotIdx]->setParameter(0, bypass ? 1.0f : 0.0f);
+        }
+    }
+}
+
+void Mixer::setMasterPluginWetDry(int slotIdx, float wetDry) {
+    if (slotIdx < 0 || slotIdx >= 8) return;
+    if (masterVstSlots[slotIdx]) {
+        auto* nativePlugin = dynamic_cast<NativePluginBase*>(masterVstSlots[slotIdx].get());
+        if (nativePlugin) {
+            nativePlugin->setWetDryMix(wetDry);
+        }
+    }
+}
+
+float Mixer::getPeak(int trackId, int channel) const noexcept {
+    if (trackId == 1000) {
+        return (channel == 0) ? masterPeakL : masterPeakR;
+    }
+    if (trackId == 999) {
+        return (channel == 0) ? vocalBusPeakL : vocalBusPeakR;
+    }
+    for (const auto& t : tracks) {
+        if (t && static_cast<int>(t->id) == trackId) {
+            return (channel == 0) ? t->getPeakL() : t->getPeakR();
+        }
+    }
+    return 0.0f;
 }
 
 size_t Mixer::calculateProjectLengthSamples(int isolateTrackId) const noexcept {
@@ -86,6 +145,9 @@ void Mixer::processBlock(float* outputBuffer, size_t numFrames) noexcept {
         }
     }
 
+    float currentVocalL = 0.0f;
+    float currentVocalR = 0.0f;
+
     // Рендеринг и DSP обработка каждой дорожки
     for (auto& track : tracks) {
         if (!track) continue;
@@ -111,10 +173,24 @@ void Mixer::processBlock(float* outputBuffer, size_t numFrames) noexcept {
         // 3. Вокальный процессор (VocalRack)
         track->processVocalRack(scPtr, safeFrames);
 
-        // 4. Применение громкости фейдера и панорамы
+        // 4. Последовательный прогон дорожки через активные плагины слотов VST
+        track->processVSTSlots(safeFrames);
+
+        // 5. Применение громкости фейдера и панорамы
         track->applyFaderAndPan(safeFrames);
 
-        // 5. Суммирование дорожки в мастер-шину с SIMD-ускорением
+        // 6. Замер пиковых уровней дорожки для телеметрии
+        track->calculatePeaks(safeFrames);
+
+        // Сбор пиков для вокал-шины (если имя содержит vocal/вокал)
+        std::string lowerName = track->name;
+        std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+        if (lowerName.find("vocal") != std::string::npos || lowerName.find("вокал") != std::string::npos) {
+            currentVocalL = std::max(currentVocalL, track->getPeakL());
+            currentVocalR = std::max(currentVocalR, track->getPeakR());
+        }
+
+        // 7. Суммирование дорожки в мастер-шину с SIMD-ускорением
 #if USE_WASM_SIMD
         size_t totalSamples = safeFrames * 2;
         size_t i = 0;
@@ -134,6 +210,9 @@ void Mixer::processBlock(float* outputBuffer, size_t numFrames) noexcept {
 #endif
     }
 
+    vocalBusPeakL = currentVocalL;
+    vocalBusPeakR = currentVocalR;
+
     // Мастер-секция: Master Volume & Constant Power Pan
     float masterGain = dbToGain(masterVolumeDb);
     float panL = 1.0f, panR = 1.0f;
@@ -147,8 +226,52 @@ void Mixer::processBlock(float* outputBuffer, size_t numFrames) noexcept {
         masterMixBuffer[i * 2 + 1] *= finalMasterR;
     }
 
-    // Мастер-лимитер с защитой от пикового клиппинга (True Peak Guard)
+    // 8. Мастер-слоты VST (мастеринг-цепочка перед Soft Limiter)
+    bool hasActiveMasterPlugin = false;
+    for (const auto& slot : masterVstSlots) {
+        if (slot && slot->isActivated()) {
+            hasActiveMasterPlugin = true;
+            break;
+        }
+    }
+
+    if (hasActiveMasterPlugin) {
+        for (size_t i = 0; i < safeFrames; ++i) {
+            masterChanL[i] = masterMixBuffer[i * 2];
+            masterChanR[i] = masterMixBuffer[i * 2 + 1];
+        }
+
+        float* inPtrs[2] = { masterChanL, masterChanR };
+        float* outPtrs[2] = { masterOutL, masterOutR };
+
+        for (auto& slot : masterVstSlots) {
+            if (slot && slot->isActivated()) {
+                slot->processBlock(inPtrs, outPtrs, static_cast<int32_t>(safeFrames));
+                std::memcpy(masterChanL, masterOutL, safeFrames * sizeof(float));
+                std::memcpy(masterChanR, masterOutR, safeFrames * sizeof(float));
+            }
+        }
+
+        for (size_t i = 0; i < safeFrames; ++i) {
+            masterMixBuffer[i * 2]     = masterChanL[i];
+            masterMixBuffer[i * 2 + 1] = masterChanR[i];
+        }
+    }
+
+    // 9. Мастер-лимитер с защитой от пикового клиппинга (True Peak Guard)
     masterLimiter.processBuffer(masterMixBuffer, safeFrames);
+
+    // 10. Замер пиковых уровней мастера
+    float mL = 0.0f;
+    float mR = 0.0f;
+    for (size_t i = 0; i < safeFrames; ++i) {
+        float absL = std::abs(masterMixBuffer[i * 2]);
+        float absR = std::abs(masterMixBuffer[i * 2 + 1]);
+        if (absL > mL) mL = absL;
+        if (absR > mR) mR = absR;
+    }
+    masterPeakL = std::max(mL, masterPeakL * 0.85f);
+    masterPeakR = std::max(mR, masterPeakR * 0.85f);
 
     // Копирование в выходной буфер
     std::memcpy(outputBuffer, masterMixBuffer, safeFrames * 2 * sizeof(float));

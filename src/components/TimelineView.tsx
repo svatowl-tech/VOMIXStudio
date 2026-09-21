@@ -35,7 +35,8 @@ import {
   Disc,
   Mic,
   Settings2,
-  VolumeX
+  VolumeX,
+  ShieldAlert
 } from 'lucide-react';
 
 export interface TimelineViewProps {
@@ -122,21 +123,50 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   const tracksRef = useRef<TrackState[]>(tracks);
   tracksRef.current = tracks;
 
-  const handleSyncAllTracks = useCallback((updatedTracks: TrackState[]) => {
-    if (syncAllTracks) {
-      syncAllTracks(updatedTracks);
-    } else if (onSyncAllTracks) {
-      onSyncAllTracks(updatedTracks);
-    }
-  }, [syncAllTracks, onSyncAllTracks]);
+  const handleSyncAllTracks = useCallback(
+    (updatedTracks: TrackState[]) => {
+      if (syncAllTracks) {
+        syncAllTracks(updatedTracks);
+      } else if (onSyncAllTracks) {
+        onSyncAllTracks(updatedTracks);
+      }
+    },
+    [syncAllTracks, onSyncAllTracks]
+  );
 
-  const handleSyncTrackClips = useCallback((trackId: number, clips: ClipConfig[]) => {
-    if (syncTrackClips) {
-      syncTrackClips(trackId, clips);
-    } else if (onSyncTrackClips) {
-      onSyncTrackClips(trackId, clips);
-    }
-  }, [syncTrackClips, onSyncTrackClips]);
+  const handleSyncTrackClips = useCallback(
+    (trackId: number, clips: ClipConfig[]) => {
+      // Строгая санитаризация перед передачей в C++ AudioWorklet ядро (предотвращение undefined и утечек)
+      const sanitizedClips: ClipConfig[] = clips.map((c) => {
+        const isStereo = c.buffer ? c.buffer.length >= (c.lengthSamples || 1) * 2 : false;
+        const channels = isStereo ? 2 : 1;
+        const validLen =
+          typeof c.lengthSamples === 'number' && c.lengthSamples > 0
+            ? c.lengthSamples
+            : c.buffer
+            ? Math.floor(c.buffer.length / channels)
+            : 0;
+
+        return {
+          ...c,
+          offsetSamples: typeof c.offsetSamples === 'number' && !isNaN(c.offsetSamples) ? Math.max(0, Math.round(c.offsetSamples)) : 0,
+          lengthSamples: validLen,
+          fadeInSamples: typeof c.fadeInSamples === 'number' && !isNaN(c.fadeInSamples) ? Math.max(0, Math.min(validLen, Math.round(c.fadeInSamples))) : 0,
+          fadeOutSamples: typeof c.fadeOutSamples === 'number' && !isNaN(c.fadeOutSamples) ? Math.max(0, Math.min(validLen, Math.round(c.fadeOutSamples))) : 0,
+          gain: typeof c.gain === 'number' && !isNaN(c.gain) ? c.gain : 1.0,
+          pan: typeof c.pan === 'number' && !isNaN(c.pan) ? c.pan : 0.0,
+          buffer: c.buffer instanceof Float32Array ? c.buffer : new Float32Array(0)
+        };
+      });
+
+      if (syncTrackClips) {
+        syncTrackClips(trackId, sanitizedClips);
+      } else if (onSyncTrackClips) {
+        onSyncTrackClips(trackId, sanitizedClips);
+      }
+    },
+    [syncTrackClips, onSyncTrackClips]
+  );
 
   // Локальное состояние субтитров (синхронизировано с external)
   const [internalSubtitles, setInternalSubtitles] = useState<SubtitleCue[]>(() => {
@@ -1006,7 +1036,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     const effectiveMode =
       activeTool === 'stretch' && (mode === 'move' || mode === 'trim-end') ? 'time-stretch' : mode;
 
-    const untrimmed = clip.untrimmedBuffer || clip.buffer;
+    const untrimmed = clip.untrimmedBuffer || clip.originalBuffer || clip.buffer;
     const trimStart = typeof clip.trimStartSamples === 'number' ? clip.trimStartSamples : 0;
 
     setActiveDrag({
@@ -1096,6 +1126,9 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       const targetTrack = tracks.find((t) => t.id === activeDrag.trackId);
       if (!targetTrack) return;
 
+      // Получаем список соседних клипов на дорожке для предотвращения коллизий
+      const otherClips = targetTrack.clips.filter((c) => c.id !== activeDrag.clipId);
+
       if (activeDrag.mode === 'time-stretch') {
         const newLength = Math.max(
           sampleRate * 0.1,
@@ -1116,74 +1149,143 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
 
         if (activeDrag.mode === 'move') {
           let newOffset = Math.max(0, (activeDrag.initialOffsetSamples || 0) + deltaSamples);
+          const clipLength = activeDrag.initialLengthSamples || clip.lengthSamples;
+
           if (snapToGrid) {
             const { minorStepSec } = getAdaptiveTimeStep(pxPerSec);
             const minorStepSamples = Math.round(minorStepSec * sampleRate);
             newOffset = Math.round(newOffset / minorStepSamples) * minorStepSamples;
+
+            // Предотвращение наложений на соседние клипы в режиме Snap
+            for (const other of otherClips) {
+              const otherEnd = other.offsetSamples + other.lengthSamples;
+              // Если перетаскиваемый клип врезается слева в другой клип
+              if (
+                newOffset < otherEnd &&
+                newOffset + clipLength > other.offsetSamples
+              ) {
+                // Если исходно мы были справа от этого клипа - примагничиваем к его правому краю
+                if ((activeDrag.initialOffsetSamples || 0) >= otherEnd) {
+                  newOffset = Math.max(newOffset, otherEnd);
+                } else if ((activeDrag.initialOffsetSamples || 0) + clipLength <= other.offsetSamples) {
+                  // Если исходно были слева - примагничиваем к левому краю
+                  newOffset = Math.min(newOffset, Math.max(0, other.offsetSamples - clipLength));
+                }
+              }
+            }
           }
-          return { ...clip, offsetSamples: newOffset };
+
+          return { ...clip, offsetSamples: Math.max(0, newOffset) };
         }
 
         if (activeDrag.mode === 'trim-start') {
-          const untrimmed = activeDrag.initialUntrimmedBuffer || clip.buffer;
+          const untrimmed = activeDrag.initialUntrimmedBuffer || clip.untrimmedBuffer || clip.buffer;
           const isStereo = untrimmed.length >= (activeDrag.initialLengthSamples || clip.lengthSamples) * 2;
           const channels = isStereo ? 2 : 1;
 
-          const minLength = Math.round(sampleRate * 0.1);
-          const minDelta = Math.max(
-            -(activeDrag.initialOffsetSamples || 0),
-            -(activeDrag.initialTrimStartSamples || 0)
-          );
-          const maxDelta = (activeDrag.initialLengthSamples || 0) - minLength;
+          const minLength = Math.round(sampleRate * 0.05); // мин. 50 мс
+          const initialOffset = activeDrag.initialOffsetSamples || 0;
+          const initialLen = activeDrag.initialLengthSamples || clip.lengthSamples;
+          const initialTrimStart = activeDrag.initialTrimStartSamples || 0;
 
-          const actualDelta = Math.max(minDelta, Math.min(maxDelta, deltaSamples));
+          const minDelta = Math.max(-initialOffset, -initialTrimStart);
+          const maxDelta = initialLen - minLength;
 
-          const newOffset = (activeDrag.initialOffsetSamples || 0) + actualDelta;
-          const newLength = (activeDrag.initialLengthSamples || 0) - actualDelta;
-          const newTrimStart = (activeDrag.initialTrimStartSamples || 0) + actualDelta;
+          let actualDelta = Math.max(minDelta, Math.min(maxDelta, deltaSamples));
+          let newOffset = initialOffset + actualDelta;
 
-          const newBuffer = untrimmed.subarray(
-            newTrimStart * channels,
-            (newTrimStart + newLength) * channels
-          );
+          // Проверка коллизий слева при Snap
+          if (snapToGrid) {
+            for (const other of otherClips) {
+              const otherEnd = other.offsetSamples + other.lengthSamples;
+              if (other.offsetSamples < initialOffset && newOffset < otherEnd) {
+                newOffset = otherEnd;
+                actualDelta = newOffset - initialOffset;
+              }
+            }
+          }
+
+          const newLength = initialLen - actualDelta;
+          const newTrimStart = initialTrimStart + actualDelta;
+
+          // Формирование нового буфера через C++ нативный метод extractSubBufferNative
+          let newBuffer: Float32Array;
+          try {
+            newBuffer = globalNativeDAWBridge.extractSubBufferNative(
+              untrimmed,
+              newTrimStart,
+              newLength,
+              channels
+            );
+          } catch (e) {
+            // Безопасный fallback при выходе за границы
+            const startIdx = Math.max(0, newTrimStart * channels);
+            const endIdx = Math.min(untrimmed.length, (newTrimStart + newLength) * channels);
+            newBuffer = untrimmed.subarray(startIdx, endIdx);
+          }
 
           return {
             ...clip,
-            offsetSamples: newOffset,
+            offsetSamples: Math.max(0, newOffset),
             lengthSamples: newLength,
             untrimmedBuffer: untrimmed,
             trimStartSamples: newTrimStart,
-            buffer: newBuffer
+            buffer: newBuffer,
+            fadeInSamples: Math.min(clip.fadeInSamples, Math.floor(newLength / 2)),
+            fadeOutSamples: Math.min(clip.fadeOutSamples, Math.floor(newLength / 2))
           };
         }
 
         if (activeDrag.mode === 'trim-end') {
-          const untrimmed = activeDrag.initialUntrimmedBuffer || clip.buffer;
+          const untrimmed = activeDrag.initialUntrimmedBuffer || clip.untrimmedBuffer || clip.buffer;
           const isStereo = untrimmed.length >= (activeDrag.initialLengthSamples || clip.lengthSamples) * 2;
           const channels = isStereo ? 2 : 1;
-          const totalFrames = untrimmed.length / channels;
+          const totalFrames = Math.floor(untrimmed.length / channels);
 
-          const minLength = Math.round(sampleRate * 0.1);
+          const minLength = Math.round(sampleRate * 0.05); // мин. 50 мс
           const initialTrimStart = activeDrag.initialTrimStartSamples || 0;
-          const initialLength = activeDrag.initialLengthSamples || 0;
+          const initialLength = activeDrag.initialLengthSamples || clip.lengthSamples;
+          const clipOffset = clip.offsetSamples;
 
           const minDelta = minLength - initialLength;
           const maxDelta = totalFrames - initialTrimStart - initialLength;
 
-          const actualDelta = Math.max(minDelta, Math.min(maxDelta, deltaSamples));
-          const newLength = initialLength + actualDelta;
+          let actualDelta = Math.max(minDelta, Math.min(maxDelta, deltaSamples));
+          let newLength = initialLength + actualDelta;
 
-          const newBuffer = untrimmed.subarray(
-            initialTrimStart * channels,
-            (initialTrimStart + newLength) * channels
-          );
+          // Проверка коллизий справа при Snap
+          if (snapToGrid) {
+            for (const other of otherClips) {
+              if (other.offsetSamples > clipOffset && clipOffset + newLength > other.offsetSamples) {
+                newLength = Math.max(minLength, other.offsetSamples - clipOffset);
+                actualDelta = newLength - initialLength;
+              }
+            }
+          }
+
+          // Формирование нового буфера через C++ нативный метод extractSubBufferNative
+          let newBuffer: Float32Array;
+          try {
+            newBuffer = globalNativeDAWBridge.extractSubBufferNative(
+              untrimmed,
+              initialTrimStart,
+              newLength,
+              channels
+            );
+          } catch (e) {
+            const startIdx = Math.max(0, initialTrimStart * channels);
+            const endIdx = Math.min(untrimmed.length, (initialTrimStart + newLength) * channels);
+            newBuffer = untrimmed.subarray(startIdx, endIdx);
+          }
 
           return {
             ...clip,
             lengthSamples: newLength,
             untrimmedBuffer: untrimmed,
             trimStartSamples: initialTrimStart,
-            buffer: newBuffer
+            buffer: newBuffer,
+            fadeInSamples: Math.min(clip.fadeInSamples, Math.floor(newLength / 2)),
+            fadeOutSamples: Math.min(clip.fadeOutSamples, Math.floor(newLength / 2))
           };
         }
 
@@ -1223,13 +1325,13 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
             activeDrag.currentLengthSamples
           );
         } else if (activeDrag.trackId !== undefined) {
-          // После перемещения, обрезки (Trim) или фейдинга мгновенно синхронизируем данные с AudioWorklet
+          // После перемещения, обрезки (Trim) или фейдинга мгновенно передаем актуальные Float32Array буферы в AudioWorklet
           const currentTracks = tracksRef.current;
-          handleSyncAllTracks(currentTracks);
           const targetTrack = currentTracks.find((t) => t.id === activeDrag.trackId);
           if (targetTrack) {
             handleSyncTrackClips(targetTrack.id, targetTrack.clips);
           }
+          handleSyncAllTracks(currentTracks);
         }
         setActiveDrag(null);
       }
@@ -1244,7 +1346,17 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [activeDrag, pxPerSec, sampleRate, snapToGrid, tracks, onUpdateTrack, setSubtitles]);
+  }, [
+    activeDrag,
+    pxPerSec,
+    sampleRate,
+    snapToGrid,
+    tracks,
+    onUpdateTrack,
+    setSubtitles,
+    handleSyncAllTracks,
+    handleSyncTrackClips
+  ]);
 
   const getTrackIcon = (track: TrackState) => {
     if (track.isOriginalAudio || /видео|video|оригинал|original/i.test(track.name)) {
@@ -1439,7 +1551,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
           {/* Snap to Grid Toggle */}
           <button
             onClick={() => setSnapToGrid(!snapToGrid)}
-            title="Привязка к сетке (Snap to Grid)"
+            title="Привязка к сетке (Snap to Grid) и предотвращение коллизий"
             className={`px-2 py-1 rounded-xl flex items-center gap-1 transition-all font-mono text-[11px] cursor-pointer ${
               snapToGrid
                 ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
@@ -1783,11 +1895,17 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                     const fadeOutPx = (clip.fadeOutSamples / clip.lengthSamples) * clipWidthPx;
 
                     const rawColor = clip.color || track.color || '#06b6d4';
-                    const safeClipColor = (!rawColor || rawColor.toLowerCase() === '#ffffff' || rawColor.toLowerCase() === '#fff' || rawColor.toLowerCase() === 'white')
-                      ? '#06b6d4'
-                      : rawColor;
+                    const safeClipColor =
+                      !rawColor ||
+                      rawColor.toLowerCase() === '#ffffff' ||
+                      rawColor.toLowerCase() === '#fff' ||
+                      rawColor.toLowerCase() === 'white'
+                        ? '#06b6d4'
+                        : rawColor;
 
-                    const isColliding = collisions.some((c) => c.clipAId === clip.id || c.clipBId === clip.id);
+                    const isColliding = collisions.some(
+                      (c) => c.clipAId === clip.id || c.clipBId === clip.id
+                    );
 
                     return (
                       <div
@@ -1831,7 +1949,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                             {isColliding && (
                               <span className="bg-rose-600 text-white px-1.5 py-0.2 rounded text-[9px] font-bold flex items-center gap-0.5 animate-bounce shadow-md">
                                 <AlertCircle size={10} />
-                                НАЕЗД
+                                КОЛЛИЗИЯ
                               </span>
                             )}
                             {/* Индикатор Time Stretch (если дорожка подогнана по времени) */}
@@ -1865,7 +1983,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                         {/* Левый Trim Handle */}
                         <div
                           onMouseDown={(e) => handleClipMouseDown(e, track.id, clip, 'trim-start')}
-                          title="Обрезать слева (Trim Left)"
+                          title="Обрезать слева (Trim Left / extractSubBufferNative)"
                           className="absolute top-0 bottom-0 left-0 w-2.5 hover:w-3.5 bg-emerald-500/60 hover:bg-emerald-400 cursor-w-resize transition-all opacity-0 group-hover:opacity-100 z-20 flex items-center justify-center"
                         >
                           <div className="w-0.5 h-4 bg-slate-950 rounded-full" />

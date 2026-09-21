@@ -25,7 +25,10 @@ export type LogSource =
   | 'Project'
   | 'RenderManager'
   | 'DubbingAI'
+  | 'AudioAI'
+  | 'VSTPlugins'
   | 'VSTHost'
+  | 'MVPPipeline'
   | 'MVPPreset'
   | 'System'
   | 'GlobalError';
@@ -145,8 +148,13 @@ class SystemLoggerService {
         // Определяем источник по содержимому
         let source: LogSource = 'System';
         if (msg.includes('AudioWorklet') || msg.includes('audio-engine')) source = 'AudioWorklet';
+        else if (msg.includes('WASM') || msg.includes('C++') || msg.includes('NativeDAW') || msg.includes('daw_core')) source = 'C++ WASM';
+        else if (msg.includes('VST') || msg.includes('Plugin') || msg.includes('vst-') || msg.includes('VSTRack')) source = 'VSTPlugins';
+        else if (msg.includes('StemSeparation') || msg.includes('AudioAI') || msg.includes('Denoise') || msg.includes('Dereverb') || msg.includes('VoiceFixer') || msg.includes('Spectral') || msg.includes('ONNX') || msg.includes('ort.')) source = 'AudioAI';
+        else if (msg.includes('Dubbing') || msg.includes('Gemini') || msg.includes('TTS')) source = 'DubbingAI';
+        else if (msg.includes('Wizard') || msg.includes('MVPPipeline') || msg.includes('сведения') || msg.includes('конвейер')) source = 'MVPPipeline';
+        else if (msg.includes('Video') || msg.includes('video') || msg.includes('Jitter-free') || msg.includes('drift')) source = 'VideoSync';
         else if (msg.includes('FFmpeg') || msg.includes('ffmpeg')) source = 'FFmpeg';
-        else if (msg.includes('WASM') || msg.includes('C++') || msg.includes('NativeDAW')) source = 'C++ WASM';
         else if (msg.includes('RenderManager')) source = 'RenderManager';
         else if (msg.includes('MediaNormalizer')) source = 'MediaNormalizer';
 
@@ -166,7 +174,14 @@ class SystemLoggerService {
         const msg = args.map((a) => (typeof a === 'object' ? this.safeSerialize(a) : String(a))).join(' ');
         let source: LogSource = 'System';
         if (msg.includes('AudioWorklet') || msg.includes('audio-engine')) source = 'AudioWorklet';
+        else if (msg.includes('WASM') || msg.includes('C++') || msg.includes('NativeDAW') || msg.includes('daw_core')) source = 'C++ WASM';
+        else if (msg.includes('VST') || msg.includes('Plugin') || msg.includes('vst-') || msg.includes('VSTRack')) source = 'VSTPlugins';
+        else if (msg.includes('StemSeparation') || msg.includes('AudioAI') || msg.includes('Denoise') || msg.includes('Dereverb') || msg.includes('VoiceFixer') || msg.includes('Spectral') || msg.includes('ONNX') || msg.includes('ort.')) source = 'AudioAI';
+        else if (msg.includes('Dubbing') || msg.includes('Gemini') || msg.includes('TTS')) source = 'DubbingAI';
+        else if (msg.includes('Wizard') || msg.includes('MVPPipeline') || msg.includes('сведения') || msg.includes('конвейер')) source = 'MVPPipeline';
+        else if (msg.includes('Video') || msg.includes('video') || msg.includes('Jitter-free') || msg.includes('drift')) source = 'VideoSync';
         else if (msg.includes('FFmpeg') || msg.includes('ffmpeg')) source = 'FFmpeg';
+        else if (msg.includes('RenderManager')) source = 'RenderManager';
         else if (msg.includes('MediaNormalizer')) source = 'MediaNormalizer';
 
         if (!msg.startsWith('[SystemLogger]')) {

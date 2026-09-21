@@ -1,7 +1,20 @@
+/**
+ * ============================================================================
+ * useAudioEngine.ts - Промышленный хук управления звуковым ядром DAW
+ * ============================================================================
+ * Реализует стандарт Universal VST Contract:
+ * 1. loadPluginToTrack(trackId, slotIdx, descriptor): Загрузка VST-плагина в слот дорожки.
+ * 2. setPluginParameter(target, instanceId, paramId, value, trackId): Атомарная передача
+ *    числового ID параметра и нормализованного float-значения (0.0 .. 1.0) в C++ структуру.
+ * 3. savePluginChunk(instanceId): Экспорт полного бинарного/Base64 состояния параметров.
+ * 4. Непрерывный мониторинг Plugin Delay Compensation (PDC) и телеметрии уровней.
+ * ============================================================================
+ */
+
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { MediaNormalizer, LoudnessMatchingResult } from '../services/MediaNormalizer';
 import { TrackState, ClipConfig, VocalBusState } from '../audio/dawEngine';
-import { VSTPluginInstance } from '../audio/vstTypes';
+import { VSTPluginInstance, VSTPluginDescriptor } from '../audio/vstTypes';
 import { systemLogger } from '../services/SystemLogger';
 import { globalNativeDAWBridge } from '../services/NativeDAWBridge';
 import { EMBEDDED_WASM_CORE_BASE64 } from '../data/embeddedWasmCore';
@@ -11,17 +24,24 @@ export interface TrackMeterData {
   peakL: number;
   peakR: number;
   rms: number;
+  clipped?: boolean;
+  latencySamples?: number;
+  pdcMs?: number;
 }
 
 export interface MasterMeterData {
   peakL: number;
   peakR: number;
   clipped: boolean;
+  latencySamples?: number;
+  pdcMs?: number;
 }
 
 export interface VocalBusMeterData {
   peakL: number;
   peakR: number;
+  latencySamples?: number;
+  pdcMs?: number;
 }
 
 export interface UseAudioEngineReturn {
@@ -77,12 +97,48 @@ export interface UseAudioEngineReturn {
   setMasterVolume: (volumeDb: number) => void;
   setMasterLimiter: (enabled: boolean, ceilingDb: number) => void;
 
+  // ==========================================================================
+  // Стандарт Universal VST Contract: Управление цепочками VST-плагинов
+  // ==========================================================================
+  loadPluginToTrack: (
+    trackId: number,
+    slotIdx: number,
+    descriptor: VSTPluginDescriptor
+  ) => Promise<void>;
+
+  setPluginParameter: (
+    target: 'track' | 'vocalBus' | 'master',
+    instanceId: string,
+    paramId: number,
+    value: number,
+    trackId?: number
+  ) => void;
+
+  savePluginChunk: (instanceId: string) => Promise<string>;
+
+  // Совместимые вспомогательные методы
   setTrackVstChain: (trackId: number, vstPlugins: VSTPluginInstance[]) => void;
   setVocalBusVstChain: (vstPlugins: VSTPluginInstance[]) => void;
   setMasterVstChain: (vstPlugins: VSTPluginInstance[]) => void;
-  updateVstParameter: (target: 'track' | 'vocalBus' | 'master', instanceId: string, paramId: string, value: number, trackId?: number) => void;
-  setVstBypass: (target: 'track' | 'vocalBus' | 'master', instanceId: string, enabled: boolean, trackId?: number) => void;
-  setVstWetDry: (target: 'track' | 'vocalBus' | 'master', instanceId: string, wetDry: number, trackId?: number) => void;
+  updateVstParameter: (
+    target: 'track' | 'vocalBus' | 'master',
+    instanceId: string,
+    paramId: string | number,
+    value: number,
+    trackId?: number
+  ) => void;
+  setVstBypass: (
+    target: 'track' | 'vocalBus' | 'master',
+    instanceId: string,
+    enabled: boolean,
+    trackId?: number
+  ) => void;
+  setVstWetDry: (
+    target: 'track' | 'vocalBus' | 'master',
+    instanceId: string,
+    wetDry: number,
+    trackId?: number
+  ) => void;
 
   performLoudnessMatching: (
     tracks: TrackState[],
@@ -90,6 +146,63 @@ export interface UseAudioEngineReturn {
     maxPeakDb?: number
   ) => LoudnessMatchingResult;
 }
+
+/**
+ * Вспомогательный статический маппинг строковых параметров в числовые ID для C++ ядра
+ */
+const getParamIdAsNumber = (paramName: string | number): number => {
+  if (typeof paramName === 'number') return paramName;
+  const parsed = parseInt(paramName, 10);
+  if (!isNaN(parsed)) return parsed;
+
+  switch (paramName) {
+    // FabFilter Pro-Q3 (1..8)
+    case 'hp_freq': return 1;
+    case 'low_freq': return 2;
+    case 'low_gain': return 3;
+    case 'mid_freq': return 4;
+    case 'mid_gain': return 5;
+    case 'mid_q': return 6;
+    case 'high_freq': return 7;
+    case 'high_gain': return 8;
+
+    // Waves Vocal Rider (1..4)
+    case 'target':
+    case 'target_db': return 1;
+    case 'sensitivity':
+    case 'range':
+    case 'range_db': return 2;
+    case 'speed':
+    case 'attack_ms': return 3;
+
+    // Waves CLA-76 Compressor (1..5)
+    case 'input': return 1;
+    case 'output': return 2;
+    case 'ratio': return 3;
+    case 'attack': return 4;
+    case 'release': return 5;
+
+    // FabFilter Pro-R Reverb (1..5)
+    case 'decay': return 1;
+    case 'mix': return 2;
+    case 'predelay': return 3;
+    case 'size': return 4;
+    case 'brightness': return 5;
+
+    // Xfer OTT (1..4)
+    case 'depth': return 1;
+    case 'time': return 2;
+    case 'inGain': return 3;
+    case 'outGain': return 4;
+
+    // Saturation (1..2)
+    case 'drive': return 1;
+    case 'mix': return 2;
+
+    default:
+      return 0;
+  }
+};
 
 export const useAudioEngine = (): UseAudioEngineReturn => {
   const [isInitialized, setIsInitialized] = useState(false);
@@ -101,12 +214,16 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
   const [trackMeters, setTrackMeters] = useState<Map<number, TrackMeterData>>(new Map());
   const [vocalBusMeter, setVocalBusMeter] = useState<VocalBusMeterData>({
     peakL: 0,
-    peakR: 0
+    peakR: 0,
+    latencySamples: 0,
+    pdcMs: 0
   });
   const [masterMeter, setMasterMeter] = useState<MasterMeterData>({
     peakL: 0,
     peakR: 0,
-    clipped: false
+    clipped: false,
+    latencySamples: 0,
+    pdcMs: 0
   });
 
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -115,8 +232,14 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
   const isInitializedRef = useRef<boolean>(false);
   const pendingClipAcksRef = useRef<Map<number, () => void>>(new Map());
 
+  // Реестры ожидающих промисов для асинхронных VST операций
+  // key: `${trackId}_${slotIdx}` -> resolve callback
+  const pendingPluginLoadsRef = useRef<Map<string, () => void>>(new Map());
+  // requestId -> resolve callback с Base64 строкой чанка
+  const pendingChunkRequestsRef = useRef<Map<string, (chunk: string) => void>>(new Map());
+
   /**
-   * Инициализация AudioContext, загрузка C++ WebAssembly ядра (/wasm/daw_core.wasm) и запуск AudioWorklet
+   * Инициализация AudioContext, загрузка C++ WebAssembly ядра и запуск AudioWorklet
    */
   const initAudioEngine = useCallback(async () => {
     if (isInitializedRef.current && workletNodeRef.current) {
@@ -135,16 +258,18 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
         let wasmBytes: ArrayBuffer;
         try {
           const response = await fetch('/wasm/daw_core.wasm');
-          if (!response.ok || response.status !== 200) {
+          if (response.status === 200) {
+            wasmBytes = await response.arrayBuffer();
+            if (wasmBytes && wasmBytes.byteLength > 0) {
+              systemLogger.info('AudioWorklet', 'Высокопроизводительное C++ ядро успешно загружено с диска.');
+            } else {
+              throw new Error('Пустой бинарник');
+            }
+          } else {
             throw new Error(`HTTP ${response.status}`);
           }
-          wasmBytes = await response.arrayBuffer();
-          if (!wasmBytes || wasmBytes.byteLength === 0) {
-            throw new Error('Пустой бинарник daw_core.wasm');
-          }
-          systemLogger.info('AudioWorklet', 'Высокопроизводительное C++ ядро успешно загружено с диска.');
         } catch (fetchErr) {
-          systemLogger.warn('AudioWorklet', 'Локальный файл /wasm/daw_core.wasm не найден. Выполняется автономная загрузка встроенного ядра C++...', fetchErr);
+          systemLogger.info('AudioWorklet', 'Файл /wasm/daw_core.wasm не найден на сервере. Запускаем встроенное C++ Base64 WASM-ядро...');
           try {
             const binaryString = window.atob(EMBEDDED_WASM_CORE_BASE64);
             const len = binaryString.length;
@@ -156,7 +281,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
           } catch (base64Err) {
             const errMessage = 'Фатальная ошибка: Не удалось декодировать встроенное Base64 C++ ядро.';
             setError(errMessage);
-            systemLogger.error('AudioWorklet', errMessage, base64Err);
+            systemLogger.error('AudioWorklet', errMessage);
             throw new Error(errMessage);
           }
         }
@@ -190,29 +315,73 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             });
 
             // Слушаем сообщения телеметрии и статуса из AudioWorklet
+            let lastUpdateTimestamp = 0;
+            const THROTTLE_MS = 16.6; // Обновление ~60 FPS
+            let lastTimeSec = 0;
+            let lastTracksData: TrackMeterData[] | null = null;
+            let lastVocalBusData: VocalBusMeterData | null = null;
+            let lastMasterData: MasterMeterData | null = null;
+            let frameId: number | null = null;
+
+            const updateStateThrottled = () => {
+              setCurrentTimeSec(lastTimeSec);
+              if (lastTracksData) {
+                setTrackMeters((prevMap) => {
+                  const newMap = new Map(prevMap);
+                  lastTracksData!.forEach((item: TrackMeterData) => {
+                    newMap.set(item.trackId, item);
+                  });
+                  return newMap;
+                });
+                lastTracksData = null;
+              }
+              if (lastVocalBusData) {
+                setVocalBusMeter(lastVocalBusData);
+                lastVocalBusData = null;
+              }
+              if (lastMasterData) {
+                setMasterMeter(lastMasterData);
+                lastMasterData = null;
+              }
+              frameId = null;
+            };
+
             workletNode.port.onmessage = (e) => {
               const data = e.data;
               if (!data) return;
 
               if (data.type === 'METERS_TELEMETRY') {
-                setCurrentTimeSec(data.currentTimeSec || 0);
-
+                lastTimeSec = data.currentTimeSec || 0;
                 if (data.tracks && Array.isArray(data.tracks)) {
-                  setTrackMeters((prevMap) => {
-                    const newMap = new Map(prevMap);
-                    data.tracks.forEach((item: TrackMeterData) => {
-                      newMap.set(item.trackId, item);
-                    });
-                    return newMap;
-                  });
+                  lastTracksData = data.tracks;
                 }
-
                 if (data.vocalBus) {
-                  setVocalBusMeter(data.vocalBus);
+                  lastVocalBusData = data.vocalBus;
+                }
+                if (data.master) {
+                  lastMasterData = data.master;
                 }
 
-                if (data.master) {
-                  setMasterMeter(data.master);
+                const now = performance.now();
+                if (now - lastUpdateTimestamp >= THROTTLE_MS) {
+                  lastUpdateTimestamp = now;
+                  if (frameId === null) {
+                    frameId = requestAnimationFrame(updateStateThrottled);
+                  }
+                }
+              } else if (data.type === 'VST_PLUGIN_LOADED') {
+                const key = `${data.trackId}_${data.slotIdx}`;
+                const cb = pendingPluginLoadsRef.current.get(key);
+                if (cb) {
+                  pendingPluginLoadsRef.current.delete(key);
+                  cb();
+                }
+                systemLogger.debug('VSTHost', `VST плагин успешно смонтирован в слот ${data.slotIdx} дорожки ${data.trackId}. PDC задержка: ${data.latencySamples} сэмплов.`);
+              } else if (data.type === 'VST_CHUNK_SAVED') {
+                const cb = pendingChunkRequestsRef.current.get(data.requestId);
+                if (cb) {
+                  pendingChunkRequestsRef.current.delete(data.requestId);
+                  cb(data.chunk || '');
                 }
               } else if (data.type === 'CLIP_LOADED_SUCCESS') {
                 const cb = pendingClipAcksRef.current.get(data.clipId);
@@ -223,11 +392,8 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
               } else if (data.type === 'WASM_INIT_SUCCESS') {
                 setIsAudioWorkletActive(true);
                 systemLogger.info('C++ WASM', 'C++ DSP аудиомикшер успешно инициализирован в AudioWorklet (48000 Hz).');
-              } else if (data.type === 'WASM_CORE_MISSING') {
-                const errMessage = 'Критическая ошибка: C++ ядро не скомпилировано! Скомпилируйте public/wasm/daw_core.wasm через build_wasm.sh.';
-                setError(errMessage);
-                setIsAudioWorkletActive(false);
-                systemLogger.error('AudioWorklet', errMessage, data.error);
+              } else if (data.type === 'WORKLET_PROCESS_ERROR') {
+                systemLogger.error('AudioWorklet', `Сбой реалтайм C++ Mixer processBlock в фоновом потоке: ${data.error}`);
               }
             };
 
@@ -239,7 +405,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
               console.warn('[useAudioEngine] Предупреждение инициализации NativeDAWBridge:', bridgeErr);
             });
 
-            // Передаем байты WASM модуля в AudioWorklet процессор (используем transfer для эффективности)
+            // Передаем байты WASM модуля в AudioWorklet процессор
             workletNode.port.postMessage({
               type: 'INIT_WASM',
               wasmBytes,
@@ -345,7 +511,6 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
         { trackId, clipId, durationSec, totalFrames, bufferLength: pcmFloat32.length }
       );
 
-      // Отправляем интерливированные Float32Array PCM аудиоданные в AudioWorklet
       if (workletNodeRef.current) {
         return new Promise((resolve) => {
           if (!workletNodeRef.current) {
@@ -408,7 +573,6 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
       isStereo: boolean = true
     ) => {
       if (workletNodeRef.current) {
-        // Добавляем ACK-контроль потока для предотвращения OOM при быстрой последовательной отправке
         const handleAck = (e: MessageEvent) => {
           if (e.data && e.data.type === 'CLIP_LOADED_SUCCESS' && e.data.clipId === clipId) {
             workletNodeRef.current?.port.removeEventListener('message', handleAck);
@@ -450,7 +614,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             fadeInSamples: c.fadeInSamples || 0,
             fadeOutSamples: c.fadeOutSamples || 0,
             isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true,
-            buffer: undefined // Оптимизация: исключаем огромные Float32Array для предотвращения DataCloneError / OOM!
+            buffer: undefined
           }))
         });
       } catch (err) {
@@ -472,6 +636,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             solo: t.solo,
             mute: t.mute,
             isOriginalAudio: t.isOriginalAudio,
+            vstPlugins: t.vstPlugins || [],
             dsp: {
               eq: t.eq,
               compressor: t.compressor,
@@ -490,7 +655,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
               fadeInSamples: c.fadeInSamples || 0,
               fadeOutSamples: c.fadeOutSamples || 0,
               isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true,
-              buffer: undefined // Оптимизация: исключаем огромные Float32Array для предотвращения DataCloneError / OOM!
+              buffer: undefined
             }))
           }))
         });
@@ -500,9 +665,6 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     }
   }, []);
 
-  /**
-   * Пакетный расчет и отправка выровненных уровней громкости (Loudness Matching) в C++ аудиоядро
-   */
   const performLoudnessMatching = useCallback(
     (
       tracks: TrackState[],
@@ -511,7 +673,6 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     ): LoudnessMatchingResult => {
       const result = MediaNormalizer.autoMatchTrackVolumes(tracks, targetRmsDb, maxPeakDb);
 
-      // Синхронизируем новые громкости фейдеров с AudioWorklet C++ ядром
       if (workletNodeRef.current) {
         result.adjustments.forEach((adj) => {
           if (!adj.isSilent) {
@@ -529,9 +690,6 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     []
   );
 
-  /**
-   * Команды управления параметрами C++ дорожек
-   */
   const setTrackVolume = useCallback((trackId: number, volumeDb: number) => {
     if (workletNodeRef.current) {
       workletNodeRef.current.port.postMessage({ type: 'SET_TRACK_VOLUME', trackId, volumeDb });
@@ -564,13 +722,23 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
 
   const setTrackEq = useCallback((trackId: number, eqParams: any) => {
     if (workletNodeRef.current) {
-      workletNodeRef.current.port.postMessage({ type: 'SET_TRACK_EQ', trackId, eq: eqParams.lowShelf ? eqParams : undefined, eqParams: !eqParams.lowShelf ? eqParams : undefined });
+      workletNodeRef.current.port.postMessage({
+        type: 'SET_TRACK_EQ',
+        trackId,
+        eq: eqParams.lowShelf ? eqParams : undefined,
+        eqParams: !eqParams.lowShelf ? eqParams : undefined
+      });
     }
   }, []);
 
   const setTrackCompressor = useCallback((trackId: number, compParams: any) => {
     if (workletNodeRef.current) {
-      workletNodeRef.current.port.postMessage({ type: 'SET_TRACK_COMPRESSOR', trackId, compressor: compParams.thresholdDb !== undefined ? compParams : undefined, compParams: compParams.thresholdDb === undefined ? compParams : undefined });
+      workletNodeRef.current.port.postMessage({
+        type: 'SET_TRACK_COMPRESSOR',
+        trackId,
+        compressor: compParams.thresholdDb !== undefined ? compParams : undefined,
+        compParams: compParams.thresholdDb === undefined ? compParams : undefined
+      });
     }
   }, []);
 
@@ -588,7 +756,12 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
 
   const setTrackAutoDucker = useCallback((trackId: number, duckParams: any) => {
     if (workletNodeRef.current) {
-      workletNodeRef.current.port.postMessage({ type: 'SET_TRACK_AUTODUCKER', trackId, autoDucker: duckParams.thresholdDb !== undefined ? duckParams : undefined, duckParams: duckParams.thresholdDb === undefined ? duckParams : undefined });
+      workletNodeRef.current.port.postMessage({
+        type: 'SET_TRACK_AUTODUCKER',
+        trackId,
+        autoDucker: duckParams.thresholdDb !== undefined ? duckParams : undefined,
+        duckParams: duckParams.thresholdDb === undefined ? duckParams : undefined
+      });
     }
   }, []);
 
@@ -617,6 +790,118 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     }
   }, []);
 
+  // ==========================================================================
+  // Реализация методов Universal VST Contract
+  // ==========================================================================
+
+  /**
+   * 1. loadPluginToTrack: Создание инстанса плагина в C++ слоте дорожки через указатель микшера
+   */
+  const loadPluginToTrack = useCallback(
+    async (
+      trackId: number,
+      slotIdx: number,
+      descriptor: VSTPluginDescriptor
+    ): Promise<void> => {
+      if (!isInitialized) {
+        await initAudioEngine();
+      }
+
+      const instanceId = `${descriptor.id}-${trackId}-${slotIdx}-${Date.now()}`;
+      const requestKey = `${trackId}_${slotIdx}`;
+
+      systemLogger.info(
+        'VSTHost',
+        `Загрузка VST плагина "${descriptor.name}" (${descriptor.format}) в слот [${slotIdx}] дорожки #${trackId}...`
+      );
+
+      if (workletNodeRef.current) {
+        return new Promise<void>((resolve) => {
+          const timeout = setTimeout(() => {
+            pendingPluginLoadsRef.current.delete(requestKey);
+            systemLogger.warn('VSTHost', `Таймаут подтверждения монтирования плагина "${descriptor.name}".`);
+            resolve();
+          }, 2500);
+
+          pendingPluginLoadsRef.current.set(requestKey, () => {
+            clearTimeout(timeout);
+            resolve();
+          });
+
+          workletNodeRef.current?.port.postMessage({
+            type: 'LOAD_VST_PLUGIN',
+            trackId,
+            slotIdx,
+            descriptor,
+            instanceId,
+            pluginId: descriptor.id
+          });
+        });
+      }
+    },
+    [isInitialized, initAudioEngine]
+  );
+
+  /**
+   * 2. setPluginParameter: Атомарная передача числового ID параметра и нормализованного float-значения (0.0 .. 1.0)
+   */
+  const setPluginParameter = useCallback(
+    (
+      target: 'track' | 'vocalBus' | 'master',
+      instanceId: string,
+      paramId: number,
+      value: number,
+      trackId?: number
+    ) => {
+      if (workletNodeRef.current) {
+        const normalizedValue = Math.max(0.0, Math.min(1.0, Number(value) || 0.0));
+        workletNodeRef.current.port.postMessage({
+          type: 'UPDATE_VST_PARAM',
+          target,
+          trackId,
+          instanceId,
+          paramId,
+          numericParamId: paramId,
+          value: normalizedValue
+        });
+      }
+    },
+    []
+  );
+
+  /**
+   * 3. savePluginChunk: Сериализация и получение Base64-чанка состояния плагина
+   */
+  const savePluginChunk = useCallback(
+    async (instanceId: string): Promise<string> => {
+      if (!workletNodeRef.current) return '';
+
+      const requestId = `chunk_${instanceId}_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
+
+      return new Promise<string>((resolve) => {
+        const timeout = setTimeout(() => {
+          pendingChunkRequestsRef.current.delete(requestId);
+          resolve('');
+        }, 3000);
+
+        pendingChunkRequestsRef.current.set(requestId, (chunk: string) => {
+          clearTimeout(timeout);
+          resolve(chunk);
+        });
+
+        workletNodeRef.current?.port.postMessage({
+          type: 'SAVE_VST_CHUNK',
+          instanceId,
+          requestId
+        });
+      });
+    },
+    []
+  );
+
+  /**
+   * Установка полной цепочки VST-плагинов
+   */
   const setTrackVstChain = useCallback((trackId: number, vstPlugins: VSTPluginInstance[]) => {
     if (workletNodeRef.current) {
       workletNodeRef.current.port.postMessage({ type: 'SET_TRACK_VST_CHAIN', trackId, vstPlugins });
@@ -635,39 +920,69 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     }
   }, []);
 
-  const updateVstParameter = useCallback((target: 'track' | 'vocalBus' | 'master', instanceId: string, paramId: string, value: number, trackId?: number) => {
+  /**
+   * Обновление параметра (строковый или числовой ID)
+   */
+  const updateVstParameter = useCallback((
+    target: 'track' | 'vocalBus' | 'master',
+    instanceId: string,
+    paramId: string | number,
+    value: number,
+    trackId?: number
+  ) => {
     if (workletNodeRef.current) {
+      const numericParamId = getParamIdAsNumber(paramId);
+      const normalizedValue = Math.max(0.0, Math.min(1.0, Number(value) || 0.0));
       workletNodeRef.current.port.postMessage({
         type: 'UPDATE_VST_PARAM',
         target,
         trackId,
         instanceId,
         paramId,
-        value
+        numericParamId,
+        value: normalizedValue
       });
     }
   }, []);
 
-  const setVstBypass = useCallback((target: 'track' | 'vocalBus' | 'master', instanceId: string, enabled: boolean, trackId?: number) => {
+  /**
+   * Сквозное управление байпасом с плавным сглаживанием гейна
+   */
+  const setVstBypass = useCallback((
+    target: 'track' | 'vocalBus' | 'master',
+    instanceId: string,
+    enabled: boolean,
+    trackId?: number
+  ) => {
     if (workletNodeRef.current) {
       workletNodeRef.current.port.postMessage({
-        type: 'UPDATE_VST_PARAM',
+        type: 'SET_VST_BYPASS',
         target,
         trackId,
         instanceId,
+        bypass: !enabled,
         enabled
       });
     }
   }, []);
 
-  const setVstWetDry = useCallback((target: 'track' | 'vocalBus' | 'master', instanceId: string, wetDry: number, trackId?: number) => {
+  /**
+   * Сквозное управление Wet/Dry балансом
+   */
+  const setVstWetDry = useCallback((
+    target: 'track' | 'vocalBus' | 'master',
+    instanceId: string,
+    wetDry: number,
+    trackId?: number
+  ) => {
     if (workletNodeRef.current) {
+      const normWetDry = Math.max(0.0, Math.min(1.0, Number(wetDry) || 0.0));
       workletNodeRef.current.port.postMessage({
-        type: 'UPDATE_VST_PARAM',
+        type: 'SET_VST_WET_DRY',
         target,
         trackId,
         instanceId,
-        wetDry
+        wetDry: normWetDry
       });
     }
   }, []);
@@ -709,6 +1024,11 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
 
     setMasterVolume,
     setMasterLimiter,
+
+    // Методы Universal VST Contract
+    loadPluginToTrack,
+    setPluginParameter,
+    savePluginChunk,
 
     setTrackVstChain,
     setVocalBusVstChain,

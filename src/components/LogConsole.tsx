@@ -152,9 +152,15 @@ export const LogConsole: React.FC<LogConsoleProps> = ({ isDrawer = false, onClos
     'all',
     'AudioWorklet',
     'C++ WASM',
+    'VSTPlugins',
+    'VSTHost',
+    'AudioAI',
+    'DubbingAI',
+    'MVPPipeline',
+    'MVPPreset',
+    'VideoSync',
     'FFmpeg',
     'MediaNormalizer',
-    'VideoSync',
     'Timeline',
     'RenderManager',
     'AssetDatabase',
@@ -488,7 +494,23 @@ export const LogConsole: React.FC<LogConsoleProps> = ({ isDrawer = false, onClos
                     <div className="shrink-0">{levelBadge}</div>
 
                     {/* Источник (Подсистема) */}
-                    <span className="px-1.5 py-0.2 bg-slate-800 text-emerald-400 rounded text-[10px] font-semibold shrink-0 border border-slate-700/60">
+                    <span
+                      className={`px-1.5 py-0.2 rounded text-[10px] font-semibold shrink-0 border ${
+                        log.source === 'VSTPlugins' || log.source === 'VSTHost'
+                          ? 'bg-fuchsia-950/70 text-fuchsia-300 border-fuchsia-700/60'
+                          : log.source === 'AudioAI' || log.source === 'DubbingAI'
+                          ? 'bg-sky-950/70 text-sky-300 border-sky-700/60'
+                          : log.source === 'C++ WASM'
+                          ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/60'
+                          : log.source === 'AudioWorklet'
+                          ? 'bg-teal-950/70 text-teal-300 border-teal-700/60'
+                          : log.source === 'MVPPipeline' || log.source === 'MVPPreset'
+                          ? 'bg-amber-950/70 text-amber-300 border-amber-700/60'
+                          : log.source === 'VideoSync' || log.source === 'FFmpeg' || log.source === 'RenderManager'
+                          ? 'bg-indigo-950/70 text-indigo-300 border-indigo-700/60'
+                          : 'bg-slate-800 text-slate-300 border-slate-700/60'
+                      }`}
+                    >
                       [{log.source}]
                     </span>
 
