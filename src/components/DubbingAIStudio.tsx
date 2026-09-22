@@ -313,7 +313,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
 
   // --- INSTALLED MODELS ONLY FOR MVP INTERFACE ---
   const installedModels = useMemo(() => {
-    return models.filter((m) => m.is_installed);
+    return (models || []).filter((m) => m && m.is_installed);
   }, [models]);
 
   // Synchronize track configs when tracks list changes
@@ -403,23 +403,24 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
   // Update default track IDs when tracks change
   useEffect(() => {
     if (safeTracks.length > 0) {
-      if (!safeTracks.some((t) => t.id === sepTrackId)) setSepTrackId(safeTracks[0].id);
-      if (!safeTracks.some((t) => t.id === cleanTrackId)) setCleanTrackId(safeTracks[1]?.id || safeTracks[0].id);
-      if (!safeTracks.some((t) => t.id === specRefTrackId)) setSpecRefTrackId(safeTracks[0].id);
-      if (!safeTracks.some((t) => t.id === specTargetTrackId)) setSpecTargetTrackId(safeTracks[1]?.id || safeTracks[0].id);
-      if (!safeTracks.some((t) => t.id === vfTrackId)) setVfTrackId(safeTracks[1]?.id || safeTracks[0].id);
-      if (!safeTracks.some((t) => t.id === whisperTrackId)) setWhisperTrackId(safeTracks[1]?.id || safeTracks[0].id);
+      if (!safeTracks.some((t) => t && t.id === sepTrackId)) setSepTrackId(safeTracks[0]?.id || 1);
+      if (!safeTracks.some((t) => t && t.id === cleanTrackId)) setCleanTrackId(safeTracks[1]?.id || safeTracks[0]?.id || 1);
+      if (!safeTracks.some((t) => t && t.id === specRefTrackId)) setSpecRefTrackId(safeTracks[0]?.id || 1);
+      if (!safeTracks.some((t) => t && t.id === specTargetTrackId)) setSpecTargetTrackId(safeTracks[1]?.id || safeTracks[0]?.id || 1);
+      if (!safeTracks.some((t) => t && t.id === vfTrackId)) setVfTrackId(safeTracks[1]?.id || safeTracks[0]?.id || 1);
+      if (!safeTracks.some((t) => t && t.id === whisperTrackId)) setWhisperTrackId(safeTracks[1]?.id || safeTracks[0]?.id || 1);
     }
   }, [safeTracks, sepTrackId, cleanTrackId, specRefTrackId, specTargetTrackId, vfTrackId, whisperTrackId]);
 
   // Filtered models for catalog tab
   const filteredCatalogModels = useMemo(() => {
-    return models.filter((m) => {
+    return (models || []).filter((m) => {
+      if (!m) return false;
       const matchSearch =
-        m.name.toLowerCase().includes(catalogSearch.toLowerCase()) ||
-        m.filename.toLowerCase().includes(catalogSearch.toLowerCase()) ||
-        m.description.toLowerCase().includes(catalogSearch.toLowerCase()) ||
-        m.recommended_for.toLowerCase().includes(catalogSearch.toLowerCase());
+        (m.name || '').toLowerCase().includes(catalogSearch.toLowerCase()) ||
+        (m.filename || '').toLowerCase().includes(catalogSearch.toLowerCase()) ||
+        (m.description || '').toLowerCase().includes(catalogSearch.toLowerCase()) ||
+        (m.recommended_for || '').toLowerCase().includes(catalogSearch.toLowerCase());
       const matchCategory = catalogCategoryFilter === 'all' || m.category === catalogCategoryFilter;
       return matchSearch && matchCategory;
     });
@@ -500,7 +501,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
         alert('У дорожки должна оставаться хотя бы одна нейросетевая настройка.');
         return prev;
       }
-      const newSteps = cfg.steps.filter((s) => s.id !== stepId);
+      const newSteps = (cfg.steps || []).filter((s) => s && s.id !== stepId);
       return {
         ...prev,
         [trackId]: {
@@ -515,7 +516,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
     setTrackConfigs((prev) => {
       const cfg = prev[trackId];
       if (!cfg || !cfg.steps) return prev;
-      const newSteps = cfg.steps.map((s) => {
+      const newSteps = (cfg.steps || []).map((s) => {
         if (s.id !== stepId) return s;
         const updated = { ...s, ...patch };
         if (patch.purpose && patch.purpose !== s.purpose) {
@@ -730,7 +731,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
    * Run Batch Processing across ALL enabled tracks in Matrix
    */
   const handleRunMatrixBatch = async () => {
-    const activeConfigs = Object.values(trackConfigs).filter((c) => c.enabled);
+    const activeConfigs = Object.values(trackConfigs || {}).filter((c) => c && c.enabled);
     if (activeConfigs.length === 0) {
       alert('Нет активных дорожек для обработки в матрице.');
       return;
@@ -1469,8 +1470,8 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                     ).map((step, stepIdx) => {
                       const stepPurposeInfo = PURPOSE_DESCRIPTIONS[step.purpose] || PURPOSE_DESCRIPTIONS['denoise'];
                       const targetCategory = PURPOSE_TO_CATEGORY_MAP[step.purpose] || 'denoise';
-                      const installedCategoryModels = installedModels.filter(
-                        (m) => m.category === targetCategory
+                      const installedCategoryModels = (installedModels || []).filter(
+                        (m) => m && m.category === targetCategory
                       );
 
                       return (
@@ -1493,7 +1494,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                             </div>
 
                             <div className="flex items-center gap-2">
-                              {cfg.steps && cfg.steps.length > 1 && (
+                              {cfg.steps && (cfg.steps || []).length > 1 && (
                                 <button
                                   type="button"
                                   onClick={() => handleRemoveAIStep(track.id, step.id)}
@@ -1540,7 +1541,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                                     ⚠️ Модель не загружена (DSP C++ WebAssembly)
                                   </option>
                                 ) : (
-                                  installedCategoryModels.map((m) => (
+                                  (installedCategoryModels || []).map((m) => (
                                     <option key={m.id} value={m.id}>
                                       {m.name} ({m.size_mb} MB) [В памяти]
                                     </option>
@@ -1662,8 +1663,8 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                 onChange={(e) => setSepModelId(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 font-mono"
               >
-                {models
-                  .filter((m) => m.category === 'separation')
+                {(models || [])
+                  .filter((m) => m && m.category === 'separation')
                   .map((m) => (
                     <option key={m.id} value={m.id}>
                       {m.name} ({m.size_mb} MB) {m.is_installed ? '✓ Установлена' : ''}
@@ -1671,7 +1672,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                   ))}
               </select>
               <p className="text-[11px] text-slate-400 italic">
-                {models.find((m) => m.id === sepModelId)?.description}
+                {(models || []).find((m) => m && m.id === sepModelId)?.description}
               </p>
             </div>
 
@@ -1864,8 +1865,8 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                 onChange={(e) => setDenoiseModelId(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 font-mono"
               >
-                {models
-                  .filter((m) => m.category === 'denoise')
+                {(models || [])
+                  .filter((m) => m && m.category === 'denoise')
                   .map((m) => (
                     <option key={m.id} value={m.id}>
                       {m.name} ({m.size_mb} MB)
@@ -1898,8 +1899,8 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                 onChange={(e) => setDereverbModelId(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 font-mono"
               >
-                {models
-                  .filter((m) => m.category === 'dereverb')
+                {(models || [])
+                  .filter((m) => m && m.category === 'dereverb')
                   .map((m) => (
                     <option key={m.id} value={m.id}>
                       {m.name} ({m.size_mb} MB)
@@ -2169,7 +2170,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                 {/* SVG Curve Display */}
                 <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2">
                   <div className="h-40 w-full flex items-end gap-1 px-1">
-                    {matchResult.eqCurvePoints.slice(0, 48).map((pt, idx) => {
+                    {(matchResult.eqCurvePoints || []).slice(0, 48).map((pt, idx) => {
                       const clamped = Math.max(-12, Math.min(12, pt.gainDb));
                       const heightPercent = ((clamped + 12) / 24) * 100;
                       const isBoost = clamped > 0;
@@ -2417,8 +2418,8 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                 onChange={(e) => setWhisperModelId(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 font-mono"
               >
-                {models
-                  .filter((m) => m.category === 'whisper')
+                {(models || [])
+                  .filter((m) => m && m.category === 'whisper')
                   .map((m) => (
                     <option key={m.id} value={m.id}>
                       {m.name} ({m.size_mb} MB)
@@ -2493,13 +2494,13 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                 </p>
               </div>
               <span className="px-2.5 py-1 rounded bg-emerald-500/10 text-emerald-400 text-xs font-mono font-bold">
-                {alignedPhrases.length} реплик
+                {(alignedPhrases || []).length} реплик
               </span>
             </div>
 
-            {alignedPhrases.length > 0 ? (
+            {(alignedPhrases || []).length > 0 ? (
               <div className="space-y-3 flex-1 overflow-y-auto max-h-[420px] pr-1 scrollbar-thin">
-                {alignedPhrases.map((phrase) => {
+                {(alignedPhrases || []).map((phrase) => {
                   const hasDrift = Math.abs(phrase.timeDriftSec) > 0.3;
                   return (
                     <div
@@ -2567,7 +2568,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                 onChange={(e) => setCatalogCategoryFilter(e.target.value)}
                 className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-emerald-500"
               >
-                <option value="all">Все категории ({models.length})</option>
+                <option value="all">Все категории ({(models || []).length})</option>
                 <option value="separation">Сепарация стемов (Stem Separation)</option>
                 <option value="denoise">Денойзинг (DeNoise)</option>
                 <option value="dereverb">Дереверберация (DeReverb)</option>
@@ -2579,7 +2580,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
 
           {/* Models Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {filteredCatalogModels.map((m) => {
+            {(filteredCatalogModels || []).map((m) => {
               const prog = downloadProgress[m.id];
               const isDownloading = prog && prog.status === 'downloading';
               return (
@@ -2752,12 +2753,12 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
               <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2 text-xs font-mono">
                 <div className="flex justify-between text-slate-400">
                   <span>Всего моделей в каталоге:</span>
-                  <span className="text-slate-100 font-bold">{models.length}</span>
+                  <span className="text-slate-100 font-bold">{(models || []).length}</span>
                 </div>
                 <div className="flex justify-between text-slate-400">
                   <span>Установлено в кэш браузера:</span>
                   <span className="text-emerald-400 font-bold">
-                    {models.filter((m) => m.is_installed).length} моделей
+                    {(models || []).filter((m) => m && m.is_installed).length} моделей
                   </span>
                 </div>
                 <div className="flex justify-between text-slate-400">

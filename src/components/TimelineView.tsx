@@ -5,6 +5,7 @@ import { ClipCollisionInfo } from '../utils/collisionDetector';
 import { WaveformCanvas } from './WaveformCanvas';
 import { formatSMPTE, formatCompactTime, getAdaptiveTimeStep } from '../utils/waveformUtils';
 import { globalNativeDAWBridge } from '../services/NativeDAWBridge';
+import { toSafeArray } from '../utils/safeIterables';
 import {
   ZoomIn,
   ZoomOut,
@@ -137,7 +138,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   const handleSyncTrackClips = useCallback(
     (trackId: number, clips: ClipConfig[]) => {
       // Строгая санитаризация перед передачей в C++ AudioWorklet ядро (предотвращение undefined и утечек)
-      const sanitizedClips: ClipConfig[] = clips.map((c) => {
+      const sanitizedClips: ClipConfig[] = (clips || []).map((c) => {
         const isStereo = c.buffer ? c.buffer.length >= (c.lengthSamples || 1) * 2 : false;
         const channels = isStereo ? 2 : 1;
         const validLen =
@@ -190,7 +191,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     );
   });
 
-  const subtitles = externalSubtitles !== undefined ? externalSubtitles : internalSubtitles;
+  const subtitles = (externalSubtitles !== undefined ? externalSubtitles : internalSubtitles) || [];
   const setSubtitles = useCallback(
     (newCues: SubtitleCue[] | ((prev: SubtitleCue[]) => SubtitleCue[])) => {
       if (typeof newCues === 'function') {
@@ -201,10 +202,11 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
           setInternalSubtitles(updated);
         }
       } else {
+        const safeCues = (newCues || []).filter(Boolean);
         if (externalOnUpdateSubtitles) {
-          externalOnUpdateSubtitles(newCues);
+          externalOnUpdateSubtitles(safeCues);
         } else {
-          setInternalSubtitles(newCues);
+          setInternalSubtitles(safeCues);
         }
       }
     },
@@ -230,7 +232,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   const [stripThresholdDb, setStripThresholdDb] = useState<number>(-40);
   const [stripMinSilenceMs, setStripMinSilenceMs] = useState<number>(300);
   const [stripPaddingMs, setStripPaddingMs] = useState<number>(60);
-  const [stripTargetTrackId, setStripTargetTrackId] = useState<number>(tracks[0]?.id || 1);
+  const [stripTargetTrackId, setStripTargetTrackId] = useState<number>((tracks && tracks[0]?.id) || 1);
 
   const [cueEditorOpen, setCueEditorOpen] = useState<boolean>(false);
   const [editingCue, setEditingCue] = useState<SubtitleCue | null>(null);
@@ -444,10 +446,10 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       return;
     }
 
-    const track = tracks.find((t) => t.id === trackId);
+    const track = (tracks || []).find((t) => t && t.id === trackId);
     if (!track || !onUpdateTrack) return;
 
-    const clip = track.clips.find((c) => c.id === clipId);
+    const clip = (track.clips || []).find((c) => c && c.id === clipId);
     if (!clip) return;
 
     const splitSample = Math.round(splitTimeSec * sampleRate);
@@ -494,9 +496,9 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
         fadeInSamples: Math.min(clip.fadeInSamples, Math.floor((clip.lengthSamples - leftLength) / 2))
       };
 
-      const newClips = track.clips.flatMap((c) => (c.id === clipId ? [leftClip, rightClip] : [c]));
+      const newClips = (track.clips || []).flatMap((c) => (c.id === clipId ? [leftClip, rightClip] : [c]));
       const updatedTrack = { ...track, clips: newClips };
-      const newTracks = tracksRef.current.map((t) => (t.id === trackId ? updatedTrack : t));
+      const newTracks = (tracksRef.current || []).map((t) => (t.id === trackId ? updatedTrack : t));
 
       onUpdateTrack(updatedTrack);
       handleSyncTrackClips(trackId, newClips);
@@ -516,8 +518,8 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     let targetClip: ClipConfig | null = null;
 
     if (selectedClipId !== null) {
-      for (const t of tracks) {
-        const c = t.clips.find((item) => item.id === selectedClipId);
+      for (const t of (tracks || [])) {
+        const c = (t.clips || []).find((item) => item && item.id === selectedClipId);
         if (c && currentSample > c.offsetSamples && currentSample < c.offsetSamples + c.lengthSamples) {
           targetTrack = t;
           targetClip = c;
@@ -527,9 +529,10 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     }
 
     if (!targetClip) {
-      for (const t of tracks) {
-        const c = t.clips.find(
+      for (const t of (tracks || [])) {
+        const c = (t.clips || []).find(
           (item) =>
+            item &&
             currentSample > item.offsetSamples && currentSample < item.offsetSamples + item.lengthSamples
         );
         if (c) {
@@ -563,24 +566,24 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
 
     try {
       if (applyToAllTracks) {
-        const currentTracks = tracksRef.current;
+        const currentTracks = tracksRef.current || [];
         let totalCreatedPhrases = 0;
         let totalSavedSec = 0;
         let processedTracksCount = 0;
         const updatedTracks: TrackState[] = [];
 
         for (const track of currentTracks) {
-          if (!track.clips || track.clips.length === 0) {
-            updatedTracks.push(track);
+          if (!track || !track.clips || track.clips.length === 0) {
+            if (track) updatedTracks.push(track);
             continue;
           }
 
           let trackModified = false;
           const newTrackClips: ClipConfig[] = [];
 
-          for (const clip of track.clips) {
-            if (!clip.buffer || clip.buffer.length === 0 || clip.lengthSamples <= 0) {
-              newTrackClips.push(clip);
+          for (const clip of (track.clips || [])) {
+            if (!clip || !clip.buffer || clip.buffer.length === 0 || clip.lengthSamples <= 0) {
+              if (clip) newTrackClips.push(clip);
               continue;
             }
 
@@ -605,7 +608,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
             totalCreatedPhrases += segments.length;
 
             const originalSec = clip.lengthSamples / sampleRate;
-            const speechSec = segments.reduce((acc, s) => acc + s.lengthSamples / sampleRate, 0);
+            const speechSec = (segments || []).reduce((acc, s) => acc + s.lengthSamples / sampleRate, 0);
             totalSavedSec += Math.max(0, originalSec - speechSec);
 
             const generatedClips: ClipConfig[] = segments.map((seg, idx) => {
@@ -669,15 +672,15 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       }
 
       // Обработка выбранной целевой дорожки
-      const targetTrack = tracks.find((t) => t.id === stripTargetTrackId) || tracks[0];
+      const targetTrack = (tracks || []).find((t) => t && t.id === stripTargetTrackId) || (tracks || [])[0];
       if (!targetTrack) {
         showNotice('Целевая дорожка не найдена', 'warn');
         return;
       }
 
       // Если есть выделенный клип на этой дорожке, обрабатываем его, иначе первый клип с буфером
-      let sourceClip = targetTrack.clips.find((c) => c.id === selectedClipId);
-      if (!sourceClip && targetTrack.clips.length > 0) {
+      let sourceClip = (targetTrack.clips || []).find((c) => c && c.id === selectedClipId);
+      if (!sourceClip && (targetTrack.clips || []).length > 0) {
         sourceClip = targetTrack.clips[0];
       }
 
@@ -738,12 +741,12 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       });
 
       // Заменяем исходный длинный клип диктора на нарезанные фразы
-      const updatedClips = targetTrack.clips.flatMap((c) =>
+      const updatedClips = (targetTrack.clips || []).flatMap((c) =>
         c.id === sourceClip!.id ? newClips : [c]
       );
 
       const updatedTrack = { ...targetTrack, clips: updatedClips };
-      const newTracks = tracksRef.current.map((t) => (t.id === targetTrack.id ? updatedTrack : t));
+      const newTracks = (tracksRef.current || []).map((t) => (t.id === targetTrack.id ? updatedTrack : t));
 
       onUpdateTrack(updatedTrack);
       handleSyncTrackClips(targetTrack.id, updatedClips);
@@ -752,7 +755,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       setSelectedClipId(newClips[0]?.id || null);
       setStripSilenceModalOpen(false);
 
-      const totalSpeechSec = segments.reduce((acc, s) => acc + s.lengthSamples / sampleRate, 0);
+      const totalSpeechSec = (segments || []).reduce((acc, s) => acc + s.lengthSamples / sampleRate, 0);
       const originalSec = sourceClip.lengthSamples / sampleRate;
       const savedSec = Math.max(0, originalSec - totalSpeechSec);
 
@@ -822,8 +825,8 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       showNotice('Сначала выберите аудиоклип на таймлайне', 'warn');
       return;
     }
-    for (const track of tracks) {
-      const clip = track.clips.find((c) => c.id === selectedClipId);
+    for (const track of (tracks || [])) {
+      const clip = (track.clips || []).find((c) => c && c.id === selectedClipId);
       if (clip) {
         const targetEndSample = Math.round(currentTimeSec * sampleRate);
         const targetLength = targetEndSample - clip.offsetSamples;
@@ -908,8 +911,8 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   // Применение численного коэффициента Time Stretch
   const handleApplyStretchRatio = (ratio: number) => {
     if (selectedClipId === null) return;
-    for (const track of tracks) {
-      const clip = track.clips.find((c) => c.id === selectedClipId);
+    for (const track of (tracks || [])) {
+      const clip = (track.clips || []).find((c) => c && c.id === selectedClipId);
       if (clip) {
         const baseLength = clip.originalLengthSamples || clip.lengthSamples;
         const targetLength = Math.round(baseLength * ratio);
@@ -1131,11 +1134,11 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       if (!onUpdateTrack || activeDrag.trackId === undefined) return;
 
       const deltaSamples = Math.round(deltaSec * sampleRate);
-      const targetTrack = tracks.find((t) => t.id === activeDrag.trackId);
+      const targetTrack = (tracks || []).find((t) => t && t.id === activeDrag.trackId);
       if (!targetTrack) return;
 
       // Получаем список соседних клипов на дорожке для предотвращения коллизий
-      const otherClips = targetTrack.clips.filter((c) => c.id !== activeDrag.clipId);
+      const otherClips = (targetTrack.clips || []).filter((c) => c && c.id !== activeDrag.clipId);
 
       if (activeDrag.mode === 'time-stretch') {
         const newLength = Math.max(
@@ -1144,7 +1147,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
         );
         setActiveDrag((prev) => (prev ? { ...prev, currentLengthSamples: newLength } : null));
 
-        const updatedClips = targetTrack.clips.map((clip) => {
+        const updatedClips = (targetTrack.clips || []).map((clip) => {
           if (clip.id !== activeDrag.clipId) return clip;
           return { ...clip, lengthSamples: newLength };
         });
@@ -1152,7 +1155,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
         return;
       }
 
-      const updatedClips = targetTrack.clips.map((clip) => {
+      const updatedClips = (targetTrack.clips || []).map((clip) => {
         if (clip.id !== activeDrag.clipId) return clip;
 
         if (activeDrag.mode === 'move') {
@@ -1331,12 +1334,12 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
           );
         } else if (activeDrag.trackId !== undefined) {
           // После перемещения, обрезки (Trim) или фейдинга мгновенно передаем актуальные Float32Array буферы в AudioWorklet
-          const currentTracks = tracksRef.current;
-          const targetTrack = currentTracks.find((t) => t.id === activeDrag.trackId);
+          const currentTracks = tracksRef.current || [];
+          const targetTrack = currentTracks.find((t) => t && t.id === activeDrag.trackId);
           if (targetTrack) {
-            const updatedClips = targetTrack.clips.map((c) => ({
+            const updatedClips = (targetTrack.clips || []).map((c) => ({
               ...c,
-              buffer: new Float32Array(c.buffer)
+              buffer: c.buffer instanceof Float32Array ? new Float32Array(c.buffer) : new Float32Array(0)
             }));
             handleSyncTrackClips(targetTrack.id, updatedClips);
           }
@@ -1376,8 +1379,8 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
 
   const selectedClip = useMemo(() => {
     if (selectedClipId === null) return null;
-    for (const t of tracks) {
-      const c = t.clips.find((item) => item.id === selectedClipId);
+    for (const t of (tracks || [])) {
+      const c = (t.clips || []).find((item) => item && item.id === selectedClipId);
       if (c) return { clip: c, track: t };
     }
     return null;
@@ -1385,7 +1388,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
 
   const selectedCue = useMemo(() => {
     if (selectedCueIndex === null) return null;
-    return subtitles.find((c) => c.index === selectedCueIndex) || null;
+    return (subtitles || []).find((c) => c && c.index === selectedCueIndex) || null;
   }, [selectedCueIndex, subtitles]);
 
   return (
@@ -1912,8 +1915,8 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                         ? '#06b6d4'
                         : rawColor;
 
-                    const isColliding = collisions.some(
-                      (c) => c.clipAId === clip.id || c.clipBId === clip.id
+                    const isColliding = (collisions || []).some(
+                      (c) => c && (c.clipAId === clip.id || c.clipBId === clip.id)
                     );
 
                     return (
@@ -2075,9 +2078,9 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                   onChange={(e) => setStripTargetTrackId(Number(e.target.value))}
                   className="w-full bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-xl p-2.5 focus:border-cyan-500 outline-none"
                 >
-                  {tracks.map((t) => (
+                  {(tracks || []).map((t) => (
                     <option key={t.id} value={t.id}>
-                      CH {t.id} — {t.name} ({t.clips.length} клипов)
+                      CH {t.id} — {t.name} ({(t.clips || []).length} клипов)
                     </option>
                   ))}
                 </select>

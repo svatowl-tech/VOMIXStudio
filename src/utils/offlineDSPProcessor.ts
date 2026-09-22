@@ -230,8 +230,8 @@ export function processTrackOfflineDSP(
   }
 
   // 4. VST Plugins parameter gain/mix simulation
-  if (track.vstPlugins && track.vstPlugins.length > 0) {
-    for (const plugin of track.vstPlugins) {
+  if (track.vstPlugins && (track.vstPlugins || []).length > 0) {
+    for (const plugin of (track.vstPlugins || [])) {
       if (!plugin.enabled) continue;
       const gain = plugin.parameters?.gain ?? plugin.parameters?.outputGain ?? 0;
       const wet = (plugin.wetDry ?? 100) / 100;
@@ -271,8 +271,8 @@ export function processVocalBusOfflineDSP(
   }
 
   // VST вокальной шины
-  if (vocalBus.vstPlugins && vocalBus.vstPlugins.length > 0) {
-    for (const plugin of vocalBus.vstPlugins) {
+  if (vocalBus.vstPlugins && (vocalBus.vstPlugins || []).length > 0) {
+    for (const plugin of (vocalBus.vstPlugins || [])) {
       if (!plugin.enabled) continue;
       const gain = plugin.parameters?.gain ?? 0;
       if (Math.abs(gain) > 0.1) {

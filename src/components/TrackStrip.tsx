@@ -57,9 +57,9 @@ export const TrackStrip: React.FC<TrackStripProps> = ({
           <h3 className="text-sm font-bold text-slate-100 truncate max-w-[120px]">
             {track.name}
           </h3>
-          {track.vstPlugins && track.vstPlugins.length > 0 && (
+          {track.vstPlugins && (track.vstPlugins || []).length > 0 && (
             <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 font-mono border border-emerald-500/30">
-              {track.vstPlugins.length} VST
+              {(track.vstPlugins || []).length} VST
             </span>
           )}
         </div>
@@ -429,7 +429,7 @@ export const TrackStrip: React.FC<TrackStripProps> = ({
                   }}
                   className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-slate-200 text-xs"
                 >
-                  {allTracks.map((t) => (
+                  {(allTracks || []).map((t) => (
                     <option key={t.id} value={t.id}>
                       {t.name}
                     </option>

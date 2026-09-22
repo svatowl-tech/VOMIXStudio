@@ -50,6 +50,7 @@ import { TrackState, DEFAULT_TRACK_COLORS } from '../audio/dawEngine';
 import { MediaNormalizer } from '../services/MediaNormalizer';
 import { globalProjectManager, SubtitleCue, TrackMetadata, VideoMetadata } from '../services/ProjectManager';
 import { systemLogger } from '../services/SystemLogger';
+import { toSafeArray } from '../utils/safeIterables';
 
 /**
  * Режимы импорта
@@ -172,20 +173,21 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
   /**
    * Добавление списка файлов в очередь импорта с интеллектуальной авто-маршрутизацией
    */
-  const addFilesToQueue = (files: FileList | File[]) => {
+  const addFilesToQueue = (files: FileList | File[] | unknown) => {
     const newItems: ImportItem[] = [];
-    const fileArray = Array.from(files);
+    const fileArray = toSafeArray<File>(files);
 
     fileArray.forEach((file, index) => {
+      if (!file) return;
       // Исключаем дубликаты уже добавленных файлов в этой сессии
-      if (items.some((it) => it.file.name === file.name && it.file.size === file.size)) {
+      if ((items || []).some((it) => it && it.file && it.file.name === file.name && it.file.size === file.size)) {
         return;
       }
 
       const fileType = detectFileType(file);
-      const cleanName = file.name.replace(/\.[^/.]+$/, '');
-      const colorIndex = (existingTracks.length + items.length + index) % DEFAULT_TRACK_COLORS.length;
-      const defaultColor = DEFAULT_TRACK_COLORS[colorIndex];
+      const cleanName = file.name ? file.name.replace(/\.[^/.]+$/, '') : `Track_${index + 1}`;
+      const colorIndex = ((existingTracks || []).length + (items || []).length + index) % (DEFAULT_TRACK_COLORS.length || 1);
+      const defaultColor = DEFAULT_TRACK_COLORS[colorIndex] || '#06b6d4';
 
       newItems.push({
         id: `import_${Date.now()}_${index}_${Math.random().toString(36).substring(2, 6)}`,
@@ -259,7 +261,8 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
    * Запуск сквозного конвейера обработки и импорта
    */
   const handleStartImport = async () => {
-    if (items.length === 0 || isProcessing) return;
+    const safeItems = (items || []).filter(Boolean);
+    if (safeItems.length === 0 || isProcessing) return;
 
     setIsProcessing(true);
     setStatusMessage('Запуск C++ конвейера унификации и регистрации файлов...');
@@ -273,18 +276,21 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
     let audioCount = 0;
     let subtitleCount = 0;
 
-    const baseTracks = importMode === 'new_project' ? [] : existingTracks;
-    const activeProjectTracks: TrackMetadata[] = baseTracks.map((t) => ({
-      id: t.id,
-      name: t.name,
-      fileName: t.clips[0]?.name || '',
-      volumeDb: t.volumeDb,
-      pan: t.pan,
-      solo: t.solo,
-      mute: t.mute,
-      offsetSec: (t.clips[0]?.offsetSamples || 0) / 48000,
-      color: t.color
-    }));
+    const baseTracks = importMode === 'new_project' ? [] : (existingTracks || []).filter(Boolean);
+    const activeProjectTracks: TrackMetadata[] = baseTracks.map((t) => {
+      const firstClip = (t.clips || [])[0];
+      return {
+        id: t.id,
+        name: t.name,
+        fileName: firstClip?.name || '',
+        volumeDb: t.volumeDb,
+        pan: t.pan,
+        solo: t.solo,
+        mute: t.mute,
+        offsetSec: (firstClip?.offsetSamples || 0) / 48000,
+        color: t.color
+      };
+    });
 
     let lastVideoMeta: VideoMetadata | null = null;
     let accumulatedSubtitles: SubtitleCue[] = [];
@@ -383,13 +389,14 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
             setStatusMessage(`Парсинг таймкодов субтитров [${item.file.name}]...`);
 
             const parsedCues = await globalProjectManager.parseSubtitleFile(item.file);
-            accumulatedSubtitles = [...accumulatedSubtitles, ...parsedCues];
+            const safeCues = toSafeArray<SubtitleCue>(parsedCues);
+            accumulatedSubtitles = [...accumulatedSubtitles, ...safeCues];
 
             if (onImportSubtitles) {
-              await onImportSubtitles(parsedCues, item.file.name);
+              await onImportSubtitles(safeCues, item.file.name);
             }
 
-            systemLogger.info('Project', `Субтитры [${item.file.name}] успешно импортированы: ${parsedCues.length} реплик.`);
+            systemLogger.info('Project', `Субтитры [${item.file.name}] успешно импортированы: ${safeCues.length} реплик.`);
             subtitleCount++;
             updateItem(item.id, { status: 'success', progressPercent: 100 });
           }
@@ -438,10 +445,10 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
     }
   };
 
-  const videoItemsCount = items.filter((it) => it.type === 'video').length;
-  const audioItemsCount = items.filter((it) => it.type === 'audio').length;
-  const subtitleItemsCount = items.filter((it) => it.type === 'subtitle').length;
-  const totalSizeBytes = items.reduce((acc, it) => acc + it.sizeBytes, 0);
+  const videoItemsCount = (items || []).filter((it) => it && it.type === 'video').length;
+  const audioItemsCount = (items || []).filter((it) => it && it.type === 'audio').length;
+  const subtitleItemsCount = (items || []).filter((it) => it && it.type === 'subtitle').length;
+  const totalSizeBytes = (items || []).reduce((acc, it) => acc + (it?.sizeBytes || 0), 0);
 
   return (
     <div
@@ -591,7 +598,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
               </div>
 
               <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-                {items.map((item) => {
+                {(items || []).map((item) => {
                   const isAudio = item.type === 'audio';
                   const isVideo = item.type === 'video';
                   const isSub = item.type === 'subtitle';
@@ -674,7 +681,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
                                   updateItem(item.id, { targetTrackId: undefined, replaceExistingTrack: false });
                                 } else {
                                   const trackId = parseInt(val, 10);
-                                  const targetT = existingTracks.find((t) => t.id === trackId);
+                                  const targetT = (existingTracks || []).find((t) => t && t.id === trackId);
                                   updateItem(item.id, {
                                     targetTrackId: trackId,
                                     targetTrackName: targetT?.name,
@@ -685,7 +692,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
                               className="bg-zinc-900 border border-zinc-700 text-zinc-200 rounded px-2 py-1 text-xs focus:border-cyan-500 outline-none cursor-pointer"
                             >
                               <option value="new">+ Создать новую дорожку</option>
-                              {existingTracks.map((t) => (
+                              {(existingTracks || []).map((t) => (
                                 <option key={t.id} value={t.id}>
                                   Заменить #{t.id}: {t.name}
                                 </option>
@@ -709,7 +716,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
                           <div className="flex items-center gap-1.5">
                             <label className="text-zinc-400">Цвет:</label>
                             <div className="flex items-center gap-1">
-                              {DEFAULT_TRACK_COLORS.slice(0, 5).map((color) => (
+                              {(DEFAULT_TRACK_COLORS || []).slice(0, 5).map((color) => (
                                 <button
                                   key={color}
                                   type="button"
