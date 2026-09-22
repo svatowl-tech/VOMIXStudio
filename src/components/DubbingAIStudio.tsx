@@ -313,14 +313,15 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
 
   // --- INSTALLED MODELS ONLY FOR MVP INTERFACE ---
   const installedModels = useMemo(() => {
-    return (models || []).filter((m) => m && m.is_installed);
+    return toSafeArray<ModelCatalogItem>(models).filter((m) => m && m.is_installed);
   }, [models]);
 
   // Synchronize track configs when tracks list changes
   useEffect(() => {
+    const currentSafeTracks = toSafeArray<TrackState>(tracks);
     setTrackConfigs((prev) => {
       const updated: Record<number, TrackAIConfig> = { ...prev };
-      safeTracks.forEach((track) => {
+      currentSafeTracks.forEach((track) => {
         if (!track) return;
         // Дорожка считается оригинальным звуком видео ТОЛЬКО при наличии флага или маркера
         const isVideoOrOrig = Boolean(
@@ -414,7 +415,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
 
   // Filtered models for catalog tab
   const filteredCatalogModels = useMemo(() => {
-    return (models || []).filter((m) => {
+    return toSafeArray<ModelCatalogItem>(models).filter((m) => {
       if (!m) return false;
       const matchSearch =
         (m.name || '').toLowerCase().includes(catalogSearch.toLowerCase()) ||
@@ -547,10 +548,10 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
       return;
     }
 
-    const track = safeTracks.find((t) => t.id === trackId);
+    const track = safeTracks.find((t) => t && t.id === trackId);
     const trackName = track?.name || `Дорожка ${trackId}`;
 
-    const activeSteps = (config.steps || []).filter((s) => s.enabled);
+    const activeSteps = toSafeArray<AIStepNode>(config.steps).filter((s) => s && s.enabled);
     if (activeSteps.length === 0) {
       alert(`На Дорожке #${trackId} нет включенных ИИ-шагов обработки.`);
       return;
@@ -731,7 +732,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
    * Run Batch Processing across ALL enabled tracks in Matrix
    */
   const handleRunMatrixBatch = async () => {
-    const activeConfigs = Object.values(trackConfigs || {}).filter((c) => c && c.enabled);
+    const activeConfigs = toSafeArray<TrackAIConfig>(Object.values(trackConfigs || {})).filter((c) => c && c.enabled);
     if (activeConfigs.length === 0) {
       alert('Нет активных дорожек для обработки в матрице.');
       return;
@@ -1309,7 +1310,8 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                 abProcessedUrl: undefined
               };
 
-              const hasClips = track.clips && track.clips.length > 0;
+              const safeTrackClips = toSafeArray(track.clips);
+              const hasClips = safeTrackClips.length > 0;
               const purposeInfo = PURPOSE_DESCRIPTIONS[cfg.purpose];
               const isProcessingThis = cfg.status === 'processing';
               const isDoneThis = cfg.status === 'done';
@@ -1361,7 +1363,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                                 : 'bg-slate-900 text-slate-500 border border-slate-800'
                             }`}
                           >
-                            {hasClips ? `${track.clips.length} клип(ов)` : 'Нет аудио'}
+                            {hasClips ? `${safeTrackClips.length} клип(ов)` : 'Нет аудио'}
                           </span>
                         </div>
                       </div>
@@ -1440,7 +1442,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                     <div className="flex items-center justify-between pb-2 border-b border-slate-800/60">
                       <div className="text-xs font-bold text-emerald-400 flex items-center gap-1.5 font-mono">
                         <Sparkles size={14} className="text-amber-300" />
-                        Последовательная цепочка нейросетей ({cfg.steps?.length || 1} {cfg.steps?.length === 1 ? 'этап' : 'этапов'})
+                        Последовательная цепочка нейросетей ({toSafeArray(cfg.steps).length || 1} {toSafeArray(cfg.steps).length === 1 ? 'этап' : 'этапов'})
                       </div>
                       <button
                         type="button"
@@ -1452,8 +1454,8 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                       </button>
                     </div>
 
-                    {(cfg.steps && cfg.steps.length > 0
-                      ? cfg.steps
+                    {(toSafeArray<AIStepNode>(cfg.steps).length > 0
+                      ? toSafeArray<AIStepNode>(cfg.steps)
                       : [
                           {
                             id: 'default',
@@ -1470,7 +1472,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                     ).map((step, stepIdx) => {
                       const stepPurposeInfo = PURPOSE_DESCRIPTIONS[step.purpose] || PURPOSE_DESCRIPTIONS['denoise'];
                       const targetCategory = PURPOSE_TO_CATEGORY_MAP[step.purpose] || 'denoise';
-                      const installedCategoryModels = (installedModels || []).filter(
+                      const installedCategoryModels = toSafeArray<ModelCatalogItem>(installedModels).filter(
                         (m) => m && m.category === targetCategory
                       );
 
@@ -1494,7 +1496,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                             </div>
 
                             <div className="flex items-center gap-2">
-                              {cfg.steps && (cfg.steps || []).length > 1 && (
+                              {toSafeArray(cfg.steps).length > 1 && (
                                 <button
                                   type="button"
                                   onClick={() => handleRemoveAIStep(track.id, step.id)}
@@ -1541,7 +1543,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                                     ⚠️ Модель не загружена (DSP C++ WebAssembly)
                                   </option>
                                 ) : (
-                                  (installedCategoryModels || []).map((m) => (
+                                  toSafeArray<ModelCatalogItem>(installedCategoryModels).map((m) => (
                                     <option key={m.id} value={m.id}>
                                       {m.name} ({m.size_mb} MB) [В памяти]
                                     </option>
@@ -2494,13 +2496,13 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                 </p>
               </div>
               <span className="px-2.5 py-1 rounded bg-emerald-500/10 text-emerald-400 text-xs font-mono font-bold">
-                {(alignedPhrases || []).length} реплик
+                {toSafeArray(alignedPhrases).length} реплик
               </span>
             </div>
 
-            {(alignedPhrases || []).length > 0 ? (
+            {toSafeArray<AlignedSpeechPhrase>(alignedPhrases).length > 0 ? (
               <div className="space-y-3 flex-1 overflow-y-auto max-h-[420px] pr-1 scrollbar-thin">
-                {(alignedPhrases || []).map((phrase) => {
+                {toSafeArray<AlignedSpeechPhrase>(alignedPhrases).map((phrase) => {
                   const hasDrift = Math.abs(phrase.timeDriftSec) > 0.3;
                   return (
                     <div
@@ -2568,7 +2570,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                 onChange={(e) => setCatalogCategoryFilter(e.target.value)}
                 className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-emerald-500"
               >
-                <option value="all">Все категории ({(models || []).length})</option>
+                <option value="all">Все категории ({toSafeArray(models).length})</option>
                 <option value="separation">Сепарация стемов (Stem Separation)</option>
                 <option value="denoise">Денойзинг (DeNoise)</option>
                 <option value="dereverb">Дереверберация (DeReverb)</option>
@@ -2580,7 +2582,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
 
           {/* Models Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {(filteredCatalogModels || []).map((m) => {
+            {toSafeArray<ModelCatalogItem>(filteredCatalogModels).map((m) => {
               const prog = downloadProgress[m.id];
               const isDownloading = prog && prog.status === 'downloading';
               return (
@@ -2753,12 +2755,12 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
               <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2 text-xs font-mono">
                 <div className="flex justify-between text-slate-400">
                   <span>Всего моделей в каталоге:</span>
-                  <span className="text-slate-100 font-bold">{(models || []).length}</span>
+                  <span className="text-slate-100 font-bold">{toSafeArray(models).length}</span>
                 </div>
                 <div className="flex justify-between text-slate-400">
                   <span>Установлено в кэш браузера:</span>
                   <span className="text-emerald-400 font-bold">
-                    {(models || []).filter((m) => m && m.is_installed).length} моделей
+                    {toSafeArray<ModelCatalogItem>(models).filter((m) => m && m.is_installed).length} моделей
                   </span>
                 </div>
                 <div className="flex justify-between text-slate-400">
