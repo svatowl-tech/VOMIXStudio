@@ -531,7 +531,12 @@ export class VSTHostEngine {
       // 1. Загрузка списка директорий
       const savedDirs = localStorage.getItem(VST_DIRS_STORAGE_KEY);
       if (savedDirs) {
-        this.scanDirectories = JSON.parse(savedDirs);
+        try {
+          const parsed = JSON.parse(savedDirs);
+          this.scanDirectories = Array.isArray(parsed) ? parsed : [...DEFAULT_VST_DIRECTORIES];
+        } catch {
+          this.scanDirectories = [...DEFAULT_VST_DIRECTORIES];
+        }
       } else {
         this.scanDirectories = [...DEFAULT_VST_DIRECTORIES];
       }
@@ -541,29 +546,41 @@ export class VSTHostEngine {
       this.catalog.clear();
 
       // Сначала всегда гарантируем наличие встроенных плагинов
-      BUILT_IN_VST_LIBRARY.forEach((p) => this.catalog.set(p.id, p));
+      (BUILT_IN_VST_LIBRARY || []).forEach((p) => {
+        if (p && p.id) this.catalog.set(p.id, p);
+      });
 
       if (savedCatalog) {
-        const parsed: VSTPluginDefinition[] = JSON.parse(savedCatalog);
-        // Фильтруем закешированные фейковые плагины, если они были сохранены ранее
-        const legacyDummyIds = new Set([
-          'waves_cla_76', 'waves_vocal_rider', 'waves_rvox', 'waves_l2_limiter',
-          'izotope_ozone_maximizer', 'izotope_rx_denoise', 'izotope_nectar_vocal',
-          'fabfilter_pro_q3', 'fabfilter_pro_c2', 'valhalla_vintage_verb', 'xfer_ott'
-        ]);
-        parsed.forEach((p) => {
-          if (!legacyDummyIds.has(p.id)) {
-            this.catalog.set(p.id, p);
+        try {
+          const parsed: VSTPluginDefinition[] = JSON.parse(savedCatalog);
+          if (Array.isArray(parsed)) {
+            // Фильтруем закешированные фейковые плагины, если они были сохранены ранее
+            const legacyDummyIds = new Set([
+              'waves_cla_76', 'waves_vocal_rider', 'waves_rvox', 'waves_l2_limiter',
+              'izotope_ozone_maximizer', 'izotope_rx_denoise', 'izotope_nectar_vocal',
+              'fabfilter_pro_q3', 'fabfilter_pro_c2', 'valhalla_vintage_verb', 'xfer_ott'
+            ]);
+            parsed.forEach((p) => {
+              if (p && p.id && !legacyDummyIds.has(p.id)) {
+                this.catalog.set(p.id, p);
+              }
+            });
           }
-        });
+        } catch {}
       }
 
       // 3. Загрузка отключенных плагинов
       const savedDisabled = localStorage.getItem(VST_DISABLED_PLUGINS_KEY);
       this.disabledPluginIds.clear();
       if (savedDisabled) {
-        const parsed: string[] = JSON.parse(savedDisabled);
-        parsed.forEach((id) => this.disabledPluginIds.add(id));
+        try {
+          const parsed: string[] = JSON.parse(savedDisabled);
+          if (Array.isArray(parsed)) {
+            parsed.forEach((id) => {
+              if (typeof id === 'string') this.disabledPluginIds.add(id);
+            });
+          }
+        } catch {}
       }
 
       // 4. Загрузка статистики последнего сканирования

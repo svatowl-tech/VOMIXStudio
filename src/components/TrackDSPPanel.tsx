@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { TrackState, createNewTrack } from '../audio/dawEngine';
 import { EqCurveVisualizer } from './EqCurveVisualizer';
+import { toSafeArray } from '../utils/safeIterables';
 import {
   Sliders,
   Activity,
@@ -1115,7 +1116,7 @@ export const TrackDSPPanel: React.FC<TrackDSPPanelProps> = ({
                   }
                   className="w-full bg-slate-950 border border-slate-800 text-slate-200 text-[11px] rounded p-1 focus:outline-none focus:border-purple-500"
                 >
-                  {allTracks.map((t) => (
+                  {toSafeArray<TrackState>(allTracks).map((t) => (
                     <option key={t.id} value={t.id} disabled={t.id === track.id}>
                       {t.id === track.id ? `${t.name} (текущий)` : `CH ${t.id}: ${t.name}`}
                     </option>

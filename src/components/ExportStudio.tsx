@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { TrackState, MasterState } from '../audio/dawEngine';
 import { globalRenderManager, RenderProgressInfo } from '../services/RenderManager';
 import { WavBitDepth } from '../services/NativeDAWBridge';
+import { toSafeArray } from '../utils/safeIterables';
 
 // Функция триггера скачивания файла без использования JS wavEncoder
 function triggerFileDownload(blob: Blob, filename: string): void {
@@ -240,10 +241,10 @@ export const ExportStudio: React.FC<ExportStudioProps> = ({ tracks, master, sour
 
             {/* Окно консоли */}
             <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 font-mono text-[11px] text-slate-400 h-56 overflow-y-auto space-y-1">
-              {progressInfo.logs.length === 0 ? (
+              {toSafeArray<string>(progressInfo.logs).length === 0 ? (
                 <div className="text-slate-600">Терминал ожидает команды...</div>
               ) : (
-                progressInfo.logs.map((log, idx) => (
+                toSafeArray<string>(progressInfo.logs).map((log, idx) => (
                   <div key={idx} className="leading-tight">
                     {log}
                   </div>

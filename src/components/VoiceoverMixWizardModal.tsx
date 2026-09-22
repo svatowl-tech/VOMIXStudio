@@ -14,6 +14,7 @@ import React, { useState, useEffect } from 'react';
 import { TrackState, VocalBusState, MasterState } from '../audio/dawEngine';
 import { detectTrackCollisions, ClipCollisionInfo } from '../utils/collisionDetector';
 import { systemLogger } from '../services/SystemLogger';
+import { toSafeArray } from '../utils/safeIterables';
 import {
   Sparkles,
   AlertTriangle,
@@ -368,7 +369,7 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
 
                   {/* Список коллизий */}
                   <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-                    {collisions.map((col, idx) => (
+                    {toSafeArray<ClipCollisionInfo>(collisions).map((col, idx) => (
                       <div
                         key={col.id}
                         className="p-3 bg-slate-900 border border-slate-800 rounded-xl text-xs flex items-center justify-between gap-3"
@@ -491,7 +492,7 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
                 <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
                   Громкость индивидуальных дорожек:
                 </span>
-                {tracks.map((track) => (
+                {toSafeArray<TrackState>(tracks).map((track) => (
                   <div
                     key={track.id}
                     className="p-3 bg-slate-900 border border-slate-800 rounded-xl flex items-center justify-between gap-3 text-xs"
@@ -506,7 +507,7 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
                       onChange={(e) => {
                         const val = parseFloat(e.target.value);
                         setTracks((prev) =>
-                          prev.map((t) => (t.id === track.id ? { ...t, volumeDb: val } : t))
+                          toSafeArray<TrackState>(prev).map((t) => (t.id === track.id ? { ...t, volumeDb: val } : t))
                         );
                       }}
                       className="flex-1 accent-cyan-500 cursor-pointer"
@@ -610,7 +611,7 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
             <div className="mt-4 pt-3 border-t border-slate-800/80 space-y-1">
               <span className="text-[10px] font-mono font-bold text-slate-500 uppercase">Лог операций:</span>
               <div className="p-2.5 bg-[#050811] border border-slate-800 rounded-xl font-mono text-[10px] text-slate-400 space-y-1 max-h-28 overflow-y-auto">
-                {logs.map((log, i) => (
+                {toSafeArray<string>(logs).map((log, i) => (
                   <div key={i}>{log}</div>
                 ))}
               </div>

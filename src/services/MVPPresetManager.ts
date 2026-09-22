@@ -500,7 +500,10 @@ export class MVPPresetManager {
     try {
       const raw = localStorage.getItem(STORAGE_USER_PRESETS_KEY);
       if (raw) {
-        this.userPresets = JSON.parse(raw);
+        const parsed = JSON.parse(raw);
+        this.userPresets = Array.isArray(parsed) ? parsed : [];
+      } else {
+        this.userPresets = [];
       }
     } catch (e) {
       console.error(e);
@@ -510,18 +513,21 @@ export class MVPPresetManager {
 
   private saveUserPresets(): void {
     try {
-      localStorage.setItem(STORAGE_USER_PRESETS_KEY, JSON.stringify(this.userPresets));
+      const safe = Array.isArray(this.userPresets) ? this.userPresets : [];
+      localStorage.setItem(STORAGE_USER_PRESETS_KEY, JSON.stringify(safe));
     } catch (e) {
       console.error(e);
     }
   }
 
   public getCorePresets(): MVPPreset[] {
-    return BUILT_IN_MVP_PRESETS;
+    return Array.isArray(BUILT_IN_MVP_PRESETS) ? BUILT_IN_MVP_PRESETS : [];
   }
 
   public getAllPresets(): MVPPreset[] {
-    return [...BUILT_IN_MVP_PRESETS, ...this.userPresets];
+    const builtIn = Array.isArray(BUILT_IN_MVP_PRESETS) ? BUILT_IN_MVP_PRESETS : [];
+    const user = Array.isArray(this.userPresets) ? this.userPresets : [];
+    return [...builtIn, ...user];
   }
 
   public getActivePresetId(): string {

@@ -17,6 +17,7 @@ import {
   TrackMetadata
 } from '../services/ProjectManager';
 import { TrackState, MasterState } from '../audio/dawEngine';
+import { toSafeArray } from '../utils/safeIterables';
 import {
   FolderOpen,
   Save,
@@ -159,15 +160,15 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
   const handleSaveProject = async () => {
     setIsSaving(true);
 
-    const trackMetas: TrackMetadata[] = tracks.map((t) => ({
+    const trackMetas: TrackMetadata[] = toSafeArray<TrackState>(tracks).map((t) => ({
       id: t.id,
       name: t.name,
-      fileName: t.clips[0]?.name || `${t.name.toLowerCase().replace(/\s+/g, '_')}.wav`,
+      fileName: (t.clips || [])[0]?.name || `${t.name.toLowerCase().replace(/\s+/g, '_')}.wav`,
       volumeDb: t.volumeDb,
       pan: t.pan,
       solo: t.solo,
       mute: t.mute,
-      offsetSec: t.clips[0]?.offsetSamples ? t.clips[0].offsetSamples / 48000 : 0,
+      offsetSec: (t.clips || [])[0]?.offsetSamples ? (t.clips[0].offsetSamples / 48000) : 0,
       color: t.color,
     }));
 
@@ -410,9 +411,9 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
             )}
           </div>
 
-          {directoryContent && directoryContent.discoveredFiles.length > 0 ? (
+          {directoryContent && toSafeArray<DiscoveredFile>(directoryContent.discoveredFiles).length > 0 ? (
             <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1 custom-scrollbar">
-              {directoryContent.discoveredFiles.map((file, idx) => (
+              {toSafeArray<DiscoveredFile>(directoryContent.discoveredFiles).map((file, idx) => (
                 <div
                   key={`${file.name}_${idx}`}
                   className="flex items-center justify-between p-2 rounded bg-[#101218] border border-[#222735] hover:border-[#2f364a] text-xs transition-colors"

@@ -22,6 +22,7 @@ import {
   MVPPresetCategory
 } from '../services/MVPPresetManager';
 import { TrackState, VocalBusState, MasterState } from '../audio/dawEngine';
+import { toSafeArray } from '../utils/safeIterables';
 
 interface MVPPipelinePresetsProps {
   tracks: TrackState[];
@@ -36,7 +37,7 @@ export const MVPPipelinePresets: React.FC<MVPPipelinePresetsProps> = ({
   master,
   onApplyPreset
 }) => {
-  const [presets, setPresets] = useState<MVPPreset[]>(() => globalMVPPresetManager.getAllPresets());
+  const [presets, setPresets] = useState<MVPPreset[]>(() => toSafeArray<MVPPreset>(globalMVPPresetManager.getAllPresets()));
   const [activePresetId, setActivePresetId] = useState<string>(() => globalMVPPresetManager.getActivePresetId());
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [showGuide, setShowGuide] = useState(false);
@@ -47,15 +48,16 @@ export const MVPPipelinePresets: React.FC<MVPPipelinePresetsProps> = ({
 
   useEffect(() => {
     const unsub = globalMVPPresetManager.subscribe(() => {
-      setPresets(globalMVPPresetManager.getAllPresets());
+      setPresets(toSafeArray<MVPPreset>(globalMVPPresetManager.getAllPresets()));
       setActivePresetId(globalMVPPresetManager.getActivePresetId());
     });
     return unsub;
   }, []);
 
-  const corePresets = presets.filter((p) => p.isBuiltIn);
-  const userPresets = presets.filter((p) => !p.isBuiltIn);
-  const activePreset = presets.find((p) => p.id === activePresetId) || corePresets[0];
+  const safePresets = toSafeArray<MVPPreset>(presets);
+  const corePresets = safePresets.filter((p) => p && p.isBuiltIn);
+  const userPresets = safePresets.filter((p) => p && !p.isBuiltIn);
+  const activePreset = safePresets.find((p) => p && p.id === activePresetId) || corePresets[0] || safePresets[0];
 
   const handleSelectPreset = (preset: MVPPreset) => {
     setActivePresetId(preset.id);

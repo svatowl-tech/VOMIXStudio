@@ -75,6 +75,7 @@ import { ClipCollisionInfo } from '../utils/collisionDetector';
 import { globalAIPipelineStore } from '../services/AIPipelineStore';
 import { globalStemSeparationService } from '../services/StemSeparationService';
 import { globalAudioAICleanupEngine } from '../services/AudioAICleanupEngine';
+import { toSafeArray, toSafeMap, toSafeSet } from '../utils/safeIterables';
 
 export const MinimalStudio: React.FC = () => {
   // --- 1. Аудиодвижок DAW и AudioWorklet ---
@@ -115,26 +116,27 @@ export const MinimalStudio: React.FC = () => {
   } = useAudioEngine();
 
   // --- 2. Состояние дорожек и мастера проекта (Поддержка до 32 дорожек) ---
-  const [tracks, setTracks] = useState<TrackState[]>(() => new LiveDAWEngine().getTracks());
+  const [tracks, setTracks] = useState<TrackState[]>(() => toSafeArray<TrackState>(new LiveDAWEngine().getTracks()));
   const [vocalBus, setVocalBusState] = useState<VocalBusState>(() => createDefaultVocalBus());
 
   // Автоматическая фоновая синхронизация дорожек и клипов с AudioWorklet
   useEffect(() => {
-    if (isInitialized && tracks && tracks.length > 0) {
-      syncAllTracks(tracks);
+    const safeTracks = toSafeArray<TrackState>(tracks);
+    if (isInitialized && safeTracks.length > 0) {
+      syncAllTracks(safeTracks);
     }
   }, [isInitialized, tracks, syncAllTracks]);
 
   // Синхронизация Vocal Bus с AudioWorklet
   useEffect(() => {
-    if (isInitialized) {
+    if (isInitialized && vocalBus) {
       setVocalBus(vocalBus);
     }
   }, [isInitialized, vocalBus, setVocalBus]);
   const [activeDspTrackId, setActiveDspTrackId] = useState<number | null>(null);
-  const activeDspTrack = tracks.find((t) => t.id === activeDspTrackId) || null;
+  const activeDspTrack = toSafeArray<TrackState>(tracks).find((t) => t && t.id === activeDspTrackId) || null;
   const [activeVstTrackId, setActiveVstTrackId] = useState<number | null>(null);
-  const activeVstTrack = tracks.find((t) => t.id === activeVstTrackId) || null;
+  const activeVstTrack = toSafeArray<TrackState>(tracks).find((t) => t && t.id === activeVstTrackId) || null;
   const [dbStats, setDbStats] = useState<DatabaseStats | null>(null);
   const [showDbModal, setShowDbModal] = useState<boolean>(false);
   const [master, setMaster] = useState<MasterState>({
@@ -281,15 +283,15 @@ export const MinimalStudio: React.FC = () => {
                 fileSize: videoFile.size
               }
             : null,
-          tracks: tracks.map((t) => ({
+          tracks: toSafeArray<TrackState>(tracks).map((t) => ({
             id: t.id,
             name: t.name,
-            fileName: t.clips[0]?.name || '',
+            fileName: (t.clips || [])[0]?.name || '',
             volumeDb: t.volumeDb,
             pan: t.pan,
             solo: t.solo,
             mute: t.mute,
-            offsetSec: t.clips[0]?.offsetSamples ? t.clips[0].offsetSamples / 48000 : 0,
+            offsetSec: (t.clips || [])[0]?.offsetSamples ? (t.clips[0].offsetSamples / 48000) : 0,
             color: t.color
           })),
           master: {
@@ -639,54 +641,59 @@ export const MinimalStudio: React.FC = () => {
   // --- 9. Изменение параметров микшера ---
   const handleVolumeChange = (trackId: number, volumeDb: number) => {
     setTrackVolume(trackId, volumeDb);
-    setTracks((prev) => prev.map((t) => (t.id === trackId ? { ...t, volumeDb } : t)));
+    setTracks((prev) => toSafeArray<TrackState>(prev).map((t) => (t.id === trackId ? { ...t, volumeDb } : t)));
     triggerAutoSave();
   };
 
   const handlePanChange = (trackId: number, pan: number) => {
     setTrackPan(trackId, pan);
-    setTracks((prev) => prev.map((t) => (t.id === trackId ? { ...t, pan } : t)));
+    setTracks((prev) => toSafeArray<TrackState>(prev).map((t) => (t.id === trackId ? { ...t, pan } : t)));
     triggerAutoSave();
   };
 
   const handleMuteToggle = (trackId: number) => {
-    const track = tracks.find((t) => t.id === trackId);
+    const safeTracks = toSafeArray<TrackState>(tracks);
+    const track = safeTracks.find((t) => t && t.id === trackId);
     if (!track) return;
     const newMute = !track.mute;
     setTrackMute(trackId, newMute);
-    setTracks((prev) => prev.map((t) => (t.id === trackId ? { ...t, mute: newMute } : t)));
+    setTracks((prev) => toSafeArray<TrackState>(prev).map((t) => (t.id === trackId ? { ...t, mute: newMute } : t)));
     triggerAutoSave();
   };
 
   const handleSoloToggle = (trackId: number) => {
-    const track = tracks.find((t) => t.id === trackId);
+    const safeTracks = toSafeArray<TrackState>(tracks);
+    const track = safeTracks.find((t) => t && t.id === trackId);
     if (!track) return;
     const newSolo = !track.solo;
     setTrackSolo(trackId, newSolo);
-    setTracks((prev) => prev.map((t) => (t.id === trackId ? { ...t, solo: newSolo } : t)));
+    setTracks((prev) => toSafeArray<TrackState>(prev).map((t) => (t.id === trackId ? { ...t, solo: newSolo } : t)));
     triggerAutoSave();
   };
 
   // Добавление новой аудиодорожки (поддержка 20-25+ дорожек)
   const handleAddNewTrack = () => {
-    if (tracks.length >= 32) {
+    const safeTracks = toSafeArray<TrackState>(tracks);
+    if (safeTracks.length >= 32) {
       alert('Достигнут максимальный лимит дорожек (32).');
       return;
     }
-    const nextId = tracks.length > 0 ? Math.max(...tracks.map((t) => t.id)) + 1 : 1;
+    const trackIds = safeTracks.map((t) => t.id).filter((id) => typeof id === 'number');
+    const nextId = trackIds.length > 0 ? Math.max(...trackIds) + 1 : 1;
     const newTr = createNewTrack(nextId, `Dubber ${nextId}`);
-    setTracks((prev) => [...prev, newTr]);
+    setTracks((prev) => [...toSafeArray<TrackState>(prev), newTr]);
     triggerAutoSave();
-    setStatusMessage(`Добавлена новая дорожка CH ${nextId} (всего дорожек: ${tracks.length + 1})`);
+    setStatusMessage(`Добавлена новая дорожка CH ${nextId} (всего дорожек: ${safeTracks.length + 1})`);
   };
 
   // Удаление дорожки
   const handleRemoveTrack = (trackId: number) => {
-    if (tracks.length <= 1) {
+    const safeTracks = toSafeArray<TrackState>(tracks);
+    if (safeTracks.length <= 1) {
       alert('Нельзя удалить последнюю дорожку.');
       return;
     }
-    setTracks((prev) => prev.filter((t) => t.id !== trackId));
+    setTracks((prev) => toSafeArray<TrackState>(prev).filter((t) => t.id !== trackId));
     triggerAutoSave();
     setStatusMessage(`Дорожка CH ${trackId} удалена.`);
   };
@@ -698,7 +705,9 @@ export const MinimalStudio: React.FC = () => {
     vocalsName = 'Изолированный вокал',
     karaokeName = 'Фонограмма M&E'
   ) => {
-    const nextId = tracks.length > 0 ? Math.max(...tracks.map((t) => t.id)) + 1 : 1;
+    const safeTracks = toSafeArray<TrackState>(tracks);
+    const trackIds = safeTracks.map((t) => t.id).filter((id) => typeof id === 'number');
+    const nextId = trackIds.length > 0 ? Math.max(...trackIds) + 1 : 1;
     const vocalsClip: ClipConfig = {
       id: Date.now() + 1,
       name: vocalsName,
@@ -735,7 +744,7 @@ export const MinimalStudio: React.FC = () => {
       clips: [karaokeClip]
     };
 
-    const updatedTracks = [...tracks, newVocalsTrack, newKaraokeTrack];
+    const updatedTracks = [...safeTracks, newVocalsTrack, newKaraokeTrack];
     setTracks(updatedTracks);
     syncAllTracks(updatedTracks);
     triggerAutoSave();
@@ -903,11 +912,14 @@ export const MinimalStudio: React.FC = () => {
     const totalFrames = pcmBuffer.length / 2;
     const clipId = Date.now();
 
-    const targetTrackId = config.trackId || (tracks.length > 0 ? Math.max(...tracks.map((t) => t.id)) + 1 : 1);
+    const safeTracks = toSafeArray<TrackState>(tracks);
+    const trackIds = safeTracks.map((t) => t.id).filter((id) => typeof id === 'number');
+    const targetTrackId = config.trackId || (trackIds.length > 0 ? Math.max(...trackIds) + 1 : 1);
     const isOriginal = /оригинал|original|видео|video|отригал|orig/i.test(config.name || file.name);
 
     setTracks((prev) => {
-      const existing = prev.find((t) => t.id === targetTrackId);
+      const safePrev = toSafeArray<TrackState>(prev);
+      const existing = safePrev.find((t) => t.id === targetTrackId);
       if (!existing || !config.replaceExisting) {
         const newTrack = createNewTrack(targetTrackId, config.name, config.color);
         newTrack.isOriginalAudio = isOriginal;
@@ -925,9 +937,9 @@ export const MinimalStudio: React.FC = () => {
             color: config.color || newTrack.color
           }
         ];
-        return [...prev, newTrack];
+        return [...safePrev, newTrack];
       } else {
-        return prev.map((t) =>
+        return safePrev.map((t) =>
           t.id === targetTrackId
             ? {
                 ...t,
@@ -2133,12 +2145,13 @@ export const MinimalStudio: React.FC = () => {
 
         {/* Сетка полос микшера */}
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 pt-2">
-          {tracks.map((track) => {
-            const meterData = trackMeters.get(track.id);
+          {toSafeArray<TrackState>(tracks).map((track) => {
+            const meterData = trackMeters?.get?.(track.id);
             const peakDbL = meterData ? MediaNormalizer.linearToDb(meterData.peakL) : -60;
             const peakDbR = meterData ? MediaNormalizer.linearToDb(meterData.peakR) : -60;
             const isClipping = (meterData?.peakL || 0) >= 0.9999 || (meterData?.peakR || 0) >= 0.9999;
-            const hasClips = track.clips.length > 0;
+            const safeClips = toSafeArray<ClipConfig>(track.clips);
+            const hasClips = safeClips.length > 0;
 
             return (
               <div

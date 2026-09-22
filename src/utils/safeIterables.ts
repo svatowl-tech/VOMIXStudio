@@ -13,44 +13,37 @@
  */
 
 /**
- * Безопасно преобразует любое значение в строго типизированный массив T[].
- * 
- * Логика обработки:
- * 1. Если передан null или undefined -> []
- * 2. Если передан валидный массив -> фильтрует ложные/пустые элементы (.filter(Boolean))
- * 3. Если передан Set или Map -> преобразует элементы/значения в массив
- * 4. Если передан объект (словарь) -> извлекает его значения через Object.values(val).filter(Boolean)
- * 5. В остальных случаях (примитивы, функции, символы) -> возвращает пустой массив []
- */
-/**
- * Безопасно преобразует любой входной параметр (Array, FileList, Map, Set, null, undefined) в чистый массив.
+ * Безопасно преобразует любой входной параметр (Array, FileList, Map, Set, null, undefined) в чистый массив T[].
  */
 export function toSafeArray<T>(val: unknown): T[] {
-  if (!val) return [];
-  if (Array.isArray(val)) return val.filter(Boolean) as T[];
+  if (val === null || val === undefined) return [];
+  if (Array.isArray(val)) {
+    return val.filter((x) => x !== null && x !== undefined) as T[];
+  }
   if (
     (typeof FileList !== 'undefined' && val instanceof FileList) ||
     (typeof NodeList !== 'undefined' && val instanceof NodeList)
   ) {
-    return Array.from(val as any).filter(Boolean) as unknown as T[];
+    return Array.from(val as any).filter((x) => x !== null && x !== undefined) as unknown as T[];
   }
-  if (val instanceof Map || val instanceof Set) {
-    return Array.from(val as any).filter(Boolean) as unknown as T[];
+  if (val instanceof Set) {
+    return Array.from(val).filter((x) => x !== null && x !== undefined) as T[];
+  }
+  if (val instanceof Map) {
+    return Array.from(val.values()).filter((x) => x !== null && x !== undefined) as T[];
+  }
+  if (val instanceof Float32Array || val instanceof Uint8Array || val instanceof Int16Array) {
+    // Не деструктируем бинарные буферы в массив, если это не требуется, но возвращаем как элементы если нужно
+    return Array.from(val) as unknown as T[];
   }
   if (typeof val === 'object') {
-    return Object.values(val).filter(Boolean) as T[];
+    return Object.values(val as Record<string, any>).filter((x) => x !== null && x !== undefined) as T[];
   }
   return [];
 }
 
 /**
  * Безопасно преобразует любое значение в гарантированный Map<K, V>.
- * 
- * Логика обработки:
- * 1. Если уже является Map -> возвращает сам экземпляр (или валидную копию)
- * 2. Если передан массив пар [ключ, значение] -> new Map(entries)
- * 3. Если передан обычный объект -> new Map(Object.entries(val))
- * 4. В остальных случаях -> пустой new Map<K, V>()
  */
 export function toSafeMap<K = any, V = any>(val: unknown): Map<K, V> {
   if (!val) {
@@ -63,7 +56,6 @@ export function toSafeMap<K = any, V = any>(val: unknown): Map<K, V> {
 
   if (Array.isArray(val)) {
     try {
-      // Проверяем, что элементы являются парами [key, value]
       const validEntries = val.filter((entry) => Array.isArray(entry) && entry.length >= 2);
       return new Map<K, V>(validEntries as [K, V][]);
     } catch {
