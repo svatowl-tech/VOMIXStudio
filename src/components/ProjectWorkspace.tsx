@@ -16,7 +16,7 @@ import {
   ProjectState,
   TrackMetadata
 } from '../services/ProjectManager';
-import { TrackState, MasterState } from '../audio/dawEngine';
+import { TrackState, MasterState, ClipConfig } from '../audio/dawEngine';
 import { toSafeArray } from '../utils/safeIterables';
 import {
   FolderOpen,
@@ -56,8 +56,8 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
 }) => {
   const [directoryContent, setDirectoryContent] = useState<ProjectDirectoryContent | null>(null);
   const [projectName, setProjectName] = useState<string>('Новый проект дубляжа');
-  const [projectId, setProjectId] = useState<string>(`proj_${Date.now()}`);
-  const [createdAt, setCreatedAt] = useState<string>(new Date().toISOString());
+  const [projectId, setProjectId] = useState<string>(() => `proj_${Date.now()}`);
+  const [createdAt, setCreatedAt] = useState<string>(() => new Date().toISOString());
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -142,14 +142,14 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
       setLastSavedAt(s.updatedAt);
       showStatus(
         'success',
-        `Проект "${s.name}" успешно загружен (${content.discoveredFiles.length} файлов обнаружено).`
+        `Проект "${s.name}" успешно загружен (${toSafeArray<DiscoveredFile>(content.discoveredFiles).length} файлов обнаружено).`
       );
       onLoadProjectState?.(s);
     } else {
       setProjectName(content.directoryName || 'Новый проект дубляжа');
       showStatus(
         'info',
-        `Папка "${content.directoryName}" открыта. Файлов: ${content.discoveredFiles.length}. Файл project.json будет создан при сохранении.`
+        `Папка "${content.directoryName}" открыта. Файлов: ${toSafeArray<DiscoveredFile>(content.discoveredFiles).length}. Файл project.json будет создан при сохранении.`
       );
     }
   };
@@ -160,17 +160,21 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
   const handleSaveProject = async () => {
     setIsSaving(true);
 
-    const trackMetas: TrackMetadata[] = toSafeArray<TrackState>(tracks).map((t) => ({
-      id: t.id,
-      name: t.name,
-      fileName: (t.clips || [])[0]?.name || `${t.name.toLowerCase().replace(/\s+/g, '_')}.wav`,
-      volumeDb: t.volumeDb,
-      pan: t.pan,
-      solo: t.solo,
-      mute: t.mute,
-      offsetSec: (t.clips || [])[0]?.offsetSamples ? (t.clips[0].offsetSamples / 48000) : 0,
-      color: t.color,
-    }));
+    const safeTracksList = toSafeArray<TrackState>(tracks);
+    const trackMetas: TrackMetadata[] = safeTracksList.map((t) => {
+      const safeClips = toSafeArray<ClipConfig>(t.clips);
+      return {
+        id: t.id,
+        name: t.name,
+        fileName: safeClips[0]?.name || `${t.name.toLowerCase().replace(/\s+/g, '_')}.wav`,
+        volumeDb: t.volumeDb,
+        pan: t.pan,
+        solo: t.solo,
+        mute: t.mute,
+        offsetSec: safeClips[0]?.offsetSamples ? (safeClips[0].offsetSamples / 48000) : 0,
+        color: t.color,
+      };
+    });
 
     const projectState: ProjectState = {
       id: projectId,
@@ -218,8 +222,9 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
     const audioFiles: { file: File; name: string }[] = [];
     let videoFile: File | undefined;
 
-    for (const df of directoryContent.discoveredFiles) {
-      if (df.fileObj) {
+    const safeDiscovered = toSafeArray<DiscoveredFile>(directoryContent.discoveredFiles);
+    for (const df of safeDiscovered) {
+      if (df && df.fileObj) {
         if (df.type === 'video' && !videoFile) {
           videoFile = df.fileObj;
         } else if (df.type === 'audio') {
@@ -397,10 +402,10 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
             <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-2">
               <FolderPlus className="w-4 h-4 text-emerald-400" />
               Обнаруженные медиафайлы в папке (
-              {directoryContent ? directoryContent.discoveredFiles.length : 0})
+              {directoryContent ? toSafeArray<DiscoveredFile>(directoryContent.discoveredFiles).length : 0})
             </h3>
 
-            {directoryContent && directoryContent.discoveredFiles.length > 0 && onImportMediaFiles && (
+            {directoryContent && toSafeArray<DiscoveredFile>(directoryContent.discoveredFiles).length > 0 && onImportMediaFiles && (
               <button
                 onClick={handleImportDiscoveredFiles}
                 className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 cursor-pointer bg-blue-500/10 px-2.5 py-1 rounded border border-blue-500/20"
@@ -466,7 +471,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
             setDirectoryContent(dir);
           }
         }}
-        existingTracks={tracks}
+        existingTracks={toSafeArray<TrackState>(tracks)}
         currentVideoFile={sourceVideoFile}
         onImportVideo={(file) => {
           if (onImportMediaFiles) {

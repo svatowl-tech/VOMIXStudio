@@ -133,6 +133,7 @@ export const MinimalStudio: React.FC = () => {
       setVocalBus(vocalBus);
     }
   }, [isInitialized, vocalBus, setVocalBus]);
+
   const [activeDspTrackId, setActiveDspTrackId] = useState<number | null>(null);
   const activeDspTrack = toSafeArray<TrackState>(tracks).find((t) => t && t.id === activeDspTrackId) || null;
   const [activeVstTrackId, setActiveVstTrackId] = useState<number | null>(null);
@@ -171,9 +172,9 @@ export const MinimalStudio: React.FC = () => {
   const [exportedVideoUrl, setExportedVideoUrl] = useState<string | null>(null);
   const [loudnessMatchReport, setLoudnessMatchReport] = useState<string | null>(null);
   const [showMediaImportModal, setShowMediaImportModal] = useState<boolean>(false);
-  const [subtitles, setSubtitles] = useState<SubtitleCue[]>([]);
+  const [subtitles, setSubtitles] = useState<SubtitleCue[]>(() => toSafeArray<SubtitleCue>([]));
   const [isWizardOpen, setIsWizardOpen] = useState<boolean>(false);
-  const [detectedCollisions, setDetectedCollisions] = useState<ClipCollisionInfo[]>([]);
+  const [detectedCollisions, setDetectedCollisions] = useState<ClipCollisionInfo[]>(() => toSafeArray<ClipCollisionInfo>([]));
 
   // Refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -268,6 +269,7 @@ export const MinimalStudio: React.FC = () => {
 
     autoSaveTimeoutRef.current = window.setTimeout(async () => {
       try {
+        const safeTracksList = toSafeArray<TrackState>(tracks);
         const projectState: ProjectState = {
           id: `proj_${Date.now()}`,
           name: activeDirName || 'Автосохраненный проект',
@@ -283,17 +285,20 @@ export const MinimalStudio: React.FC = () => {
                 fileSize: videoFile.size
               }
             : null,
-          tracks: toSafeArray<TrackState>(tracks).map((t) => ({
-            id: t.id,
-            name: t.name,
-            fileName: (t.clips || [])[0]?.name || '',
-            volumeDb: t.volumeDb,
-            pan: t.pan,
-            solo: t.solo,
-            mute: t.mute,
-            offsetSec: (t.clips || [])[0]?.offsetSamples ? (t.clips[0].offsetSamples / 48000) : 0,
-            color: t.color
-          })),
+          tracks: safeTracksList.map((t) => {
+            const safeClips = toSafeArray<ClipConfig>(t.clips);
+            return {
+              id: t.id,
+              name: t.name,
+              fileName: safeClips[0]?.name || '',
+              volumeDb: t.volumeDb,
+              pan: t.pan,
+              solo: t.solo,
+              mute: t.mute,
+              offsetSec: safeClips[0]?.offsetSamples ? (safeClips[0].offsetSamples / 48000) : 0,
+              color: t.color
+            };
+          }),
           master: {
             volumeDb: master.volumeDb,
             pan: master.pan,
@@ -334,8 +339,10 @@ export const MinimalStudio: React.FC = () => {
         await initAudioEngine();
       }
 
+      const discoveredFiles = toSafeArray(content.discoveredFiles);
+
       // 1. Автоматическое обнаружение видеофайла
-      const discoveredVideo = content.discoveredFiles.find((f) => f.type === 'video');
+      const discoveredVideo = discoveredFiles.find((f) => f && f.type === 'video');
       if (discoveredVideo && discoveredVideo.fileObj) {
         setVideoFile(discoveredVideo.fileObj);
         setVideoSrc(URL.createObjectURL(discoveredVideo.fileObj));
@@ -354,12 +361,12 @@ export const MinimalStudio: React.FC = () => {
       }
 
       // 2. Обнаружение аудиофайлов и динамическое расширение до 20-25+ дорожек
-      const audioFiles = content.discoveredFiles.filter((f) => f.type === 'audio');
+      const audioFiles = discoveredFiles.filter((f) => f && f.type === 'audio');
       if (audioFiles.length > 0) {
         setStatusMessage(`C++ ресемплинг ${audioFiles.length} аудиодорожек к 48 кГц...`);
 
         // Динамически увеличиваем количество дорожек под все найденные файлы (до 32)
-        let workingTracks = [...tracks];
+        let workingTracks = [...toSafeArray<TrackState>(tracks)];
         while (workingTracks.length < audioFiles.length && workingTracks.length < 32) {
           const nextId = workingTracks.length + 1;
           workingTracks.push(createNewTrack(nextId, `Dubber ${nextId}`));
@@ -416,11 +423,11 @@ export const MinimalStudio: React.FC = () => {
 
       // 3. Восстановление сохраненного состояния project/project.json
       if (content.savedState) {
-        const savedTracks = content.savedState.tracks;
-        if (savedTracks && savedTracks.length > 0) {
+        const savedTracks = toSafeArray(content.savedState.tracks);
+        if (savedTracks.length > 0) {
           setTracks((prev) =>
-            prev.map((t) => {
-              const matched = savedTracks.find((st) => st.id === t.id || st.name === t.name);
+            toSafeArray<TrackState>(prev).map((t) => {
+              const matched = savedTracks.find((st) => st && (st.id === t.id || st.name === t.name));
               if (matched) {
                 setTrackVolume(t.id, matched.volumeDb);
                 setTrackPan(t.id, matched.pan);
@@ -474,15 +481,16 @@ export const MinimalStudio: React.FC = () => {
         await initAudioEngine();
       }
 
-      const discoveredVideo = content.discoveredFiles.find((f) => f.type === 'video');
+      const discoveredFiles = toSafeArray(content.discoveredFiles);
+      const discoveredVideo = discoveredFiles.find((f) => f && f.type === 'video');
       if (discoveredVideo && discoveredVideo.fileObj) {
         setVideoFile(discoveredVideo.fileObj);
         setVideoSrc(URL.createObjectURL(discoveredVideo.fileObj));
       }
 
-      const audioFiles = content.discoveredFiles.filter((f) => f.type === 'audio');
+      const audioFiles = discoveredFiles.filter((f) => f && f.type === 'audio');
       if (audioFiles.length > 0) {
-        let workingTracks = [...tracks];
+        let workingTracks = [...toSafeArray<TrackState>(tracks)];
         while (workingTracks.length < audioFiles.length && workingTracks.length < 32) {
           const nextId = workingTracks.length + 1;
           workingTracks.push(createNewTrack(nextId, `Dubber ${nextId}`));
@@ -559,11 +567,13 @@ export const MinimalStudio: React.FC = () => {
       const calcDur = totalFrames / 48000;
       setVideoDuration((prev) => (prev > 0 ? prev : calcDur));
 
-      const targetTrackId = tracks.length > 0 ? tracks[0].id : 1;
+      const safeTracks = toSafeArray<TrackState>(tracks);
+      const targetTrackId = safeTracks.length > 0 ? safeTracks[0].id : 1;
       const clipId = Date.now();
 
       setTracks((prev) => {
-        const tid = prev.length > 0 ? prev[0].id : 1;
+        const safePrev = toSafeArray<TrackState>(prev);
+        const tid = safePrev.length > 0 ? safePrev[0].id : 1;
         const videoClip = {
           id: clipId,
           name: `Оригинал: ${file.name}`,
@@ -577,9 +587,9 @@ export const MinimalStudio: React.FC = () => {
           color: '#06b6d4'
         };
 
-        const exists = prev.some((t) => t.id === tid);
+        const exists = safePrev.some((t) => t.id === tid);
         if (exists) {
-          return prev.map((t) =>
+          return safePrev.map((t) =>
             t.id === tid
               ? {
                   ...t,
@@ -593,7 +603,7 @@ export const MinimalStudio: React.FC = () => {
           const newTr = createNewTrack(tid, `Оригинал [${file.name}]`, '#06b6d4');
           newTr.isOriginalAudio = true;
           newTr.clips = [videoClip];
-          return [...prev, newTr];
+          return [...safePrev, newTr];
         }
       });
 
@@ -772,7 +782,7 @@ export const MinimalStudio: React.FC = () => {
       color: '#10b981'
     };
 
-    const updatedTracks = tracks.map((t) => {
+    const updatedTracks = toSafeArray<TrackState>(tracks).map((t) => {
       if (t.id === trackId) {
         return {
           ...t,
@@ -816,7 +826,7 @@ export const MinimalStudio: React.FC = () => {
       setDbStats(stats);
 
       setTracks((prev) =>
-        prev.map((t) =>
+        toSafeArray<TrackState>(prev).map((t) =>
           t.id === trackId
             ? {
                 ...t,
@@ -860,10 +870,12 @@ export const MinimalStudio: React.FC = () => {
       const calcDur = totalFrames / 48000;
       setVideoDuration((prev) => (prev > 0 ? prev : calcDur));
       const clipId = Date.now();
-      const targetId = tracks.length > 0 ? tracks[0].id : 1;
+      const safeTracks = toSafeArray<TrackState>(tracks);
+      const targetId = safeTracks.length > 0 ? safeTracks[0].id : 1;
 
       setTracks((prev) => {
-        const tid = prev.length > 0 ? prev[0].id : 1;
+        const safePrev = toSafeArray<TrackState>(prev);
+        const tid = safePrev.length > 0 ? safePrev[0].id : 1;
         const videoClip = {
           id: clipId,
           name: `Audio_${file.name}`,
@@ -877,9 +889,9 @@ export const MinimalStudio: React.FC = () => {
           color: '#06b6d4'
         };
 
-        const exists = prev.some((t) => t.id === tid);
+        const exists = safePrev.some((t) => t.id === tid);
         if (exists) {
-          return prev.map((t) =>
+          return safePrev.map((t) =>
             t.id === tid
               ? {
                   ...t,
@@ -893,7 +905,7 @@ export const MinimalStudio: React.FC = () => {
           const newTr = createNewTrack(tid, `Оригинал [${file.name}]`, '#06b6d4');
           newTr.isOriginalAudio = true;
           newTr.clips = [videoClip];
-          return [...prev, newTr];
+          return [...safePrev, newTr];
         }
       });
 
@@ -967,13 +979,12 @@ export const MinimalStudio: React.FC = () => {
     });
 
     uploadRawPCMToTrack(pcmBuffer, targetTrackId, clipId, 0, 1.0, 0.0, true);
-
     triggerAutoSave();
   };
 
   const handleModalImportSubtitles = async (cues: SubtitleCue[], sourceFileName?: string) => {
-    setSubtitles(cues);
-    setStatusMessage(`Субтитры [${sourceFileName || 'файл'}] импортированы: ${cues.length} реплик.`);
+    setSubtitles(toSafeArray<SubtitleCue>(cues));
+    setStatusMessage(`Субтитры [${sourceFileName || 'файл'}] импортированы: ${toSafeArray<SubtitleCue>(cues).length} реплик.`);
     triggerAutoSave();
   };
 
@@ -990,7 +1001,7 @@ export const MinimalStudio: React.FC = () => {
 
   // Обновление DSP настроек дорожки из C++ DSP рэка
   const handleUpdateDspTrack = (updated: TrackState) => {
-    setTracks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+    setTracks((prev) => toSafeArray<TrackState>(prev).map((t) => (t.id === updated.id ? updated : t)));
 
     // Передаем параметры в реальном времени в AudioWorklet (онлайн-обработка)
     setTrackDsp(updated.id, {
@@ -1018,22 +1029,25 @@ export const MinimalStudio: React.FC = () => {
 
   // --- VST Инсерты и Обработка цепочек эффектов ---
   const handleUpdateTrackVstChain = (trackId: number, vstPlugins: VSTPluginInstance[]) => {
+    const safePlugins = toSafeArray<VSTPluginInstance>(vstPlugins);
     setTracks((prev) =>
-      prev.map((t) => (t.id === trackId ? { ...t, vstPlugins } : t))
+      toSafeArray<TrackState>(prev).map((t) => (t.id === trackId ? { ...t, vstPlugins: safePlugins } : t))
     );
-    setTrackVstChain(trackId, vstPlugins);
+    setTrackVstChain(trackId, safePlugins);
     triggerAutoSave();
   };
 
   const handleUpdateVocalBusVstChain = (vstPlugins: VSTPluginInstance[]) => {
-    setVocalBusState((prev) => ({ ...prev, vstPlugins }));
-    setVocalBusVstChain(vstPlugins);
+    const safePlugins = toSafeArray<VSTPluginInstance>(vstPlugins);
+    setVocalBusState((prev) => ({ ...prev, vstPlugins: safePlugins }));
+    setVocalBusVstChain(safePlugins);
     triggerAutoSave();
   };
 
   const handleUpdateMasterVstChain = (vstPlugins: VSTPluginInstance[]) => {
-    setMaster((prev) => ({ ...prev, vstPlugins }));
-    setMasterVstChain(vstPlugins);
+    const safePlugins = toSafeArray<VSTPluginInstance>(vstPlugins);
+    setMaster((prev) => ({ ...prev, vstPlugins: safePlugins }));
+    setMasterVstChain(safePlugins);
     triggerAutoSave();
   };
 
@@ -1046,9 +1060,9 @@ export const MinimalStudio: React.FC = () => {
   ) => {
     if (target === 'track' && trackId !== undefined) {
       setTracks((prev) =>
-        prev.map((t) => {
+        toSafeArray<TrackState>(prev).map((t) => {
           if (t.id !== trackId) return t;
-          const plugins = (t.vstPlugins || []).map((p) =>
+          const plugins = toSafeArray<VSTPluginInstance>(t.vstPlugins).map((p) =>
             p.instanceId === instanceId
               ? { ...p, parameters: { ...p.parameters, [paramId]: value } }
               : p
@@ -1058,7 +1072,7 @@ export const MinimalStudio: React.FC = () => {
       );
     } else if (target === 'vocalBus') {
       setVocalBusState((prev) => {
-        const plugins = (prev.vstPlugins || []).map((p) =>
+        const plugins = toSafeArray<VSTPluginInstance>(prev.vstPlugins).map((p) =>
           p.instanceId === instanceId
             ? { ...p, parameters: { ...p.parameters, [paramId]: value } }
             : p
@@ -1067,7 +1081,7 @@ export const MinimalStudio: React.FC = () => {
       });
     } else if (target === 'master') {
       setMaster((prev) => {
-        const plugins = (prev.vstPlugins || []).map((p) =>
+        const plugins = toSafeArray<VSTPluginInstance>(prev.vstPlugins).map((p) =>
           p.instanceId === instanceId
             ? { ...p, parameters: { ...p.parameters, [paramId]: value } }
             : p
@@ -1086,9 +1100,9 @@ export const MinimalStudio: React.FC = () => {
   ) => {
     if (target === 'track' && trackId !== undefined) {
       setTracks((prev) =>
-        prev.map((t) => {
+        toSafeArray<TrackState>(prev).map((t) => {
           if (t.id !== trackId) return t;
-          const plugins = (t.vstPlugins || []).map((p) =>
+          const plugins = toSafeArray<VSTPluginInstance>(t.vstPlugins).map((p) =>
             p.instanceId === instanceId ? { ...p, enabled } : p
           );
           return { ...t, vstPlugins: plugins };
@@ -1096,14 +1110,14 @@ export const MinimalStudio: React.FC = () => {
       );
     } else if (target === 'vocalBus') {
       setVocalBusState((prev) => {
-        const plugins = (prev.vstPlugins || []).map((p) =>
+        const plugins = toSafeArray<VSTPluginInstance>(prev.vstPlugins).map((p) =>
           p.instanceId === instanceId ? { ...p, enabled } : p
         );
         return { ...prev, vstPlugins: plugins };
       });
     } else if (target === 'master') {
       setMaster((prev) => {
-        const plugins = (prev.vstPlugins || []).map((p) =>
+        const plugins = toSafeArray<VSTPluginInstance>(prev.vstPlugins).map((p) =>
           p.instanceId === instanceId ? { ...p, enabled } : p
         );
         return { ...prev, vstPlugins: plugins };
@@ -1120,9 +1134,9 @@ export const MinimalStudio: React.FC = () => {
   ) => {
     if (target === 'track' && trackId !== undefined) {
       setTracks((prev) =>
-        prev.map((t) => {
+        toSafeArray<TrackState>(prev).map((t) => {
           if (t.id !== trackId) return t;
-          const plugins = (t.vstPlugins || []).map((p) =>
+          const plugins = toSafeArray<VSTPluginInstance>(t.vstPlugins).map((p) =>
             p.instanceId === instanceId ? { ...p, wetDry } : p
           );
           return { ...t, vstPlugins: plugins };
@@ -1130,14 +1144,14 @@ export const MinimalStudio: React.FC = () => {
       );
     } else if (target === 'vocalBus') {
       setVocalBusState((prev) => {
-        const plugins = (prev.vstPlugins || []).map((p) =>
+        const plugins = toSafeArray<VSTPluginInstance>(prev.vstPlugins).map((p) =>
           p.instanceId === instanceId ? { ...p, wetDry } : p
         );
         return { ...prev, vstPlugins: plugins };
       });
     } else if (target === 'master') {
       setMaster((prev) => {
-        const plugins = (prev.vstPlugins || []).map((p) =>
+        const plugins = toSafeArray<VSTPluginInstance>(prev.vstPlugins).map((p) =>
           p.instanceId === instanceId ? { ...p, wetDry } : p
         );
         return { ...prev, vstPlugins: plugins };
@@ -1152,8 +1166,8 @@ export const MinimalStudio: React.FC = () => {
 
     // 1. Применяем DSP и VST цепочки к дорожкам
     setTracks((prevTracks) => {
-      const updated = prevTracks.map((t, idx) => {
-        const custom = preset.customTrackChains?.find((c) => c.trackIndex === idx);
+      const updated = toSafeArray<TrackState>(prevTracks).map((t, idx) => {
+        const custom = toSafeArray(preset.customTrackChains).find((c) => c.trackIndex === idx);
         const newEq = custom?.dsp?.eq
           ? JSON.parse(JSON.stringify(custom.dsp.eq))
           : preset.trackDspTemplate?.eq
@@ -1183,7 +1197,7 @@ export const MinimalStudio: React.FC = () => {
           ? JSON.parse(JSON.stringify(custom.vstPlugins))
           : preset.trackVstChain
           ? JSON.parse(JSON.stringify(preset.trackVstChain))
-          : (t.vstPlugins || []);
+          : toSafeArray(t.vstPlugins);
 
         return {
           ...t,
@@ -1197,7 +1211,7 @@ export const MinimalStudio: React.FC = () => {
       });
 
       // Синхронизируем с AudioWorklet
-      updated.forEach((t) => {
+      toSafeArray(updated).forEach((t) => {
         setTrackDsp(t.id, {
           eq: t.eq,
           compressor: t.compressor,
@@ -1205,7 +1219,7 @@ export const MinimalStudio: React.FC = () => {
           noiseGate: t.noiseGate,
           deEsser: t.deEsser
         });
-        setTrackVstChain(t.id, t.vstPlugins || []);
+        setTrackVstChain(t.id, toSafeArray(t.vstPlugins));
       });
 
       return updated;
@@ -1216,7 +1230,7 @@ export const MinimalStudio: React.FC = () => {
       const newVocalBusDsp = JSON.parse(JSON.stringify(preset.vocalBusSettings.dsp));
       const newVocalBusPlugins = preset.vocalBusSettings.vstChain
         ? JSON.parse(JSON.stringify(preset.vocalBusSettings.vstChain))
-        : (vocalBus.vstPlugins || []);
+        : toSafeArray(vocalBus.vstPlugins);
 
       const newVocalBus: VocalBusState = {
         ...vocalBus,
@@ -1234,7 +1248,7 @@ export const MinimalStudio: React.FC = () => {
     if (preset.masterSettings) {
       const newMasterPlugins = preset.masterSettings.vstChain
         ? JSON.parse(JSON.stringify(preset.masterSettings.vstChain))
-        : (master.vstPlugins || []);
+        : toSafeArray(master.vstPlugins);
 
       const newMaster: MasterState = {
         ...master,
@@ -1255,23 +1269,24 @@ export const MinimalStudio: React.FC = () => {
 
   // Обновление дорожки и клипов из TimelineView (Сплит, Time Stretch, перемещение клипов)
   const handleUpdateTrack = (updatedTrack: TrackState) => {
-    setTracks((prev) => prev.map((t) => (t.id === updatedTrack.id ? updatedTrack : t)));
+    setTracks((prev) => toSafeArray<TrackState>(prev).map((t) => (t.id === updatedTrack.id ? updatedTrack : t)));
 
     // Синхронизируем клипы с AudioWorklet и C++ ядром
-    syncTrackClips(updatedTrack.id, updatedTrack.clips);
+    syncTrackClips(updatedTrack.id, toSafeArray(updatedTrack.clips));
 
     triggerAutoSave();
   };
 
   // --- 10. Шаг 3: Автоматическое выравнивание громкости (C++ Loudness Match EBU R128) ---
   const handleAutoLoudnessMatch = (targetRmsDb = -18.0) => {
-    const result = performLoudnessMatching(tracks, targetRmsDb, -1.0);
+    const safeTracks = toSafeArray<TrackState>(tracks);
+    const result = performLoudnessMatching(safeTracks, targetRmsDb, -1.0);
     setTracks(result.updatedTracks);
     systemLogger.info('C++ WASM', `Выполнено выравнивание громкости дорожек (цель: ${targetRmsDb} dBFS True Peak ≤ -1.0)`, {
       adjustments: result.adjustments
     });
 
-    const activeAdjustments = result.adjustments.filter((a) => !a.isSilent);
+    const activeAdjustments = toSafeArray(result.adjustments).filter((a) => !a.isSilent);
     if (activeAdjustments.length === 0) {
       setLoudnessMatchReport('Нет активных аудиодорожек с сигналом для выравнивания.');
     } else {
@@ -1299,7 +1314,8 @@ export const MinimalStudio: React.FC = () => {
     }
 
     // Краевой случай 2: Отсутствие аудиоклипов на дорожках
-    const hasActiveClips = tracks.some((t) => t.clips && t.clips.length > 0 && t.clips.some((c) => c.lengthSamples > 0));
+    const safeTracks = toSafeArray<TrackState>(tracks);
+    const hasActiveClips = safeTracks.some((t) => toSafeArray(t.clips).length > 0 && toSafeArray(t.clips).some((c) => c.lengthSamples > 0));
     if (!hasActiveClips) {
       alert('На таймлайне нет аудиодорожек или клипов для сведения. Пожалуйста, догрузите аудиофайлы или выберите рабочую папку.');
       setShowMediaImportModal(true);
@@ -1314,18 +1330,18 @@ export const MinimalStudio: React.FC = () => {
   const handleRunAIPipelineAndNorm = async (
     onProgress?: (msg: string, percent: number) => void
   ): Promise<TrackState[]> => {
-    let currentTracks = [...tracks];
+    let currentTracks = [...toSafeArray<TrackState>(tracks)];
     const configs = globalAIPipelineStore.getConfigs();
     
     // Сбор дорожек при разделении
     const newTracksToAdd: TrackState[] = [];
     
     const activeConfigs = Object.values(configs).filter(
-      (c) => c.enabled && (c.steps || []).filter((s) => s.enabled).length > 0
+      (c) => c.enabled && toSafeArray(c.steps).filter((s) => s.enabled).length > 0
     );
     
     const totalStepsToRun = activeConfigs.reduce(
-      (acc, c) => acc + (c.steps || []).filter((s) => s.enabled).length,
+      (acc, c) => acc + toSafeArray(c.steps).filter((s) => s.enabled).length,
       0
     );
     
@@ -1339,15 +1355,15 @@ export const MinimalStudio: React.FC = () => {
     try {
       const normResult = MediaNormalizer.autoMatchTrackVolumes(currentTracks, -18.0, -1.0);
       const normalizedTracks: TrackState[] = [];
-      for (const track of currentTracks) {
-        const adj = normResult.adjustments.find((a) => a.trackId === track.id);
+      for (const track of toSafeArray<TrackState>(currentTracks)) {
+        const adj = toSafeArray(normResult.adjustments).find((a) => a.trackId === track.id);
         if (!adj || adj.isSilent || Math.abs(adj.gainChangeDb) < 0.01) {
           normalizedTracks.push({ ...track, volumeDb: 0.0 });
           continue;
         }
 
         const updatedClips: ClipConfig[] = [];
-        for (const clip of (track.clips || [])) {
+        for (const clip of toSafeArray<ClipConfig>(track.clips)) {
           let newBuf = clip.buffer;
           let newUntrimmed = clip.untrimmedBuffer;
 
@@ -1387,7 +1403,7 @@ export const MinimalStudio: React.FC = () => {
       setTracks(currentTracks);
       syncAllTracks(currentTracks);
       
-      const summary = normResult.adjustments
+      const summary = toSafeArray(normResult.adjustments)
         .map((a) => `${a.trackName}: ${a.gainChangeDb >= 0 ? '+' : ''}${a.gainChangeDb.toFixed(1)} dB`)
         .join(' | ');
       setLoudnessMatchReport(`C++ выравнивание громкости (-18 dBFS): ${summary}`);
@@ -1399,16 +1415,17 @@ export const MinimalStudio: React.FC = () => {
       onProgress(`Начало AI-обработки для ${activeConfigs.length} дорожек на основе нормализованных файлов...`, 5);
     }
     
-    for (const track of currentTracks) {
+    for (const track of toSafeArray<TrackState>(currentTracks)) {
       const config = configs[track.id];
       if (!config || !config.enabled) continue;
       
-      const activeSteps = (config.steps || []).filter((s) => s.enabled);
+      const activeSteps = toSafeArray(config.steps).filter((s) => s.enabled);
       if (activeSteps.length === 0) continue;
       
       // Получаем буфер клипа
-      if (!track.clips || track.clips.length === 0) continue;
-      const clip = track.clips[0];
+      const safeClips = toSafeArray<ClipConfig>(track.clips);
+      if (safeClips.length === 0) continue;
+      const clip = safeClips[0];
       const pcm = clip.buffer;
       if (!pcm || pcm.length === 0) continue;
       
@@ -1472,7 +1489,7 @@ export const MinimalStudio: React.FC = () => {
           });
         } else if (step.purpose === 'spectral_match') {
           const refTrack = currentTracks[0] || track;
-          const refClip = refTrack.clips?.[0];
+          const refClip = toSafeArray<ClipConfig>(refTrack.clips)[0];
           const refPcm = refClip?.buffer || pcm;
           const specRes = await globalAudioAICleanupEngine.matchVocalCurves(
             refPcm,
@@ -1514,10 +1531,11 @@ export const MinimalStudio: React.FC = () => {
       }
       
       if (config.outputMode === 'replace') {
-        currentTracks = currentTracks.map((t) => {
+        currentTracks = toSafeArray<TrackState>(currentTracks).map((t) => {
           if (t.id === track.id) {
+            const currentClip = toSafeArray<ClipConfig>(t.clips)[0] || clip;
             const updatedClip = {
-              ...t.clips[0],
+              ...currentClip,
               name: `${clip.name} [AI Processed]`,
               buffer: currentPcm,
               lengthSamples: Math.floor(currentPcm.length / 2)
@@ -1579,7 +1597,7 @@ export const MinimalStudio: React.FC = () => {
       }
     }
     
-    const finalTracksList = [...currentTracks, ...newTracksToAdd];
+    const finalTracksList = [...toSafeArray<TrackState>(currentTracks), ...newTracksToAdd];
     setTracks(finalTracksList);
     syncAllTracks(finalTracksList);
     
@@ -1599,9 +1617,10 @@ export const MinimalStudio: React.FC = () => {
     setExportedVideoBlob(null);
     setExportedVideoUrl(null);
 
+    const safeTracks = toSafeArray<TrackState>(updatedTracks);
     const renderDuration = videoDuration > 0 ? videoDuration : undefined;
     const renderResult = await globalRenderManager.renderMasterMix(
-      updatedTracks,
+      safeTracks,
       master,
       48000,
       24,
@@ -1622,13 +1641,12 @@ export const MinimalStudio: React.FC = () => {
       };
     }
 
-    const timelineHasOriginalAudio = updatedTracks.some(
+    const timelineHasOriginalAudio = safeTracks.some(
       (t) =>
         (t.name.toLowerCase().includes('видео') ||
           t.name.toLowerCase().includes('video') ||
           t.name.toLowerCase().includes('оригинал')) &&
-        t.clips &&
-        t.clips.length > 0 &&
+        toSafeArray(t.clips).length > 0 &&
         !t.mute
     );
 
@@ -1677,6 +1695,8 @@ export const MinimalStudio: React.FC = () => {
     const newTime = Math.max(0, Math.min(videoDuration, currentTimeSec + deltaFrames * frameTime));
     seek(newTime);
   };
+
+  const safeTracksList = toSafeArray<TrackState>(tracks);
 
   return (
     <div className="space-y-6 animate-fadeIn pb-12">
@@ -2045,7 +2065,7 @@ export const MinimalStudio: React.FC = () => {
       {/* 2.5. МУЛЬТИТРЕК ТАЙМЛАЙН & ВОЛНОВЫЕ ФОРМЫ (ВИДЕОДОРОЖКА, СУБТИТРЫ, C++ STRIP SILENCE, TIME STRETCH WSOLA) */}
       <div className="bg-[#0f1422] border border-[#1e293b] p-5 rounded-2xl shadow-xl space-y-4">
         <TimelineView
-          tracks={tracks}
+          tracks={safeTracksList}
           currentTimeSec={currentTimeSec}
           totalTimeSec={videoDuration > 0 ? videoDuration : 30}
           isPlaying={isPlaying}
@@ -2093,12 +2113,12 @@ export const MinimalStudio: React.FC = () => {
             <button
               id="btn-add-track"
               onClick={handleAddNewTrack}
-              disabled={tracks.length >= 32}
+              disabled={safeTracksList.length >= 32}
               className="px-3 py-2 bg-slate-900 hover:bg-slate-800 text-emerald-400 border border-emerald-800/80 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
               title="Добавить пустую аудиодорожку (до 32)"
             >
               <Plus size={14} />
-              + Новая дорожка ({tracks.length}/32)
+              + Новая дорожка ({safeTracksList.length}/32)
             </button>
 
             <button
@@ -2145,13 +2165,14 @@ export const MinimalStudio: React.FC = () => {
 
         {/* Сетка полос микшера */}
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 pt-2">
-          {toSafeArray<TrackState>(tracks).map((track) => {
+          {safeTracksList.map((track) => {
             const meterData = trackMeters?.get?.(track.id);
             const peakDbL = meterData ? MediaNormalizer.linearToDb(meterData.peakL) : -60;
             const peakDbR = meterData ? MediaNormalizer.linearToDb(meterData.peakR) : -60;
             const isClipping = (meterData?.peakL || 0) >= 0.9999 || (meterData?.peakR || 0) >= 0.9999;
             const safeClips = toSafeArray<ClipConfig>(track.clips);
             const hasClips = safeClips.length > 0;
+            const safeVstPlugins = toSafeArray<VSTPluginInstance>(track.vstPlugins);
 
             return (
               <div
@@ -2180,7 +2201,7 @@ export const MinimalStudio: React.FC = () => {
                       <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-900 text-slate-400 border border-slate-800">
                         CH {track.id}
                       </span>
-                      {tracks.length > 1 && (
+                      {safeTracksList.length > 1 && (
                         <button
                           onClick={() => handleRemoveTrack(track.id)}
                           className="p-1 text-slate-500 hover:text-rose-400 hover:bg-slate-900 rounded transition-all cursor-pointer"
@@ -2196,8 +2217,8 @@ export const MinimalStudio: React.FC = () => {
                   <div className="flex items-center justify-between gap-2 mb-3 bg-slate-950/60 p-2 rounded-lg border border-slate-800/80">
                     <div className="text-[11px] truncate flex-1">
                       {hasClips ? (
-                        <span className="text-emerald-400 font-medium truncate block" title={track.clips[0].name}>
-                          {track.clips[0].name} ({((track.clips[0].lengthSamples || 0) / 48000).toFixed(1)}с)
+                        <span className="text-emerald-400 font-medium truncate block" title={safeClips[0].name}>
+                          {safeClips[0].name} ({((safeClips[0].lengthSamples || 0) / 48000).toFixed(1)}с)
                         </span>
                       ) : (
                         <span className="text-slate-500">Нет аудиофайла</span>
@@ -2269,7 +2290,7 @@ export const MinimalStudio: React.FC = () => {
                     </div>
 
                     <span className="text-[10px] px-1.5 py-0.2 rounded font-mono bg-violet-950 text-violet-300 border border-violet-800">
-                      {track.vstPlugins && track.vstPlugins.length > 0 ? `${track.vstPlugins.length} плаг.` : 'Пусто'}
+                      {safeVstPlugins.length > 0 ? `${safeVstPlugins.length} плаг.` : 'Пусто'}
                     </span>
                   </button>
 
@@ -2425,7 +2446,7 @@ export const MinimalStudio: React.FC = () => {
       <div className="pt-2">
         <DubbingAIStudio
           mode="matrix-only"
-          tracks={tracks}
+          tracks={safeTracksList}
           currentTimeSec={currentTimeSec}
           onSeek={seek}
           onAddStemTracks={handleAddStemTracks}
@@ -2456,7 +2477,7 @@ export const MinimalStudio: React.FC = () => {
             </div>
 
             <VSTRackSlot
-              plugins={activeVstTrack.vstPlugins || []}
+              plugins={toSafeArray(activeVstTrack.vstPlugins)}
               title={`Инсерты: ${activeVstTrack.name}`}
               badge={`CH ${activeVstTrack.id}`}
               color={activeVstTrack.color || '#8b5cf6'}
@@ -2473,7 +2494,7 @@ export const MinimalStudio: React.FC = () => {
       {activeDspTrack && (
         <TrackDSPPanel
           track={activeDspTrack}
-          allTracks={tracks}
+          allTracks={safeTracksList}
           onUpdateTrack={handleUpdateDspTrack}
           onClose={() => setActiveDspTrackId(null)}
         />
@@ -2483,7 +2504,7 @@ export const MinimalStudio: React.FC = () => {
       <MediaImportModal
         isOpen={showMediaImportModal}
         onClose={() => setShowMediaImportModal(false)}
-        existingTracks={tracks}
+        existingTracks={safeTracksList}
         currentVideoFile={videoFile}
         onResetProjectState={handleResetMinimalProjectState}
         onImportVideo={handleModalImportVideo}
@@ -2495,7 +2516,7 @@ export const MinimalStudio: React.FC = () => {
       <VoiceoverMixWizardModal
         isOpen={isWizardOpen}
         onClose={() => setIsWizardOpen(false)}
-        tracks={tracks}
+        tracks={safeTracksList}
         setTracks={setTracks}
         vocalBus={vocalBus}
         setVocalBus={setVocalBus}

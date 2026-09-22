@@ -15,6 +15,8 @@
 /**
  * Безопасно преобразует любой входной параметр (Array, FileList, Map, Set, null, undefined) в чистый массив T[].
  */
+export function toSafeArray<T>(val: readonly T[] | T[] | null | undefined): T[];
+export function toSafeArray<T = any>(val: unknown): T[];
 export function toSafeArray<T>(val: unknown): T[] {
   if (val === null || val === undefined) return [];
   if (Array.isArray(val)) {
@@ -33,7 +35,6 @@ export function toSafeArray<T>(val: unknown): T[] {
     return Array.from(val.values()).filter((x) => x !== null && x !== undefined) as T[];
   }
   if (val instanceof Float32Array || val instanceof Uint8Array || val instanceof Int16Array) {
-    // Не деструктируем бинарные буферы в массив, если это не требуется, но возвращаем как элементы если нужно
     return Array.from(val) as unknown as T[];
   }
   if (typeof val === 'object') {

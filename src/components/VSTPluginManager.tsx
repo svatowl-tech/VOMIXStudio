@@ -35,12 +35,13 @@ import {
 } from '../audio/vstTypes';
 import { globalVSTHostEngine } from '../services/VSTHostEngine';
 import { systemLogger } from '../services/SystemLogger';
+import { toSafeArray } from '../utils/safeIterables';
 
 export const VSTPluginManager: React.FC = () => {
   // Каталог плагинов и статистика сканирования
-  const [catalog, setCatalog] = useState<VSTPluginDefinition[]>(() => globalVSTHostEngine.getAllPlugins());
+  const [catalog, setCatalog] = useState<VSTPluginDefinition[]>(() => toSafeArray<VSTPluginDefinition>(globalVSTHostEngine.getAllPlugins()));
   const [scanStats, setScanStats] = useState<VSTScanStats | null>(() => globalVSTHostEngine.getLastStats());
-  const [scanDirs, setScanDirs] = useState<VSTScanDirectory[]>(() => globalVSTHostEngine.getScanDirectories());
+  const [scanDirs, setScanDirs] = useState<VSTScanDirectory[]>(() => toSafeArray<VSTScanDirectory>(globalVSTHostEngine.getScanDirectories()));
   const [isScanning, setIsScanning] = useState(false);
   const [scanStatusText, setScanStatusText] = useState('');
   const [customFolderPath, setCustomFolderPath] = useState('');
@@ -52,9 +53,9 @@ export const VSTPluginManager: React.FC = () => {
   // Подписка на обновления хоста плагинов
   useEffect(() => {
     const unsubHost = globalVSTHostEngine.subscribe(() => {
-      setCatalog(globalVSTHostEngine.getAllPlugins());
+      setCatalog(toSafeArray<VSTPluginDefinition>(globalVSTHostEngine.getAllPlugins()));
       setScanStats(globalVSTHostEngine.getLastStats());
-      setScanDirs(globalVSTHostEngine.getScanDirectories());
+      setScanDirs(toSafeArray<VSTScanDirectory>(globalVSTHostEngine.getScanDirectories()));
     });
     return unsubHost;
   }, []);
@@ -73,8 +74,8 @@ export const VSTPluginManager: React.FC = () => {
         setScanStatusText(msg);
       });
       setScanStats(stats);
-      setCatalog(globalVSTHostEngine.getAllPlugins());
-      setScanDirs([...globalVSTHostEngine.getScanDirectories()]);
+      setCatalog(toSafeArray<VSTPluginDefinition>(globalVSTHostEngine.getAllPlugins()));
+      setScanDirs(toSafeArray<VSTScanDirectory>(globalVSTHostEngine.getScanDirectories()));
       showNotice(`Сканирование завершено: обнаружено ${stats.totalPlugins} плагинов!`);
     } catch (err: any) {
       showNotice(`Ошибка сканирования: ${err.message}`);
@@ -89,7 +90,7 @@ export const VSTPluginManager: React.FC = () => {
     e.preventDefault();
     if (!customFolderPath.trim()) return;
     globalVSTHostEngine.addScanDirectory(customFolderPath.trim());
-    setScanDirs([...globalVSTHostEngine.getScanDirectories()]);
+    setScanDirs(toSafeArray<VSTScanDirectory>(globalVSTHostEngine.getScanDirectories()));
     setCustomFolderPath('');
     showNotice(`Добавлена папка сканирования: "${customFolderPath.trim()}"`);
   };
@@ -97,20 +98,20 @@ export const VSTPluginManager: React.FC = () => {
   // Переключение состояния папки
   const handleToggleDirectory = (dirPath: string) => {
     globalVSTHostEngine.toggleScanDirectory(dirPath);
-    setScanDirs([...globalVSTHostEngine.getScanDirectories()]);
+    setScanDirs(toSafeArray<VSTScanDirectory>(globalVSTHostEngine.getScanDirectories()));
   };
 
   // Удаление папки
   const handleRemoveDirectory = (dirPath: string) => {
     globalVSTHostEngine.removeScanDirectory(dirPath);
-    setScanDirs([...globalVSTHostEngine.getScanDirectories()]);
+    setScanDirs(toSafeArray<VSTScanDirectory>(globalVSTHostEngine.getScanDirectories()));
     showNotice('Папка удалена из списка сканирования.');
   };
 
   // Переключение активности плагина в каталоге DAW (Включить / Выключить)
   const handleTogglePluginEnabled = (pluginId: string, currentEnabled: boolean) => {
     globalVSTHostEngine.setPluginEnabled(pluginId, !currentEnabled);
-    setCatalog([...globalVSTHostEngine.getAllPlugins()]);
+    setCatalog(toSafeArray<VSTPluginDefinition>(globalVSTHostEngine.getAllPlugins()));
   };
 
   // Ручная загрузка бинарного VST3/CLAP/WASM файла плагина
@@ -139,7 +140,7 @@ export const VSTPluginManager: React.FC = () => {
         presets: []
       };
       globalVSTHostEngine.registerCustomPlugin(newDef);
-      setCatalog([...globalVSTHostEngine.getAllPlugins()]);
+      setCatalog(toSafeArray<VSTPluginDefinition>(globalVSTHostEngine.getAllPlugins()));
       showNotice(`Плагин "${file.name}" успешно импортирован в библиотеку!`);
     } catch (err: any) {
       alert(`Ошибка загрузки плагина: ${err.message}`);
@@ -147,18 +148,21 @@ export const VSTPluginManager: React.FC = () => {
     e.target.value = '';
   };
 
+  const safeCatalogList = toSafeArray<VSTPluginDefinition>(catalog);
+
   // Фильтрация каталога
-  const filteredCatalog = catalog.filter((p) => {
+  const filteredCatalog = safeCatalogList.filter((p) => {
+    if (!p) return false;
     const matchesSearch =
-      p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      p.vendor.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      p.category.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesCat = selectedCategory === 'all' || p.category.toLowerCase() === selectedCategory.toLowerCase();
-    const matchesFormat = selectedFormat === 'all' || p.format.toLowerCase() === selectedFormat.toLowerCase();
+      (p.name || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (p.vendor || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (p.category || '').toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesCat = selectedCategory === 'all' || (p.category || '').toLowerCase() === selectedCategory.toLowerCase();
+    const matchesFormat = selectedFormat === 'all' || (p.format || '').toLowerCase() === selectedFormat.toLowerCase();
     return matchesSearch && matchesCat && matchesFormat;
   });
 
-  const enabledCount = catalog.filter((p) => globalVSTHostEngine.isPluginEnabled(p.id)).length;
+  const enabledCount = safeCatalogList.filter((p) => globalVSTHostEngine.isPluginEnabled(p.id)).length;
 
   return (
     <div className="space-y-6 animate-fadeIn pb-12">
@@ -229,14 +233,14 @@ export const VSTPluginManager: React.FC = () => {
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
           <div className="bg-slate-950/80 p-3 rounded-xl border border-slate-800">
             <div className="text-[10px] text-slate-500 font-mono">Всего плагинов</div>
-            <div className="text-lg font-bold text-slate-100 mt-0.5">{catalog.length}</div>
+            <div className="text-lg font-bold text-slate-100 mt-0.5">{safeCatalogList.length}</div>
             <div className="text-[10px] text-emerald-400 mt-0.5">Включено: {enabledCount}</div>
           </div>
 
           <div className="bg-slate-950/80 p-3 rounded-xl border border-slate-800">
             <div className="text-[10px] text-slate-500 font-mono">Формат VST3</div>
             <div className="text-lg font-bold text-cyan-400 mt-0.5">
-              {catalog.filter((p) => p.format === 'VST3').length}
+              {safeCatalogList.filter((p) => p.format === 'VST3').length}
             </div>
             <div className="text-[10px] text-slate-400 mt-0.5">64-bit Architecture</div>
           </div>
@@ -244,16 +248,16 @@ export const VSTPluginManager: React.FC = () => {
           <div className="bg-slate-950/80 p-3 rounded-xl border border-slate-800">
             <div className="text-[10px] text-slate-500 font-mono">Формат CLAP / WASM</div>
             <div className="text-lg font-bold text-purple-400 mt-0.5">
-              {catalog.filter((p) => p.format === 'CLAP' || p.format === 'Native/WASM').length}
+              {safeCatalogList.filter((p) => p.format === 'CLAP' || p.format === 'Native/WASM').length}
             </div>
             <div className="text-[10px] text-slate-400 mt-0.5">Zero-Latency DSP</div>
           </div>
 
           <div className="bg-slate-950/80 p-3 rounded-xl border border-slate-800">
             <div className="text-[10px] text-slate-500 font-mono">Папок в реестре</div>
-            <div className="text-lg font-bold text-amber-400 mt-0.5">{scanDirs.length}</div>
+            <div className="text-lg font-bold text-amber-400 mt-0.5">{toSafeArray(scanDirs).length}</div>
             <div className="text-[10px] text-slate-400 mt-0.5">
-              {scanDirs.filter((d) => d.enabled).length} активных
+              {toSafeArray(scanDirs).filter((d) => d && d.enabled).length} активных
             </div>
           </div>
         </div>
@@ -304,7 +308,7 @@ export const VSTPluginManager: React.FC = () => {
               type="button"
               onClick={() => {
                 globalVSTHostEngine.addScanDirectory('C:\\Program Files\\Common Files\\VST3\\iZotope');
-                setScanDirs([...globalVSTHostEngine.getScanDirectories()]);
+                setScanDirs(toSafeArray<VSTScanDirectory>(globalVSTHostEngine.getScanDirectories()));
                 showNotice('Добавлена папка iZotope VST3');
               }}
               className="px-2.5 py-1 bg-cyan-950/40 hover:bg-cyan-900/50 border border-cyan-800/50 text-cyan-300 rounded-lg text-[11px] font-medium flex items-center gap-1 cursor-pointer"
@@ -316,7 +320,7 @@ export const VSTPluginManager: React.FC = () => {
               type="button"
               onClick={() => {
                 globalVSTHostEngine.addScanDirectory('C:\\Program Files\\Steinberg\\VstPlugins\\iZotope');
-                setScanDirs([...globalVSTHostEngine.getScanDirectories()]);
+                setScanDirs(toSafeArray<VSTScanDirectory>(globalVSTHostEngine.getScanDirectories()));
                 showNotice('Добавлена папка Steinberg iZotope');
               }}
               className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 rounded-lg text-[11px] font-medium flex items-center gap-1 cursor-pointer"
@@ -329,7 +333,7 @@ export const VSTPluginManager: React.FC = () => {
 
         {/* Список директорий */}
         <div className="space-y-2">
-          {scanDirs.map((dir) => (
+          {toSafeArray<VSTScanDirectory>(scanDirs).map((dir) => (
             <div
               key={dir.path}
               className={`p-3 rounded-xl border transition-all flex items-center justify-between gap-3 ${
@@ -392,7 +396,7 @@ export const VSTPluginManager: React.FC = () => {
             </div>
             <div>
               <h3 className="text-sm font-bold text-slate-100">
-                Каталог плагинов в системе ({filteredCatalog.length})
+                Каталог плагинов в системе ({toSafeArray(filteredCatalog).length})
               </h3>
               <p className="text-[11px] text-slate-400">
                 Включайте или отключайте плагины для отображения в инсертах дорожек и шин
@@ -403,8 +407,8 @@ export const VSTPluginManager: React.FC = () => {
           <div className="flex items-center gap-2">
             <button
               onClick={() => {
-                catalog.forEach((p) => globalVSTHostEngine.setPluginEnabled(p.id, true));
-                setCatalog([...globalVSTHostEngine.getAllPlugins()]);
+                toSafeArray(catalog).forEach((p) => globalVSTHostEngine.setPluginEnabled(p.id, true));
+                setCatalog(toSafeArray<VSTPluginDefinition>(globalVSTHostEngine.getAllPlugins()));
               }}
               className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 rounded-lg text-[11px] font-medium cursor-pointer"
             >
@@ -412,8 +416,8 @@ export const VSTPluginManager: React.FC = () => {
             </button>
             <button
               onClick={() => {
-                catalog.forEach((p) => globalVSTHostEngine.setPluginEnabled(p.id, false));
-                setCatalog([...globalVSTHostEngine.getAllPlugins()]);
+                toSafeArray(catalog).forEach((p) => globalVSTHostEngine.setPluginEnabled(p.id, false));
+                setCatalog(toSafeArray<VSTPluginDefinition>(globalVSTHostEngine.getAllPlugins()));
               }}
               className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-slate-400 border border-slate-800 rounded-lg text-[11px] font-medium cursor-pointer"
             >
@@ -436,7 +440,7 @@ export const VSTPluginManager: React.FC = () => {
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
-            {['all', 'Mastering', 'Restoration', 'Vocal', 'Dynamics', 'EQ', 'Reverb', 'Limiter', 'Saturation', 'Utility'].map((cat) => (
+            {toSafeArray(['all', 'Mastering', 'Restoration', 'Vocal', 'Dynamics', 'EQ', 'Reverb', 'Limiter', 'Saturation', 'Utility']).map((cat) => (
               <button
                 key={cat}
                 onClick={() => setSelectedCategory(cat)}
@@ -453,7 +457,7 @@ export const VSTPluginManager: React.FC = () => {
         </div>
 
         {/* Сетка карточек плагинов */}
-        {filteredCatalog.length === 0 ? (
+        {toSafeArray(filteredCatalog).length === 0 ? (
           <div className="p-8 text-center bg-slate-950/40 border border-dashed border-slate-850 rounded-xl space-y-3">
             <div className="w-12 h-12 mx-auto rounded-2xl bg-cyan-950/40 border border-cyan-800/30 flex items-center justify-center text-cyan-400">
               <Layers size={24} />
@@ -473,7 +477,7 @@ export const VSTPluginManager: React.FC = () => {
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 pt-2">
-            {filteredCatalog.map((plugin) => {
+            {toSafeArray(filteredCatalog).map((plugin) => {
               const isEnabled = globalVSTHostEngine.isPluginEnabled(plugin.id);
               const isWasmCore = plugin.format === 'Native/WASM' || plugin.isBuiltIn;
               return (
@@ -531,7 +535,7 @@ export const VSTPluginManager: React.FC = () => {
                     <span className="px-1.5 py-0.2 rounded bg-slate-900 border border-slate-800 text-slate-400">
                       {plugin.category}
                     </span>
-                    <span>Параметров: {plugin.parameters?.length || 0}</span>
+                    <span>Параметров: {toSafeArray(plugin.parameters).length}</span>
                     <span>Latency: {plugin.latencySamples || 0} smp</span>
                   </div>
                 </div>
