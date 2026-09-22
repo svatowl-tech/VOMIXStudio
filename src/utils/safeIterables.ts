@@ -22,46 +22,24 @@
  * 4. Если передан объект (словарь) -> извлекает его значения через Object.values(val).filter(Boolean)
  * 5. В остальных случаях (примитивы, функции, символы) -> возвращает пустой массив []
  */
-export function toSafeArray<T = any>(val: unknown): T[] {
-  if (val === null || val === undefined) {
-    return [];
+/**
+ * Безопасно преобразует любой входной параметр (Array, FileList, Map, Set, null, undefined) в чистый массив.
+ */
+export function toSafeArray<T>(val: unknown): T[] {
+  if (!val) return [];
+  if (Array.isArray(val)) return val.filter(Boolean) as T[];
+  if (
+    (typeof FileList !== 'undefined' && val instanceof FileList) ||
+    (typeof NodeList !== 'undefined' && val instanceof NodeList)
+  ) {
+    return Array.from(val as any).filter(Boolean) as unknown as T[];
   }
-
-  // 1. Прямой массив
-  if (Array.isArray(val)) {
-    return (val as T[]).filter(Boolean);
+  if (val instanceof Map || val instanceof Set) {
+    return Array.from(val as any).filter(Boolean) as unknown as T[];
   }
-
-  // 2. Коллекция Set
-  if (val instanceof Set) {
-    return Array.from(val as Set<T>).filter(Boolean);
-  }
-
-  // 3. Коллекция Map
-  if (val instanceof Map) {
-    return Array.from(val.values() as Iterable<T>).filter(Boolean);
-  }
-
-  // 4. Итерируемый объект (Symbol.iterator), исключая строки и примитивы
   if (typeof val === 'object') {
-    // Проверяем наличие Symbol.iterator
-    if (typeof (val as any)[Symbol.iterator] === 'function' && typeof val !== 'string') {
-      try {
-        return Array.from(val as Iterable<T>).filter(Boolean);
-      } catch {
-        // Fallback на Object.values при сбое итератора
-      }
-    }
-
-    // 5. Обычный объект/словарь с ключами -> Object.values
-    try {
-      const values = Object.values(val as Record<string, any>);
-      return (values as T[]).filter(Boolean);
-    } catch {
-      return [];
-    }
+    return Object.values(val).filter(Boolean) as T[];
   }
-
   return [];
 }
 

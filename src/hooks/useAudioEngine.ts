@@ -12,7 +12,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { MediaNormalizer, LoudnessMatchingResult } from '../services/MediaNormalizer';
+import { MediaNormalizer, LoudnessMatchingResult, TrackLoudnessAdjustment } from '../services/MediaNormalizer';
 import { TrackState, ClipConfig, VocalBusState } from '../audio/dawEngine';
 import { VSTPluginInstance, VSTPluginDescriptor } from '../audio/vstTypes';
 import { systemLogger } from '../services/SystemLogger';
@@ -703,7 +703,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
       const result = MediaNormalizer.autoMatchTrackVolumes(safeTracks, targetRmsDb, maxPeakDb);
 
       if (workletNodeRef.current && result && result.adjustments) {
-        toSafeArray(result.adjustments).forEach((adj) => {
+        toSafeArray<TrackLoudnessAdjustment>(result.adjustments).forEach((adj) => {
           if (adj && !adj.isSilent) {
             workletNodeRef.current?.port.postMessage({
               type: 'SET_TRACK_VOLUME',

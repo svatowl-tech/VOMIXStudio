@@ -354,8 +354,10 @@ export default function App() {
     if (data.videoFile) {
       setSourceVideoFile(data.videoFile);
     }
+    // Защита от неитерируемых объектов
     const audioList = toSafeArray<{ file: File; name: string }>(data.audioFiles);
     const currentTracks = toSafeArray<TrackState>(tracks);
+
     for (let i = 0; i < audioList.length && i < currentTracks.length; i++) {
       const item = audioList[i];
       const targetTrack = currentTracks[i];
@@ -506,8 +508,7 @@ export default function App() {
     const totalFrames = Math.floor(pcmBuffer.length / 2);
     const clipId = Date.now();
     let effectiveTrackId = config?.trackId;
-
-    const isOriginal = /оригинал|original|видео|video|отригал|orig/i.test(config?.name || file.name);
+    const isOriginal = /^(🎬|original| video|оригинал|orig)/i.test(config?.name || file.name);
 
     setTracks((prev) => {
       const safePrev = toSafeArray<TrackState>(prev);
