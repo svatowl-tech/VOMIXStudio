@@ -68,6 +68,7 @@ import {
 import { globalStemSeparationService } from '../services/StemSeparationService';
 import { TrackState } from '../audio/dawEngine';
 import { formatSMPTE } from '../utils/waveformUtils';
+import { toSafeArray } from '../utils/safeIterables';
 import {
   globalAIPipelineStore,
   AIPurposeType,
@@ -197,6 +198,8 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
   const [models, setModels] = useState<ModelCatalogItem[]>([]);
   const [downloadProgress, setDownloadProgress] = useState<Record<string, ModelDownloadProgress>>({});
 
+  const safeTracks = useMemo(() => toSafeArray<TrackState>(tracks), [tracks]);
+
   // --- 0. MATRIX / ROUTER STATE ---
   const [trackConfigs, setTrackConfigs] = useState<Record<number, TrackAIConfig>>(() => {
     return globalAIPipelineStore.getConfigs();
@@ -215,7 +218,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
   const [abActiveMode, setAbActiveMode] = useState<'original' | 'processed' | null>(null);
 
   // --- 1. STEM SEPARATION STATE ---
-  const [sepTrackId, setSepTrackId] = useState<number>(tracks[0]?.id || 1);
+  const [sepTrackId, setSepTrackId] = useState<number>(() => toSafeArray<TrackState>(tracks)[0]?.id || 1);
   const [sepModelId, setSepModelId] = useState<string>('uvr_mdx_voc_ft');
   const [sepMode, setSepMode] = useState<'vocals_karaoke' | '4stems'>('vocals_karaoke');
   const [isSeparating, setIsSeparating] = useState<boolean>(false);
@@ -229,7 +232,10 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
   } | null>(null);
 
   // --- 2. DENOISE & DEREVERB STATE ---
-  const [cleanTrackId, setCleanTrackId] = useState<number>(tracks[1]?.id || tracks[0]?.id || 1);
+  const [cleanTrackId, setCleanTrackId] = useState<number>(() => {
+    const arr = toSafeArray<TrackState>(tracks);
+    return arr[1]?.id || arr[0]?.id || 1;
+  });
   const [denoiseModelId, setDenoiseModelId] = useState<string>('deepfilternet3');
   const [dereverbModelId, setDereverbModelId] = useState<string>('reverb_foxjoy');
   const [denoiseAmount, setDenoiseAmount] = useState<number>(75);
@@ -243,8 +249,11 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
   const [abPlaying, setAbPlaying] = useState<'original' | 'cleaned' | null>(null);
 
   // --- 3. SPECTRAL VOCAL MATCHING STATE ---
-  const [specRefTrackId, setSpecRefTrackId] = useState<number>(tracks[0]?.id || 1);
-  const [specTargetTrackId, setSpecTargetTrackId] = useState<number>(tracks[1]?.id || tracks[0]?.id || 1);
+  const [specRefTrackId, setSpecRefTrackId] = useState<number>(() => toSafeArray<TrackState>(tracks)[0]?.id || 1);
+  const [specTargetTrackId, setSpecTargetTrackId] = useState<number>(() => {
+    const arr = toSafeArray<TrackState>(tracks);
+    return arr[1]?.id || arr[0]?.id || 1;
+  });
   const [matchIntensity, setMatchIntensity] = useState<number>(85);
   const [formantWeight, setFormantWeight] = useState<number>(70);
   const [isMatching, setIsMatching] = useState<boolean>(false);
@@ -252,7 +261,10 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
   const [matchResult, setMatchResult] = useState<SpectralMatchResult | null>(null);
 
   // --- 4. VOICEFIXER & HARMONIC RESTORATION STATE ---
-  const [vfTrackId, setVfTrackId] = useState<number>(tracks[1]?.id || tracks[0]?.id || 1);
+  const [vfTrackId, setVfTrackId] = useState<number>(() => {
+    const arr = toSafeArray<TrackState>(tracks);
+    return arr[1]?.id || arr[0]?.id || 1;
+  });
   const [airBandBoost, setAirBandBoost] = useState<number>(4.0);
   const [declipSens, setDeclipSens] = useState<number>(80);
   const [warmthSat, setWarmthSat] = useState<number>(45);
@@ -261,7 +273,10 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
   const [vfProcessedBuffer, setVfProcessedBuffer] = useState<Float32Array | null>(null);
 
   // --- 5. WHISPER & VAD ALIGNMENT STATE ---
-  const [whisperTrackId, setWhisperTrackId] = useState<number>(tracks[1]?.id || tracks[0]?.id || 1);
+  const [whisperTrackId, setWhisperTrackId] = useState<number>(() => {
+    const arr = toSafeArray<TrackState>(tracks);
+    return arr[1]?.id || arr[0]?.id || 1;
+  });
   const [whisperModelId, setWhisperModelId] = useState<string>('whisper_base');
   const [vadThreshold, setVadThreshold] = useState<number>(0.5);
   const [isProcessingVad, setIsProcessingVad] = useState<boolean>(false);
@@ -305,7 +320,6 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
   useEffect(() => {
     setTrackConfigs((prev) => {
       const updated: Record<number, TrackAIConfig> = { ...prev };
-      const safeTracks = Array.isArray(tracks) ? tracks.filter(Boolean) : [];
       safeTracks.forEach((track) => {
         if (!track) return;
         // Дорожка считается оригинальным звуком видео ТОЛЬКО при наличии флага или маркера
@@ -384,19 +398,19 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
       });
       return updated;
     });
-  }, [tracks]);
+  }, [safeTracks]);
 
   // Update default track IDs when tracks change
   useEffect(() => {
-    if (tracks.length > 0) {
-      if (!tracks.some((t) => t.id === sepTrackId)) setSepTrackId(tracks[0].id);
-      if (!tracks.some((t) => t.id === cleanTrackId)) setCleanTrackId(tracks[1]?.id || tracks[0].id);
-      if (!tracks.some((t) => t.id === specRefTrackId)) setSpecRefTrackId(tracks[0].id);
-      if (!tracks.some((t) => t.id === specTargetTrackId)) setSpecTargetTrackId(tracks[1]?.id || tracks[0].id);
-      if (!tracks.some((t) => t.id === vfTrackId)) setVfTrackId(tracks[1]?.id || tracks[0].id);
-      if (!tracks.some((t) => t.id === whisperTrackId)) setWhisperTrackId(tracks[1]?.id || tracks[0].id);
+    if (safeTracks.length > 0) {
+      if (!safeTracks.some((t) => t.id === sepTrackId)) setSepTrackId(safeTracks[0].id);
+      if (!safeTracks.some((t) => t.id === cleanTrackId)) setCleanTrackId(safeTracks[1]?.id || safeTracks[0].id);
+      if (!safeTracks.some((t) => t.id === specRefTrackId)) setSpecRefTrackId(safeTracks[0].id);
+      if (!safeTracks.some((t) => t.id === specTargetTrackId)) setSpecTargetTrackId(safeTracks[1]?.id || safeTracks[0].id);
+      if (!safeTracks.some((t) => t.id === vfTrackId)) setVfTrackId(safeTracks[1]?.id || safeTracks[0].id);
+      if (!safeTracks.some((t) => t.id === whisperTrackId)) setWhisperTrackId(safeTracks[1]?.id || safeTracks[0].id);
     }
-  }, [tracks]);
+  }, [safeTracks, sepTrackId, cleanTrackId, specRefTrackId, specTargetTrackId, vfTrackId, whisperTrackId]);
 
   // Filtered models for catalog tab
   const filteredCatalogModels = useMemo(() => {
@@ -413,10 +427,11 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
 
   // Helper to get PCM buffer from track
   const getTrackPCM = (trackId: number): Float32Array | null => {
-    const safeTracks = Array.isArray(tracks) ? tracks.filter(Boolean) : [];
     const targetTrack = safeTracks.find((t) => t && t.id === trackId);
-    if (!targetTrack || !Array.isArray(targetTrack.clips) || targetTrack.clips.length === 0) return null;
-    const clip = targetTrack.clips.filter(Boolean)[0];
+    if (!targetTrack) return null;
+    const safeClips = toSafeArray(targetTrack.clips);
+    if (safeClips.length === 0) return null;
+    const clip = safeClips[0] as any;
     return clip ? clip.buffer || null : null;
   };
 
@@ -531,7 +546,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
       return;
     }
 
-    const track = tracks.find((t) => t.id === trackId);
+    const track = safeTracks.find((t) => t.id === trackId);
     const trackName = track?.name || `Дорожка ${trackId}`;
 
     const activeSteps = (config.steps || []).filter((s) => s.enabled);
@@ -829,7 +844,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
 
   const handleApplyStemsToProject = () => {
     if (!sepResult || !sepResult.vocalsPcm || !sepResult.karaokePcm) return;
-    const targetTrack = tracks.find((t) => t.id === sepTrackId);
+    const targetTrack = safeTracks.find((t) => t.id === sepTrackId);
     const sourceName = targetTrack?.name || 'Оригинал';
 
     if (onAddStemTracks) {
@@ -906,7 +921,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
 
   const handleApplyCleanedToTrack = () => {
     if (!cleanedAudioBuffer) return;
-    const targetTrack = tracks.find((t) => t.id === cleanTrackId);
+    const targetTrack = safeTracks.find((t) => t.id === cleanTrackId);
     const tName = targetTrack?.name || `Дорожка ${cleanTrackId}`;
 
     if (onApplyProcessedAudioToTrack) {
@@ -957,7 +972,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
 
   const handleApplyMatchedAudioToTrack = () => {
     if (!matchResult || !matchResult.processedBuffer) return;
-    const targetTrack = tracks.find((t) => t.id === specTargetTrackId);
+    const targetTrack = safeTracks.find((t) => t.id === specTargetTrackId);
     const tName = targetTrack?.name || `Дорожка ${specTargetTrackId}`;
 
     if (onApplyProcessedAudioToTrack) {
@@ -1003,7 +1018,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
 
   const handleApplyVfAudioToTrack = () => {
     if (!vfProcessedBuffer) return;
-    const targetTrack = tracks.find((t) => t.id === vfTrackId);
+    const targetTrack = safeTracks.find((t) => t.id === vfTrackId);
     const tName = targetTrack?.name || `Дорожка ${vfTrackId}`;
 
     if (onApplyProcessedAudioToTrack) {
@@ -1209,7 +1224,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                 <h3 className="text-sm sm:text-base font-bold text-slate-100 flex items-center gap-2">
                   Матрица маршрутизации нейросетевой обработки
                   <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
-                    {tracks.length} Дорожек в проекте
+                    {safeTracks.length} Дорожек в проекте
                   </span>
                 </h3>
                 <p className="text-xs text-slate-400 mt-0.5">
@@ -1262,7 +1277,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
 
           {/* Tracks Neural Processing Cards */}
           <div className="space-y-4">
-            {tracks.map((track) => {
+            {safeTracks.map((track) => {
               const cfg: TrackAIConfig = trackConfigs[track.id] || {
                 trackId: track.id,
                 enabled: true,
@@ -1631,9 +1646,9 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                 onChange={(e) => setSepTrackId(Number(e.target.value))}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 font-mono"
               >
-                {tracks.map((t) => (
+                {safeTracks.map((t) => (
                   <option key={t.id} value={t.id}>
-                    Дорожка {t.id}: {t.name} ({t.clips?.length || 0} клипов)
+                    Дорожка {t.id}: {t.name} ({toSafeArray(t.clips).length} клипов)
                   </option>
                 ))}
               </select>
@@ -1833,7 +1848,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                 onChange={(e) => setCleanTrackId(Number(e.target.value))}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 font-mono"
               >
-                {tracks.map((t) => (
+                {safeTracks.map((t) => (
                   <option key={t.id} value={t.id}>
                     Дорожка {t.id}: {t.name}
                   </option>
@@ -2047,7 +2062,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                 onChange={(e) => setSpecRefTrackId(Number(e.target.value))}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-purple-500 font-mono"
               >
-                {tracks.map((t) => (
+                {safeTracks.map((t) => (
                   <option key={t.id} value={t.id}>
                     Дорожка {t.id}: {t.name} (Референс)
                   </option>
@@ -2065,7 +2080,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                 onChange={(e) => setSpecTargetTrackId(Number(e.target.value))}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-purple-500 font-mono"
               >
-                {tracks.map((t) => (
+                {safeTracks.map((t) => (
                   <option key={t.id} value={t.id}>
                     Дорожка {t.id}: {t.name} (Дублер)
                   </option>
@@ -2233,7 +2248,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                 onChange={(e) => setVfTrackId(Number(e.target.value))}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500 font-mono"
               >
-                {tracks.map((t) => (
+                {safeTracks.map((t) => (
                   <option key={t.id} value={t.id}>
                     Дорожка {t.id}: {t.name}
                   </option>
@@ -2386,7 +2401,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                 onChange={(e) => setWhisperTrackId(Number(e.target.value))}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500 font-mono"
               >
-                {tracks.map((t) => (
+                {safeTracks.map((t) => (
                   <option key={t.id} value={t.id}>
                     Дорожка {t.id}: {t.name}
                   </option>

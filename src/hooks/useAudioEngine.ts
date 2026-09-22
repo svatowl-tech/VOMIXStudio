@@ -18,6 +18,7 @@ import { VSTPluginInstance, VSTPluginDescriptor } from '../audio/vstTypes';
 import { systemLogger } from '../services/SystemLogger';
 import { globalNativeDAWBridge } from '../services/NativeDAWBridge';
 import { EMBEDDED_WASM_CORE_BASE64 } from '../data/embeddedWasmCore';
+import { toSafeArray, toSafeMap } from '../utils/safeIterables';
 
 export interface TrackMeterData {
   trackId: number;
@@ -626,7 +627,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
   const syncTrackClips = useCallback((trackId: number, clips: ClipConfig[]) => {
     if (workletNodeRef.current) {
       try {
-        const safeClips = (clips || []).filter(Boolean);
+        const safeClips = toSafeArray<ClipConfig>(clips);
         workletNodeRef.current.port.postMessage({
           type: 'SET_TRACK_CLIPS',
           trackId,
@@ -652,7 +653,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
   const syncAllTracks = useCallback((tracks: TrackState[]) => {
     if (workletNodeRef.current) {
       try {
-        const safeTracks = (tracks || []).filter(Boolean);
+        const safeTracks = toSafeArray<TrackState>(tracks);
         workletNodeRef.current.port.postMessage({
           type: 'SET_ALL_TRACKS',
           tracks: safeTracks.map((t) => ({
@@ -663,7 +664,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             solo: t.solo,
             mute: t.mute,
             isOriginalAudio: t.isOriginalAudio,
-            vstPlugins: (t.vstPlugins || []).filter(Boolean),
+            vstPlugins: toSafeArray<VSTPluginInstance>(t.vstPlugins),
             dsp: {
               eq: t.eq,
               compressor: t.compressor,
@@ -672,7 +673,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
               deClicker: t.deClicker,
               autoDucker: t.autoDucker
             },
-            clips: (t.clips || []).filter(Boolean).map((c) => ({
+            clips: toSafeArray<ClipConfig>(t.clips).map((c) => ({
               id: c.id,
               name: c.name,
               offsetSamples: c.offsetSamples,
@@ -698,11 +699,11 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
       targetRmsDb: number = -18.0,
       maxPeakDb: number = -1.0
     ): LoudnessMatchingResult => {
-      const safeTracks = (tracks || []).filter(Boolean);
+      const safeTracks = toSafeArray<TrackState>(tracks);
       const result = MediaNormalizer.autoMatchTrackVolumes(safeTracks, targetRmsDb, maxPeakDb);
 
-      if (workletNodeRef.current && result && Array.isArray(result.adjustments)) {
-        (result.adjustments || []).filter(Boolean).forEach((adj) => {
+      if (workletNodeRef.current && result && result.adjustments) {
+        toSafeArray(result.adjustments).forEach((adj) => {
           if (adj && !adj.isSilent) {
             workletNodeRef.current?.port.postMessage({
               type: 'SET_TRACK_VOLUME',
@@ -932,21 +933,21 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
    */
   const setTrackVstChain = useCallback((trackId: number, vstPlugins: VSTPluginInstance[]) => {
     if (workletNodeRef.current) {
-      const safePlugins = (vstPlugins || []).filter(Boolean);
+      const safePlugins = toSafeArray<VSTPluginInstance>(vstPlugins);
       workletNodeRef.current.port.postMessage({ type: 'SET_TRACK_VST_CHAIN', trackId, vstPlugins: safePlugins });
     }
   }, []);
 
   const setVocalBusVstChain = useCallback((vstPlugins: VSTPluginInstance[]) => {
     if (workletNodeRef.current) {
-      const safePlugins = (vstPlugins || []).filter(Boolean);
+      const safePlugins = toSafeArray<VSTPluginInstance>(vstPlugins);
       workletNodeRef.current.port.postMessage({ type: 'SET_VOCAL_BUS_VST_CHAIN', vstPlugins: safePlugins });
     }
   }, []);
 
   const setMasterVstChain = useCallback((vstPlugins: VSTPluginInstance[]) => {
     if (workletNodeRef.current) {
-      const safePlugins = (vstPlugins || []).filter(Boolean);
+      const safePlugins = toSafeArray<VSTPluginInstance>(vstPlugins);
       workletNodeRef.current.port.postMessage({ type: 'SET_MASTER_VST_CHAIN', vstPlugins: safePlugins });
     }
   }, []);

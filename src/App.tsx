@@ -23,6 +23,7 @@ import { SubtitleCue } from './services/ProjectManager';
 import { MediaNormalizer } from './services/MediaNormalizer';
 import { FULL_CPP_CODE, BUILD_WASM_SCRIPT } from './data/cppCode';
 import { Sparkles } from 'lucide-react';
+import { toSafeArray, toSafeMap } from './utils/safeIterables';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavigationTab>('minimal');
@@ -64,7 +65,7 @@ export default function App() {
   // Локальное UI-состояние параметров треков и мастера с фильтрацией валидности
   const [tracks, setTracks] = useState<TrackState[]>(() => {
     const defaultTracks = new LiveDAWEngine().getTracks();
-    return Array.isArray(defaultTracks) ? defaultTracks.filter(Boolean) : [];
+    return toSafeArray<TrackState>(defaultTracks);
   });
 
   const [vocalBus, setVocalBusState] = useState<VocalBusState>(() => createDefaultVocalBus());
@@ -80,20 +81,22 @@ export default function App() {
     clipped: false
   });
 
-  // Общее состояние видеофайла и субтитров
+  // Общее состояние видеофайла и субтитров с гарантией итерируемости
   const [sourceVideoFile, setSourceVideoFile] = useState<File | null>(null);
-  const [subtitles, setSubtitles] = useState<SubtitleLine[]>([
-    { index: 1, startSec: 0.5, endSec: 3.5, text: 'Добро пожаловать в автономную WebAssembly студию дубляжа.', speaker: 'Актёр 1' },
-    { index: 2, startSec: 4.2, endSec: 7.8, text: 'Низкоуровневый C++ микшер суммирует дорожки без задержки.', speaker: 'Актёр 1' },
-    { index: 3, startSec: 8.5, endSec: 12.0, text: 'Авто-дакинг автоматически приглушает фоновую музыку во время речи.', speaker: 'Диктор' },
-    { index: 4, startSec: 12.5, endSec: 15.5, text: 'FFmpeg в браузере вшивает новый звук в видеоряд без потери качества.', speaker: 'Диктор' }
-  ]);
+  const [subtitles, setSubtitles] = useState<SubtitleLine[]>(() =>
+    toSafeArray<SubtitleLine>([
+      { index: 1, startSec: 0.5, endSec: 3.5, text: 'Добро пожаловать в автономную WebAssembly студию дубляжа.', speaker: 'Актёр 1' },
+      { index: 2, startSec: 4.2, endSec: 7.8, text: 'Низкоуровневый C++ микшер суммирует дорожки без задержки.', speaker: 'Актёр 1' },
+      { index: 3, startSec: 8.5, endSec: 12.0, text: 'Авто-дакинг автоматически приглушает фоновую музыку во время речи.', speaker: 'Диктор' },
+      { index: 4, startSec: 12.5, endSec: 15.5, text: 'FFmpeg в браузере вшивает новый звук в видеоряд без потери качества.', speaker: 'Диктор' }
+    ])
+  );
 
   // Синхронизация реальных пиков телеметрии из AudioWorklet с полной защитой от null/undefined
   useEffect(() => {
     setTracks((prevTracks) => {
-      if (!Array.isArray(prevTracks)) return [];
-      return prevTracks.filter(Boolean).map((t) => {
+      const safePrev = toSafeArray<TrackState>(prevTracks);
+      return safePrev.map((t) => {
         const m = trackMeters ? trackMeters.get(t.id) : null;
         if (m) {
           return { ...t, peakL: m.peakL ?? 0, peakR: m.peakR ?? 0 };
@@ -116,7 +119,7 @@ export default function App() {
   const handleUpdateTrack = (updatedTrack: TrackState) => {
     if (!updatedTrack) return;
     setTracks((prev) =>
-      (Array.isArray(prev) ? prev.filter(Boolean) : []).map((t) => (t.id === updatedTrack.id ? updatedTrack : t))
+      toSafeArray<TrackState>(prev).map((t) => (t.id === updatedTrack.id ? updatedTrack : t))
     );
 
     // Передаем изменения в AudioWorklet
@@ -162,9 +165,9 @@ export default function App() {
   };
 
   const handleUpdateTrackVstChain = (trackId: number, vstPlugins: VSTPluginInstance[]) => {
-    const safePlugins = Array.isArray(vstPlugins) ? vstPlugins.filter(Boolean) : [];
+    const safePlugins = toSafeArray<VSTPluginInstance>(vstPlugins);
     setTracks((prev) =>
-      (Array.isArray(prev) ? prev.filter(Boolean) : []).map((t) =>
+      toSafeArray<TrackState>(prev).map((t) =>
         t.id === trackId ? { ...t, vstPlugins: safePlugins } : t
       )
     );
@@ -172,13 +175,13 @@ export default function App() {
   };
 
   const handleUpdateVocalBusVstChain = (vstPlugins: VSTPluginInstance[]) => {
-    const safePlugins = Array.isArray(vstPlugins) ? vstPlugins.filter(Boolean) : [];
+    const safePlugins = toSafeArray<VSTPluginInstance>(vstPlugins);
     setVocalBusState((prev) => ({ ...prev, vstPlugins: safePlugins }));
     setVocalBusVstChain(safePlugins);
   };
 
   const handleUpdateMasterVstChain = (vstPlugins: VSTPluginInstance[]) => {
-    const safePlugins = Array.isArray(vstPlugins) ? vstPlugins.filter(Boolean) : [];
+    const safePlugins = toSafeArray<VSTPluginInstance>(vstPlugins);
     setMaster((prev) => ({ ...prev, vstPlugins: safePlugins }));
     setMasterVstChain(safePlugins);
   };
@@ -192,9 +195,9 @@ export default function App() {
   ) => {
     if (target === 'track' && trackId !== undefined) {
       setTracks((prev) =>
-        (Array.isArray(prev) ? prev.filter(Boolean) : []).map((t) => {
+        toSafeArray<TrackState>(prev).map((t) => {
           if (t.id !== trackId) return t;
-          const plugins = (Array.isArray(t.vstPlugins) ? t.vstPlugins.filter(Boolean) : []).map((p) =>
+          const plugins = toSafeArray<VSTPluginInstance>(t.vstPlugins).map((p) =>
             p.instanceId === instanceId
               ? { ...p, parameters: { ...p.parameters, [paramId]: value } }
               : p
@@ -204,7 +207,7 @@ export default function App() {
       );
     } else if (target === 'vocalBus') {
       setVocalBusState((prev) => {
-        const plugins = (Array.isArray(prev.vstPlugins) ? prev.vstPlugins.filter(Boolean) : []).map((p) =>
+        const plugins = toSafeArray<VSTPluginInstance>(prev.vstPlugins).map((p) =>
           p.instanceId === instanceId
             ? { ...p, parameters: { ...p.parameters, [paramId]: value } }
             : p
@@ -213,7 +216,7 @@ export default function App() {
       });
     } else if (target === 'master') {
       setMaster((prev) => {
-        const plugins = (Array.isArray(prev.vstPlugins) ? prev.vstPlugins.filter(Boolean) : []).map((p) =>
+        const plugins = toSafeArray<VSTPluginInstance>(prev.vstPlugins).map((p) =>
           p.instanceId === instanceId
             ? { ...p, parameters: { ...p.parameters, [paramId]: value } }
             : p
@@ -232,9 +235,9 @@ export default function App() {
   ) => {
     if (target === 'track' && trackId !== undefined) {
       setTracks((prev) =>
-        (Array.isArray(prev) ? prev.filter(Boolean) : []).map((t) => {
+        toSafeArray<TrackState>(prev).map((t) => {
           if (t.id !== trackId) return t;
-          const plugins = (Array.isArray(t.vstPlugins) ? t.vstPlugins.filter(Boolean) : []).map((p) =>
+          const plugins = toSafeArray<VSTPluginInstance>(t.vstPlugins).map((p) =>
             p.instanceId === instanceId ? { ...p, enabled } : p
           );
           return { ...t, vstPlugins: plugins };
@@ -242,14 +245,14 @@ export default function App() {
       );
     } else if (target === 'vocalBus') {
       setVocalBusState((prev) => {
-        const plugins = (Array.isArray(prev.vstPlugins) ? prev.vstPlugins.filter(Boolean) : []).map((p) =>
+        const plugins = toSafeArray<VSTPluginInstance>(prev.vstPlugins).map((p) =>
           p.instanceId === instanceId ? { ...p, enabled } : p
         );
         return { ...prev, vstPlugins: plugins };
       });
     } else if (target === 'master') {
       setMaster((prev) => {
-        const plugins = (Array.isArray(prev.vstPlugins) ? prev.vstPlugins.filter(Boolean) : []).map((p) =>
+        const plugins = toSafeArray<VSTPluginInstance>(prev.vstPlugins).map((p) =>
           p.instanceId === instanceId ? { ...p, enabled } : p
         );
         return { ...prev, vstPlugins: plugins };
@@ -266,9 +269,9 @@ export default function App() {
   ) => {
     if (target === 'track' && trackId !== undefined) {
       setTracks((prev) =>
-        (Array.isArray(prev) ? prev.filter(Boolean) : []).map((t) => {
+        toSafeArray<TrackState>(prev).map((t) => {
           if (t.id !== trackId) return t;
-          const plugins = (Array.isArray(t.vstPlugins) ? t.vstPlugins.filter(Boolean) : []).map((p) =>
+          const plugins = toSafeArray<VSTPluginInstance>(t.vstPlugins).map((p) =>
             p.instanceId === instanceId ? { ...p, wetDry } : p
           );
           return { ...t, vstPlugins: plugins };
@@ -276,14 +279,14 @@ export default function App() {
       );
     } else if (target === 'vocalBus') {
       setVocalBusState((prev) => {
-        const plugins = (Array.isArray(prev.vstPlugins) ? prev.vstPlugins.filter(Boolean) : []).map((p) =>
+        const plugins = toSafeArray<VSTPluginInstance>(prev.vstPlugins).map((p) =>
           p.instanceId === instanceId ? { ...p, wetDry } : p
         );
         return { ...prev, vstPlugins: plugins };
       });
     } else if (target === 'master') {
       setMaster((prev) => {
-        const plugins = (Array.isArray(prev.vstPlugins) ? prev.vstPlugins.filter(Boolean) : []).map((p) =>
+        const plugins = toSafeArray<VSTPluginInstance>(prev.vstPlugins).map((p) =>
           p.instanceId === instanceId ? { ...p, wetDry } : p
         );
         return { ...prev, vstPlugins: plugins };
@@ -295,15 +298,16 @@ export default function App() {
   const handleApplyGlobalPreset = (preset: MVPPreset) => {
     if (!preset) return;
     if (preset.vocalBusSettings?.vstChain) {
-      handleUpdateVocalBusVstChain(preset.vocalBusSettings.vstChain);
+      handleUpdateVocalBusVstChain(toSafeArray(preset.vocalBusSettings.vstChain));
     }
     if (preset.masterSettings?.vstChain) {
-      handleUpdateMasterVstChain(preset.masterSettings.vstChain);
+      handleUpdateMasterVstChain(toSafeArray(preset.masterSettings.vstChain));
     }
-    const safeTracks = Array.isArray(tracks) ? tracks.filter(Boolean) : [];
-    if (preset.trackVstChain && safeTracks.length > 0) {
+    const safeTracks = toSafeArray<TrackState>(tracks);
+    const safeTrackVstChain = toSafeArray<VSTPluginInstance>(preset.trackVstChain);
+    if (safeTrackVstChain.length > 0 && safeTracks.length > 0) {
       safeTracks.forEach((tr) => {
-        if (tr) handleUpdateTrackVstChain(tr.id, preset.trackVstChain);
+        if (tr) handleUpdateTrackVstChain(tr.id, safeTrackVstChain);
       });
     }
   };
@@ -315,13 +319,15 @@ export default function App() {
         ...prev,
         volumeDb: state.master.volumeDb ?? prev.volumeDb,
         limiterEnabled: state.master.limiterEnabled ?? prev.limiterEnabled,
-        limiterCeilingDb: state.master.limiterCeilingDb ?? prev.limiterCeilingDb
+        limiterCeilingDb: state.master.limiterCeilingDb ?? prev.limiterCeilingDb,
+        vstPlugins: toSafeArray(state.master.vstPlugins ?? prev.vstPlugins)
       }));
     }
-    if (Array.isArray(state.tracks)) {
+    const loadedTracks = toSafeArray<any>(state.tracks);
+    if (loadedTracks.length > 0) {
       setTracks((prev) =>
-        (Array.isArray(prev) ? prev.filter(Boolean) : []).map((t) => {
-          const matched = state.tracks.find((st: any) => st && st.id === t.id);
+        toSafeArray<TrackState>(prev).map((t) => {
+          const matched = loadedTracks.find((st: any) => st && st.id === t.id);
           if (matched) {
             return {
               ...t,
@@ -329,15 +335,17 @@ export default function App() {
               volumeDb: matched.volumeDb ?? t.volumeDb,
               pan: matched.pan ?? t.pan,
               solo: Boolean(matched.solo ?? t.solo),
-              mute: Boolean(matched.mute ?? t.mute)
+              mute: Boolean(matched.mute ?? t.mute),
+              clips: toSafeArray(matched.clips ?? t.clips),
+              vstPlugins: toSafeArray(matched.vstPlugins ?? t.vstPlugins)
             };
           }
           return t;
         })
       );
     }
-    if (Array.isArray(state.subtitles)) {
-      setSubtitles(state.subtitles.filter(Boolean));
+    if (state.subtitles) {
+      setSubtitles(toSafeArray<SubtitleLine>(state.subtitles));
     }
   };
 
@@ -346,8 +354,8 @@ export default function App() {
     if (data.videoFile) {
       setSourceVideoFile(data.videoFile);
     }
-    const audioList = Array.isArray(data.audioFiles) ? data.audioFiles.filter(Boolean) : [];
-    const currentTracks = Array.isArray(tracks) ? tracks.filter(Boolean) : [];
+    const audioList = toSafeArray<{ file: File; name: string }>(data.audioFiles);
+    const currentTracks = toSafeArray<TrackState>(tracks);
     for (let i = 0; i < audioList.length && i < currentTracks.length; i++) {
       const item = audioList[i];
       const targetTrack = currentTracks[i];
@@ -363,10 +371,10 @@ export default function App() {
     if (!file) return;
     const res = await uploadAudioFileToTrack(file, trackId, Date.now(), 0);
     setTracks((prev) => {
-      const safePrev = Array.isArray(prev) ? prev.filter(Boolean) : [];
+      const safePrev = toSafeArray<TrackState>(prev);
       return safePrev.map((t) => {
         if (t.id === trackId) {
-          const currentClips = Array.isArray(t.clips) ? t.clips.filter(Boolean) : [];
+          const currentClips = toSafeArray<any>(t.clips);
           return {
             ...t,
             clips: [
@@ -414,7 +422,7 @@ export default function App() {
       const clipId = Date.now();
 
       setTracks((prev) => {
-        const safePrev = Array.isArray(prev) ? prev.filter(Boolean) : [];
+        const safePrev = toSafeArray<TrackState>(prev);
         const videoClip = {
           id: clipId,
           name: `🎬 Оригинал_${videoFile.name}`,
@@ -456,7 +464,7 @@ export default function App() {
         // 2. Проверяем, свободна ли Первая дорожка
         if (
           safePrev.length > 0 &&
-          (!Array.isArray(safePrev[0].clips) || safePrev[0].clips.length === 0) &&
+          toSafeArray(safePrev[0].clips).length === 0 &&
           (safePrev[0].name.includes('Дорожка') || safePrev[0].name.includes('Track'))
         ) {
           actualTargetTrackId = safePrev[0].id;
@@ -502,7 +510,7 @@ export default function App() {
     const isOriginal = /оригинал|original|видео|video|отригал|orig/i.test(config?.name || file.name);
 
     setTracks((prev) => {
-      const safePrev = Array.isArray(prev) ? prev.filter(Boolean) : [];
+      const safePrev = toSafeArray<TrackState>(prev);
       if (!effectiveTrackId || !config?.replaceExisting) {
         const nextId = effectiveTrackId || (safePrev.length > 0 ? Math.max(...safePrev.map((t) => t.id)) + 1 : 1);
         effectiveTrackId = nextId;
@@ -575,7 +583,7 @@ export default function App() {
     let nextId2 = 2;
 
     setTracks((prev) => {
-      const safePrev = Array.isArray(prev) ? prev.filter(Boolean) : [];
+      const safePrev = toSafeArray<TrackState>(prev);
       nextId1 = safePrev.length > 0 ? Math.max(...safePrev.map((t) => t.id)) + 1 : 1;
       nextId2 = nextId1 + 1;
 
@@ -631,7 +639,7 @@ export default function App() {
     const clipId = Date.now();
 
     setTracks((prev) => {
-      const safePrev = Array.isArray(prev) ? prev.filter(Boolean) : [];
+      const safePrev = toSafeArray<TrackState>(prev);
       return safePrev.map((t) =>
         t.id === trackId
           ? {
@@ -660,7 +668,7 @@ export default function App() {
 
   const handleAddTrack = () => {
     setTracks((prev) => {
-      const safePrev = Array.isArray(prev) ? prev.filter(Boolean) : [];
+      const safePrev = toSafeArray<TrackState>(prev);
       const newId = safePrev.length > 0 ? Math.max(...safePrev.map((t) => t.id)) + 1 : 1;
       const newTr = createNewTrack(newId, `CH #${newId}: Актер / Озвучка`, '#10b981');
       newTr.clips = [];
@@ -669,10 +677,11 @@ export default function App() {
   };
 
   const handleAutoMatchLoudness = () => {
-    const safeTracks = Array.isArray(tracks) ? tracks.filter(Boolean) : [];
+    const safeTracks = toSafeArray<TrackState>(tracks);
     const res = performLoudnessMatching(safeTracks, -18.0, -1.0);
+    const safeAdjustments = toSafeArray(res?.adjustments);
     setLoudnessStatus(
-      `Выровнено ${res.adjustments.length} дорожек по EBU R128 (-18 LUFS). Максимальный пик: ${(res.maxPeakDb ?? -1.0).toFixed(1)} dBFS.`
+      `Выровнено ${safeAdjustments.length} дорожек по EBU R128 (-18 LUFS). Максимальный пик: ${(res?.maxPeakDb ?? -1.0).toFixed(1)} dBFS.`
     );
     setTimeout(() => setLoudnessStatus(null), 5000);
   };
