@@ -3,6 +3,7 @@ import { MasterState } from '../audio/dawEngine';
 import { VSTPluginInstance } from '../audio/vstTypes';
 import { VSTRackSlot } from './VSTRackSlot';
 import { Play, Pause, RotateCcw, Volume2, ShieldCheck, Activity, Layers, Sliders } from 'lucide-react';
+import { toSafeArray } from '../utils/safeIterables';
 
 interface MasterSectionProps {
   master: MasterState;
@@ -157,15 +158,16 @@ export const MasterSection: React.FC<MasterSectionProps> = ({
       {/* VST Plugin Insert Rack for Master */}
       <div className="pt-2 border-t border-slate-800/60">
         <VSTRackSlot
-          plugins={master.vstPlugins || []}
+          plugins={toSafeArray<VSTPluginInstance>(master?.vstPlugins)}
           title="Master Bus VST Inserts"
           badge="Master FX"
           color="#10b981"
           onUpdateChain={(newChain) => {
+            const safeChain = toSafeArray<VSTPluginInstance>(newChain);
             if (onUpdateVstChain) {
-              onUpdateVstChain(newChain);
+              onUpdateVstChain(safeChain);
             } else {
-              onUpdateMaster({ ...master, vstPlugins: newChain });
+              onUpdateMaster({ ...master, vstPlugins: safeChain });
             }
           }}
           onUpdateParam={(instId, pId, val) => {

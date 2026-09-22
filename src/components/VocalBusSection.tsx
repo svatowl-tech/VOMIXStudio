@@ -4,6 +4,7 @@ import { VocalBusMeterData } from '../hooks/useAudioEngine';
 import { VSTPluginInstance } from '../audio/vstTypes';
 import { VSTRackSlot } from './VSTRackSlot';
 import { Volume2, Sliders, Mic, ShieldAlert, Sparkles, Activity, Music, ChevronDown, ChevronUp, Layers } from 'lucide-react';
+import { toSafeArray } from '../utils/safeIterables';
 
 interface VocalBusSectionProps {
   vocalBus: VocalBusState;
@@ -175,15 +176,16 @@ export const VocalBusSection: React.FC<VocalBusSectionProps> = ({
       {/* VST Plugin Insert Rack for Vocal Bus */}
       <div className="pt-2 border-t border-slate-800/60">
         <VSTRackSlot
-          plugins={vocalBus.vstPlugins || []}
+          plugins={toSafeArray<VSTPluginInstance>(vocalBus?.vstPlugins)}
           title="Vocal Bus VST Inserts"
           badge="Vocal Bus FX"
           color="#8b5cf6"
           onUpdateChain={(newChain) => {
+            const safeChain = toSafeArray<VSTPluginInstance>(newChain);
             if (onUpdateVstChain) {
-              onUpdateVstChain(newChain);
+              onUpdateVstChain(safeChain);
             } else {
-              onUpdateVocalBus({ ...vocalBus, vstPlugins: newChain });
+              onUpdateVocalBus({ ...vocalBus, vstPlugins: safeChain });
             }
           }}
           onUpdateParam={(instId, pId, val) => {
