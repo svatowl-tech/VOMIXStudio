@@ -133,7 +133,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
   onImportComplete
 }) => {
   const [importMode, setImportMode] = useState<ImportMode>(defaultMode);
-  const [items, setItems] = useState<ImportItem[]>([]);
+  const [items, setItems] = useState<ImportItem[]>(() => toSafeArray<ImportItem>([]));
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -157,6 +157,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
    * Автоматическая классификация файла по расширению
    */
   const detectFileType = (file: File): 'video' | 'audio' | 'subtitle' | 'other' => {
+    if (!file || !file.name) return 'other';
     const ext = file.name.split('.').pop()?.toLowerCase() || '';
     if (['mp4', 'mkv', 'mov', 'webm', 'avi', 'm4v', 'ogv'].includes(ext)) {
       return 'video';
@@ -176,18 +177,21 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
   const addFilesToQueue = (files: FileList | File[] | unknown) => {
     const newItems: ImportItem[] = [];
     const fileArray = toSafeArray<File>(files);
+    const currentItems = toSafeArray<ImportItem>(items);
+    const safeExisting = toSafeArray<TrackState>(existingTracks);
 
     fileArray.forEach((file, index) => {
       if (!file) return;
       // Исключаем дубликаты уже добавленных файлов в этой сессии
-      if ((items || []).some((it) => it && it.file && it.file.name === file.name && it.file.size === file.size)) {
+      if (currentItems.some((it) => it && it.file && it.file.name === file.name && it.file.size === file.size)) {
         return;
       }
 
       const fileType = detectFileType(file);
       const cleanName = file.name ? file.name.replace(/\.[^/.]+$/, '') : `Track_${index + 1}`;
-      const colorIndex = ((existingTracks || []).length + (items || []).length + index) % (DEFAULT_TRACK_COLORS.length || 1);
-      const defaultColor = DEFAULT_TRACK_COLORS[colorIndex] || '#06b6d4';
+      const safeColors = toSafeArray<string>(DEFAULT_TRACK_COLORS);
+      const colorIndex = (safeExisting.length + currentItems.length + index) % (safeColors.length || 1);
+      const defaultColor = safeColors[colorIndex] || '#06b6d4';
 
       newItems.push({
         id: `import_${Date.now()}_${index}_${Math.random().toString(36).substring(2, 6)}`,
@@ -206,7 +210,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
     });
 
     if (newItems.length > 0) {
-      setItems((prev) => [...prev, ...newItems]);
+      setItems((prev) => [...toSafeArray<ImportItem>(prev), ...newItems]);
       systemLogger.info('Project', `В очередь импорта добавлено файлов: ${newItems.length} (Режим: ${importMode === 'new_project' ? 'Новый проект' : 'Догрузка'})`);
     }
   };
@@ -245,7 +249,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
    * Удаление файла из очереди
    */
   const removeItem = (id: string) => {
-    setItems((prev) => prev.filter((it) => it.id !== id));
+    setItems((prev) => toSafeArray<ImportItem>(prev).filter((it) => it && it.id !== id));
   };
 
   /**
@@ -253,7 +257,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
    */
   const updateItem = (id: string, updates: Partial<ImportItem>) => {
     setItems((prev) =>
-      prev.map((it) => (it.id === id ? { ...it, ...updates } : it))
+      toSafeArray<ImportItem>(prev).map((it) => (it && it.id === id ? { ...it, ...updates } : it))
     );
   };
 
@@ -261,7 +265,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
    * Запуск сквозного конвейера обработки и импорта
    */
   const handleStartImport = async () => {
-    const safeItems = (items || []).filter(Boolean);
+    const safeItems = toSafeArray<ImportItem>(items);
     if (safeItems.length === 0 || isProcessing) return;
 
     setIsProcessing(true);
@@ -276,9 +280,9 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
     let audioCount = 0;
     let subtitleCount = 0;
 
-    const baseTracks = importMode === 'new_project' ? [] : (existingTracks || []).filter(Boolean);
+    const baseTracks = importMode === 'new_project' ? [] : toSafeArray<TrackState>(existingTracks);
     const activeProjectTracks: TrackMetadata[] = baseTracks.map((t) => {
-      const firstClip = (t.clips || [])[0];
+      const firstClip = toSafeArray(t.clips)[0];
       return {
         id: t.id,
         name: t.name,
@@ -296,8 +300,9 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
     let accumulatedSubtitles: SubtitleCue[] = [];
 
     try {
-      for (let i = 0; i < items.length; i++) {
-        const item = items[i];
+      for (let i = 0; i < safeItems.length; i++) {
+        const item = safeItems[i];
+        if (!item) continue;
         updateItem(item.id, { status: 'processing', progressPercent: 20 });
 
         try {
@@ -445,10 +450,12 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
     }
   };
 
-  const videoItemsCount = (items || []).filter((it) => it && it.type === 'video').length;
-  const audioItemsCount = (items || []).filter((it) => it && it.type === 'audio').length;
-  const subtitleItemsCount = (items || []).filter((it) => it && it.type === 'subtitle').length;
-  const totalSizeBytes = (items || []).reduce((acc, it) => acc + (it?.sizeBytes || 0), 0);
+  const safeItemsList = toSafeArray<ImportItem>(items);
+  const videoItemsCount = safeItemsList.filter((it) => it && it.type === 'video').length;
+  const audioItemsCount = safeItemsList.filter((it) => it && it.type === 'audio').length;
+  const subtitleItemsCount = safeItemsList.filter((it) => it && it.type === 'subtitle').length;
+  const totalSizeBytes = safeItemsList.reduce((acc, it) => acc + (it?.sizeBytes || 0), 0);
+  const safeTracksList = toSafeArray<TrackState>(existingTracks);
 
   return (
     <div
@@ -570,12 +577,12 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
           </div>
 
           {/* Список добавленных элементов в очереди */}
-          {items.length > 0 && (
+          {safeItemsList.length > 0 && (
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <h3 className="text-xs font-semibold text-zinc-300 uppercase tracking-wider flex items-center gap-2">
                   <Layers className="w-4 h-4 text-cyan-400" />
-                  Очередь файлов к импорту ({items.length})
+                  Очередь файлов к импорту ({safeItemsList.length})
                 </h3>
                 <div className="flex items-center gap-3 text-xs text-zinc-400 font-mono">
                   {videoItemsCount > 0 && (
@@ -598,7 +605,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
               </div>
 
               <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-                {(items || []).map((item) => {
+                {safeItemsList.map((item) => {
                   const isAudio = item.type === 'audio';
                   const isVideo = item.type === 'video';
                   const isSub = item.type === 'subtitle';
@@ -681,7 +688,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
                                   updateItem(item.id, { targetTrackId: undefined, replaceExistingTrack: false });
                                 } else {
                                   const trackId = parseInt(val, 10);
-                                  const targetT = (existingTracks || []).find((t) => t && t.id === trackId);
+                                  const targetT = safeTracksList.find((t) => t && t.id === trackId);
                                   updateItem(item.id, {
                                     targetTrackId: trackId,
                                     targetTrackName: targetT?.name,
@@ -692,7 +699,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
                               className="bg-zinc-900 border border-zinc-700 text-zinc-200 rounded px-2 py-1 text-xs focus:border-cyan-500 outline-none cursor-pointer"
                             >
                               <option value="new">+ Создать новую дорожку</option>
-                              {(existingTracks || []).map((t) => (
+                              {safeTracksList.map((t) => (
                                 <option key={t.id} value={t.id}>
                                   Заменить #{t.id}: {t.name}
                                 </option>
@@ -716,7 +723,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
                           <div className="flex items-center gap-1.5">
                             <label className="text-zinc-400">Цвет:</label>
                             <div className="flex items-center gap-1">
-                              {(DEFAULT_TRACK_COLORS || []).slice(0, 5).map((color) => (
+                              {toSafeArray<string>(DEFAULT_TRACK_COLORS).slice(0, 5).map((color) => (
                                 <button
                                   key={color}
                                   type="button"
@@ -821,7 +828,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
               type="button"
               id="btn-confirm-media-import"
               onClick={handleStartImport}
-              disabled={items.length === 0 || isProcessing}
+              disabled={safeItemsList.length === 0 || isProcessing}
               className="flex items-center gap-2 px-5 py-2.5 text-xs font-bold text-black bg-gradient-to-r from-cyan-400 to-emerald-400 hover:from-cyan-300 hover:to-emerald-300 rounded-xl shadow-lg shadow-cyan-500/20 transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
             >
               {isProcessing ? (
@@ -833,8 +840,8 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
                 <>
                   <ArrowRight className="w-4 h-4" />
                   {importMode === 'new_project'
-                    ? `Создать проект из файлов (${items.length})`
-                    : `Импортировать в проект (${items.length})`}
+                    ? `Создать проект из файлов (${safeItemsList.length})`
+                    : `Импортировать в проект (${safeItemsList.length})`}
                 </>
               )}
             </button>

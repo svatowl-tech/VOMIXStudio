@@ -171,7 +171,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
 
   // Локальное состояние субтитров (синхронизировано с external)
   const [internalSubtitles, setInternalSubtitles] = useState<SubtitleCue[]>(() => {
-    return (
+    return toSafeArray<SubtitleCue>(
       externalSubtitles || [
         {
           index: 1,
@@ -191,18 +191,18 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     );
   });
 
-  const subtitles = (externalSubtitles !== undefined ? externalSubtitles : internalSubtitles) || [];
+  const subtitles = toSafeArray<SubtitleCue>(externalSubtitles !== undefined ? externalSubtitles : internalSubtitles);
   const setSubtitles = useCallback(
     (newCues: SubtitleCue[] | ((prev: SubtitleCue[]) => SubtitleCue[])) => {
       if (typeof newCues === 'function') {
-        const updated = newCues(subtitles);
+        const updated = toSafeArray<SubtitleCue>(newCues(subtitles));
         if (externalOnUpdateSubtitles) {
           externalOnUpdateSubtitles(updated);
         } else {
           setInternalSubtitles(updated);
         }
       } else {
-        const safeCues = (newCues || []).filter(Boolean);
+        const safeCues = toSafeArray<SubtitleCue>(newCues);
         if (externalOnUpdateSubtitles) {
           externalOnUpdateSubtitles(safeCues);
         } else {
@@ -232,7 +232,10 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   const [stripThresholdDb, setStripThresholdDb] = useState<number>(-40);
   const [stripMinSilenceMs, setStripMinSilenceMs] = useState<number>(300);
   const [stripPaddingMs, setStripPaddingMs] = useState<number>(60);
-  const [stripTargetTrackId, setStripTargetTrackId] = useState<number>((tracks && tracks[0]?.id) || 1);
+  const [stripTargetTrackId, setStripTargetTrackId] = useState<number>(() => {
+    const safeT = toSafeArray<TrackState>(tracks);
+    return safeT[0]?.id || 1;
+  });
 
   const [cueEditorOpen, setCueEditorOpen] = useState<boolean>(false);
   const [editingCue, setEditingCue] = useState<SubtitleCue | null>(null);
