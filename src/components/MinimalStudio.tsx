@@ -1451,6 +1451,7 @@ export const MinimalStudio: React.FC = () => {
         if (onProgress) {
           onProgress(`[${trackName}] Выполняется ${stepName}...`, percent);
         }
+        await new Promise((resolve) => setTimeout(resolve, 10));
         
         if (step.purpose === 'stem_separation') {
           const totalFrames = Math.floor((currentPcm as Float32Array).length / 2);
@@ -1595,6 +1596,7 @@ export const MinimalStudio: React.FC = () => {
         await uploadRawPCMToTrack(vocalsPcm, vocalsTrackId, newVocalsTrack.clips[0].id, 0, 1.0, 0, true);
         await uploadRawPCMToTrack(karaokePcm, karaokeTrackId, newKaraokeTrack.clips[0].id, 0, 1.0, 0, true);
       }
+      await new Promise((resolve) => setTimeout(resolve, 30));
     }
     
     const finalTracksList = [...toSafeArray<TrackState>(currentTracks), ...newTracksToAdd];

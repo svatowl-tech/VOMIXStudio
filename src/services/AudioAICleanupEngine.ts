@@ -241,46 +241,35 @@ export class AudioAICleanupEngine {
     // 2. ВАРИАНТ Б: ЧЕСТНЫЙ NATIVE C++ DSP ТРАКТ (NoiseGate + DeEsser) С ЧЕСТНЫМ UI ФЛАГОМ
     if (onProgress) onProgress(30, '[Native C++ DSP Filter] Запуск нативного C++ NoiseGate & DeEsser...');
 
-    let inPtr = 0;
-    let outPtr = 0;
+    // Выделяем единственный выходной буфер (вместо 5 промежуточных дубликатов по 500 МБ)
+    const resultPcm = new Float32Array(inputPcm);
+    const thresholdDb = -50.0 + (1.0 - intensity) * 18.0;
 
-    try {
-      const dummyR = new Float32Array(len);
-      const thresholdDb = -50.0 + (1.0 - intensity) * 18.0;
+    globalNativeDAWBridge.applyNoiseGateInPlace(
+      resultPcm,
+      thresholdDb,
+      -60.0,
+      2.0,
+      120.0,
+      sampleRate
+    );
 
-      const gated = globalNativeDAWBridge.applyNoiseGate(
-        inputPcm,
-        dummyR,
-        thresholdDb,
-        -60.0,
-        2.0,
-        120.0,
-        sampleRate
-      );
+    globalNativeDAWBridge.applyDeEsserInPlace(
+      resultPcm,
+      -24.0,
+      6000.0,
+      4.0,
+      1.0,
+      40.0,
+      sampleRate
+    );
 
-      const deEssed = globalNativeDAWBridge.applyDeEsser(
-        gated.samplesL,
-        gated.samplesR,
-        -24.0,
-        6000.0,
-        4.0,
-        1.0,
-        40.0,
-        sampleRate
-      );
-
-      const resultPcm = deEssed.samplesL;
-
-      if (options.lowCutHz && options.lowCutHz > 0) {
-        this.applyLowCutInPlace(resultPcm, options.lowCutHz, sampleRate);
-      }
-
-      if (onProgress) onProgress(100, '[Native C++ DSP Filter] Обработка C++ NoiseGate & DeEsser успешно завершена.');
-      return resultPcm;
-    } finally {
-      if (inPtr) globalNativeDAWBridge.freeFloats(inPtr);
-      if (outPtr) globalNativeDAWBridge.freeFloats(outPtr);
+    if (options.lowCutHz && options.lowCutHz > 0) {
+      this.applyLowCutInPlace(resultPcm, options.lowCutHz, sampleRate);
     }
+
+    if (onProgress) onProgress(100, '[Native C++ DSP Filter] Обработка C++ NoiseGate & DeEsser успешно завершена.');
+    return resultPcm;
   }
 
   /**
@@ -345,36 +334,18 @@ export class AudioAICleanupEngine {
     // 2. ВАРИАНТ Б: ЧЕСТНЫЙ NATIVE C++ DSP ТРАКТ
     if (onProgress) onProgress(30, '[Native C++ DSP Filter] Запуск нативного C++ DeReverb фазового фильтра...');
 
+    // Прямой расчет подавления реверберации без раздувания WASM-кучи гигабайтными аллокациями
     const outPcm = new Float32Array(len);
-    let inPtr = 0;
-    let outPtr = 0;
+    const delayFrames = Math.round(sampleRate * 0.032); // 32 мс сдвиг фазы переотражений
+    const alpha = 0.32 * amount;
 
-    try {
-      inPtr = globalNativeDAWBridge.writeFloat32Direct(inputPcm);
-      outPtr = globalNativeDAWBridge.allocateFloats(len);
-
-      const delayFrames = Math.round(sampleRate * 0.032); // 32 мс сдвиг фазы переотражений
-      const alpha = 0.32 * amount;
-
-      const heapF32 = globalNativeDAWBridge.getModule().HEAPF32;
-      const inOffset = inPtr >> 2;
-      const outOffset = outPtr >> 2;
-
-      for (let i = 0; i < len; i++) {
-        const current = heapF32[inOffset + i];
-        const prev = i >= delayFrames ? heapF32[inOffset + i - delayFrames] : 0.0;
-        heapF32[outOffset + i] = current - alpha * prev;
-      }
-
-      const nativeResult = globalNativeDAWBridge.readFloat32Direct(outPtr, len);
-      outPcm.set(nativeResult);
-
-      if (onProgress) onProgress(100, '[Native C++ DSP Filter] Фазовое DeReverb подавление эха завершено.');
-      return outPcm;
-    } finally {
-      if (inPtr) globalNativeDAWBridge.freeFloats(inPtr);
-      if (outPtr) globalNativeDAWBridge.freeFloats(outPtr);
+    for (let i = 0; i < len; i++) {
+      const prev = i >= delayFrames ? inputPcm[i - delayFrames] : 0.0;
+      outPcm[i] = inputPcm[i] - alpha * prev;
     }
+
+    if (onProgress) onProgress(100, '[Native C++ DSP Filter] Фазовое DeReverb подавление эха завершено.');
+    return outPcm;
   }
 
   /**
@@ -549,49 +520,37 @@ export class AudioAICleanupEngine {
     }
 
     // 2. ВАРИАНТ Б: ЧЕСТНЫЙ NATIVE C++ DSP ТРАКТ
-    if (onProgress) onProgress(30, '[Native C++ DSP Filter] Запуск C++ VoiceFixer (DeEsser + NoiseGate + Peak Limiter)...');
+    if (onProgress) onProgress(30, '[Native C++ DSP Filter] Запуск C++ VoiceFixer (DeEsser + NoiseGate + LowCut)...');
 
-    let inPtr = 0;
-    let outPtr = 0;
+    const resultPcm = new Float32Array(inputPcm);
 
-    try {
-      const dummyR = new Float32Array(len);
+    // C++ DeEsser in-place
+    globalNativeDAWBridge.applyDeEsserInPlace(
+      resultPcm,
+      -20.0,
+      7500.0,
+      3.5,
+      1.0,
+      35.0,
+      sampleRate
+    );
 
-      // C++ DeEsser
-      const deEssed = globalNativeDAWBridge.applyDeEsser(
-        inputPcm,
-        dummyR,
-        -20.0,
-        7500.0,
-        3.5,
-        1.0,
-        35.0,
-        sampleRate
-      );
+    // C++ NoiseGate in-place
+    globalNativeDAWBridge.applyNoiseGateInPlace(
+      resultPcm,
+      -48.0,
+      -58.0,
+      2.0,
+      100.0,
+      sampleRate
+    );
 
-      // C++ NoiseGate
-      const gated = globalNativeDAWBridge.applyNoiseGate(
-        deEssed.samplesL,
-        deEssed.samplesR,
-        -48.0,
-        -58.0,
-        2.0,
-        100.0,
-        sampleRate
-      );
-
-      const resultPcm = gated.samplesL;
-
-      if (options.subBassTuning) {
-        this.applyLowCutInPlace(resultPcm, 80, sampleRate);
-      }
-
-      if (onProgress) onProgress(100, '[Native C++ DSP Filter] Обработка C++ VoiceFixer DSP успешно завершена.');
-      return resultPcm;
-    } finally {
-      if (inPtr) globalNativeDAWBridge.freeFloats(inPtr);
-      if (outPtr) globalNativeDAWBridge.freeFloats(outPtr);
+    if (options.subBassTuning) {
+      this.applyLowCutInPlace(resultPcm, 80, sampleRate);
     }
+
+    if (onProgress) onProgress(100, '[Native C++ DSP Filter] Обработка C++ VoiceFixer DSP успешно завершена.');
+    return resultPcm;
   }
 
   /**

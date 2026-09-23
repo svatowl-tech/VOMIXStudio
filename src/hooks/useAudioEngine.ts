@@ -242,6 +242,10 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
   // requestId -> resolve callback с Base64 строкой чанка
   const pendingChunkRequestsRef = useRef<Map<string, (chunk: string) => void>>(new Map());
 
+  // Кэш ссылок на буферы клипов, уже переданные в AudioWorklet (clipId -> Float32Array)
+  // Исключает катастрофическое повторное клонирование сотен мегабайт PCM буферов через postMessage на каждый чих интерфейса
+  const syncedClipBuffersRef = useRef<Map<number, Float32Array>>(new Map());
+
   /**
    * Инициализация AudioContext, загрузка C++ WebAssembly ядра и запуск AudioWorklet
    */
@@ -573,6 +577,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             });
           });
 
+          syncedClipBuffersRef.current.set(clipId, pcmFloat32);
           workletNodeRef.current.port.postMessage({
             type: 'LOAD_TRACK_CLIP',
             trackId,
@@ -606,6 +611,8 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
       isStereo: boolean = true
     ) => {
       if (workletNodeRef.current) {
+        syncedClipBuffersRef.current.set(clipId, pcmFloat32);
+
         const handleAck = (e: MessageEvent) => {
           if (e.data && e.data.type === 'CLIP_LOADED_SUCCESS' && e.data.clipId === clipId) {
             workletNodeRef.current?.port.removeEventListener('message', handleAck);
@@ -635,6 +642,27 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     if (workletNodeRef.current) {
       try {
         const safeClips = toSafeArray<ClipConfig>(clips);
+
+        // Проверяем, появились ли новые или обновленные PCM буферы, не загруженные в Worklet
+        for (const c of safeClips) {
+          if (!c) continue;
+          const prevBuf = syncedClipBuffersRef.current.get(c.id);
+          if (c.buffer instanceof Float32Array && c.buffer.length > 0 && prevBuf !== c.buffer) {
+            syncedClipBuffersRef.current.set(c.id, c.buffer);
+            workletNodeRef.current.port.postMessage({
+              type: 'LOAD_TRACK_CLIP',
+              trackId,
+              clipId: c.id,
+              audioData: c.buffer,
+              offsetSamples: c.offsetSamples || 0,
+              gain: typeof c.gain === 'number' ? c.gain : 1.0,
+              pan: typeof c.pan === 'number' ? c.pan : 0.0,
+              isStereo: c.buffer.length >= (c.lengthSamples || 0) * 2
+            });
+          }
+        }
+
+        // Синхронизируем ТОЛЬКО легковесные метаданные без повторного клонирования сотен мегабайт аудио
         workletNodeRef.current.port.postMessage({
           type: 'SET_TRACK_CLIPS',
           trackId,
@@ -647,8 +675,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             pan: typeof c.pan === 'number' ? c.pan : 0.0,
             fadeInSamples: c.fadeInSamples || 0,
             fadeOutSamples: c.fadeOutSamples || 0,
-            isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true,
-            buffer: c.buffer instanceof Float32Array && c.buffer.length > 0 ? c.buffer : undefined
+            isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true
           }))
         });
       } catch (err) {
@@ -661,6 +688,31 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     if (workletNodeRef.current) {
       try {
         const safeTracks = toSafeArray<TrackState>(tracks);
+
+        // Проверяем, появились ли новые или обновленные PCM буферы, не загруженные в Worklet
+        for (const t of safeTracks) {
+          if (!t) continue;
+          for (const c of toSafeArray<ClipConfig>(t.clips)) {
+            if (!c) continue;
+            const prevBuf = syncedClipBuffersRef.current.get(c.id);
+            if (c.buffer instanceof Float32Array && c.buffer.length > 0 && prevBuf !== c.buffer) {
+              syncedClipBuffersRef.current.set(c.id, c.buffer);
+              workletNodeRef.current.port.postMessage({
+                type: 'LOAD_TRACK_CLIP',
+                trackId: t.id,
+                clipId: c.id,
+                audioData: c.buffer,
+                offsetSamples: c.offsetSamples || 0,
+                gain: typeof c.gain === 'number' ? c.gain : 1.0,
+                pan: typeof c.pan === 'number' ? c.pan : 0.0,
+                isStereo: c.buffer.length >= (c.lengthSamples || 0) * 2
+              });
+            }
+          }
+        }
+
+        // Передаем ТОЛЬКО чистые метаданные дорожек и параметров микшера.
+        // Буферы PCM хранятся в кэше AudioWorklet и никогда не передаются повторно в SET_ALL_TRACKS.
         workletNodeRef.current.port.postMessage({
           type: 'SET_ALL_TRACKS',
           tracks: safeTracks.map((t) => ({
@@ -689,8 +741,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
               pan: typeof c.pan === 'number' ? c.pan : 0.0,
               fadeInSamples: c.fadeInSamples || 0,
               fadeOutSamples: c.fadeOutSamples || 0,
-              isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true,
-              buffer: c.buffer instanceof Float32Array && c.buffer.length > 0 ? c.buffer : undefined
+              isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true
             }))
           }))
         });

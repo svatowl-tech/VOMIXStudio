@@ -377,52 +377,17 @@ export class MediaNormalizer {
       }
     }
 
-    const bridge = globalNativeDAWBridge;
-    const mod = bridge.getModule();
-
-    if (!mod.applyGain) {
-      if (inPlace) {
-        for (let i = 0; i < buffer.length; i++) {
-          buffer[i] *= factor;
-        }
-        return buffer;
-      } else {
-        const result = new Float32Array(buffer.length);
-        for (let i = 0; i < buffer.length; i++) {
-          result[i] = buffer[i] * factor;
-        }
-        return result;
+    if (inPlace) {
+      for (let i = 0; i < buffer.length; i++) {
+        buffer[i] *= factor;
       }
-    }
-
-    let ptr = 0;
-    try {
-      ptr = bridge.writeFloat32Direct(buffer);
-      mod.applyGain(ptr, buffer.length, gainDb);
-      const result = bridge.readFloat32Direct(ptr, buffer.length);
-      if (inPlace) {
-        buffer.set(result);
-        return buffer;
+      return buffer;
+    } else {
+      const result = new Float32Array(buffer.length);
+      for (let i = 0; i < buffer.length; i++) {
+        result[i] = buffer[i] * factor;
       }
       return result;
-    } catch (err: any) {
-      console.warn('[C++ MediaNormalizer] Сбой WASM применения гейна, переходим на чистый JS:', err);
-      if (inPlace) {
-        for (let i = 0; i < buffer.length; i++) {
-          buffer[i] *= factor;
-        }
-        return buffer;
-      } else {
-        const result = new Float32Array(buffer.length);
-        for (let i = 0; i < buffer.length; i++) {
-          result[i] = buffer[i] * factor;
-        }
-        return result;
-      }
-    } finally {
-      if (ptr) {
-        bridge.freeFloats(ptr);
-      }
     }
   }
 }

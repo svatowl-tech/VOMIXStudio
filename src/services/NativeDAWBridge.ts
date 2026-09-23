@@ -2306,6 +2306,38 @@ export class NativeDAWBridge {
   }
 
   /**
+   * Применение NoiseGate напрямую in-place к сэмплам без промежуточных аллокаций памяти
+   */
+  public applyNoiseGateInPlace(
+    samples: Float32Array,
+    thresholdDb: number = -48.0,
+    floorDb: number = -60.0,
+    attackMs: number = 2.0,
+    releaseMs: number = 100.0,
+    sampleRate: number = 48000
+  ): void {
+    const len = samples.length;
+    const blockSize = 512;
+    const gate = {
+      enabled: true,
+      thresholdDb,
+      floorDb,
+      attackMs,
+      releaseMs
+    };
+    const gateState = {
+      gain: 1.0,
+      env: 0.0
+    };
+
+    for (let offset = 0; offset < len; offset += blockSize) {
+      const currentBlockFrames = Math.min(blockSize, len - offset);
+      const sub = samples.subarray(offset, offset + currentBlockFrames);
+      processNoiseGateBlock(sub, sub, currentBlockFrames, gate, gateState, sampleRate);
+    }
+  }
+
+  /**
    * Применение нативного/высокопроизводительного C++ DeEsser к PCM-данным
    */
   public applyDeEsser(
@@ -2347,6 +2379,43 @@ export class NativeDAWBridge {
     }
 
     return { samplesL: outL, samplesR: outR };
+  }
+
+  /**
+   * Применение DeEsser напрямую in-place к сэмплам без промежуточных аллокаций памяти
+   */
+  public applyDeEsserInPlace(
+    samples: Float32Array,
+    thresholdDb: number = -22.0,
+    frequency: number = 6000.0,
+    ratio: number = 4.0,
+    attackMs: number = 1.0,
+    releaseMs: number = 40.0,
+    sampleRate: number = 48000
+  ): void {
+    const len = samples.length;
+    const blockSize = 512;
+    const deEsser = {
+      enabled: true,
+      thresholdDb,
+      frequency,
+      ratio,
+      attackMs,
+      releaseMs
+    };
+    const deEssState = {
+      bpCoeffs: null as any,
+      lastFreq: 0,
+      stL: null as any,
+      stR: null as any,
+      env: 0
+    };
+
+    for (let offset = 0; offset < len; offset += blockSize) {
+      const currentBlockFrames = Math.min(blockSize, len - offset);
+      const sub = samples.subarray(offset, offset + currentBlockFrames);
+      processDeEsserBlock(sub, sub, currentBlockFrames, deEsser, deEssState, sampleRate);
+    }
   }
 }
 
