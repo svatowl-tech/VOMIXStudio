@@ -521,8 +521,8 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     let targetClip: ClipConfig | null = null;
 
     if (selectedClipId !== null) {
-      for (const t of (tracks || [])) {
-        const c = (t.clips || []).find((item) => item && item.id === selectedClipId);
+      for (const t of toSafeArray<TrackState>(tracks)) {
+        const c = toSafeArray<ClipConfig>(t?.clips).find((item) => item && item.id === selectedClipId);
         if (c && currentSample > c.offsetSamples && currentSample < c.offsetSamples + c.lengthSamples) {
           targetTrack = t;
           targetClip = c;
@@ -532,8 +532,8 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     }
 
     if (!targetClip) {
-      for (const t of (tracks || [])) {
-        const c = (t.clips || []).find(
+      for (const t of toSafeArray<TrackState>(tracks)) {
+        const c = toSafeArray<ClipConfig>(t?.clips).find(
           (item) =>
             item &&
             currentSample > item.offsetSamples && currentSample < item.offsetSamples + item.lengthSamples
@@ -575,7 +575,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
         let processedTracksCount = 0;
         const updatedTracks: TrackState[] = [];
 
-        for (const track of currentTracks) {
+        for (const track of toSafeArray<TrackState>(currentTracks)) {
           if (!track || !track.clips || track.clips.length === 0) {
             if (track) updatedTracks.push(track);
             continue;
@@ -584,7 +584,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
           let trackModified = false;
           const newTrackClips: ClipConfig[] = [];
 
-          for (const clip of (track.clips || [])) {
+          for (const clip of toSafeArray<ClipConfig>(track.clips)) {
             if (!clip || !clip.buffer || clip.buffer.length === 0 || clip.lengthSamples <= 0) {
               if (clip) newTrackClips.push(clip);
               continue;
@@ -828,8 +828,8 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       showNotice('Сначала выберите аудиоклип на таймлайне', 'warn');
       return;
     }
-    for (const track of (tracks || [])) {
-      const clip = (track.clips || []).find((c) => c && c.id === selectedClipId);
+    for (const track of toSafeArray<TrackState>(tracks)) {
+      const clip = toSafeArray<ClipConfig>(track?.clips).find((c) => c && c.id === selectedClipId);
       if (clip) {
         const targetEndSample = Math.round(currentTimeSec * sampleRate);
         const targetLength = targetEndSample - clip.offsetSamples;
@@ -857,7 +857,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       showNotice('Выберите аудиоклип для подгонки под субтитр', 'warn');
       return;
     }
-    const safeSubtitles = subtitles || [];
+    const safeSubtitles = toSafeArray<SubtitleCue>(subtitles);
     const targetCue =
       selectedCueIndex !== null
         ? safeSubtitles.find((c) => c.index === selectedCueIndex)
@@ -869,9 +869,9 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       return;
     }
 
-    const safeTracks = tracks || [];
+    const safeTracks = toSafeArray<TrackState>(tracks);
     for (const track of safeTracks) {
-      const clip = (track.clips || []).find((c) => c.id === selectedClipId);
+      const clip = toSafeArray<ClipConfig>(track?.clips).find((c) => c.id === selectedClipId);
       if (clip && onUpdateTrack) {
         const cueDurationSec = Math.max(0.2, targetCue.endSec - targetCue.startSec);
         const targetLengthSamples = Math.round(cueDurationSec * sampleRate);
@@ -914,8 +914,8 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   // Применение численного коэффициента Time Stretch
   const handleApplyStretchRatio = (ratio: number) => {
     if (selectedClipId === null) return;
-    for (const track of (tracks || [])) {
-      const clip = (track.clips || []).find((c) => c && c.id === selectedClipId);
+    for (const track of toSafeArray<TrackState>(tracks)) {
+      const clip = toSafeArray<ClipConfig>(track?.clips).find((c) => c && c.id === selectedClipId);
       if (clip) {
         const baseLength = clip.originalLengthSamples || clip.lengthSamples;
         const targetLength = Math.round(baseLength * ratio);
@@ -973,15 +973,15 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   // Удаление выбранного клипа
   const handleDeleteSelectedClip = () => {
     if (selectedClipId === null || !onUpdateTrack) return;
-    const safeTracks = tracks || [];
+    const safeTracks = toSafeArray<TrackState>(tracks);
     for (const track of safeTracks) {
-      if ((track.clips || []).some((c) => c.id === selectedClipId)) {
-        const remainingClips = (track.clips || []).filter((c) => c.id !== selectedClipId);
+      if (toSafeArray<ClipConfig>(track?.clips).some((c) => c && c.id === selectedClipId)) {
+        const remainingClips = toSafeArray<ClipConfig>(track?.clips).filter((c) => c && c.id !== selectedClipId);
         const updatedTrack = {
           ...track,
           clips: remainingClips
         };
-        const newTracks = tracksRef.current.map((t) => (t.id === track.id ? updatedTrack : t));
+        const newTracks = toSafeArray<TrackState>(tracksRef.current).map((t) => (t && t.id === track.id ? updatedTrack : t));
 
         onUpdateTrack(updatedTrack);
         handleSyncTrackClips(track.id, remainingClips);
@@ -1137,11 +1137,11 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       if (!onUpdateTrack || activeDrag.trackId === undefined) return;
 
       const deltaSamples = Math.round(deltaSec * sampleRate);
-      const targetTrack = (tracks || []).find((t) => t && t.id === activeDrag.trackId);
+      const targetTrack = toSafeArray<TrackState>(tracks).find((t) => t && t.id === activeDrag.trackId);
       if (!targetTrack) return;
 
       // Получаем список соседних клипов на дорожке для предотвращения коллизий
-      const otherClips = (targetTrack.clips || []).filter((c) => c && c.id !== activeDrag.clipId);
+      const otherClips = toSafeArray<ClipConfig>(targetTrack.clips).filter((c) => c && c.id !== activeDrag.clipId);
 
       if (activeDrag.mode === 'time-stretch') {
         const newLength = Math.max(
@@ -1382,8 +1382,8 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
 
   const selectedClip = useMemo(() => {
     if (selectedClipId === null) return null;
-    for (const t of (tracks || [])) {
-      const c = (t.clips || []).find((item) => item && item.id === selectedClipId);
+    for (const t of toSafeArray<TrackState>(tracks)) {
+      const c = toSafeArray<ClipConfig>(t?.clips).find((item) => item && item.id === selectedClipId);
       if (c) return { clip: c, track: t };
     }
     return null;
@@ -1391,7 +1391,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
 
   const selectedCue = useMemo(() => {
     if (selectedCueIndex === null) return null;
-    return (subtitles || []).find((c) => c && c.index === selectedCueIndex) || null;
+    return toSafeArray<SubtitleCue>(subtitles).find((c) => c && c.index === selectedCueIndex) || null;
   }, [selectedCueIndex, subtitles]);
 
   return (

@@ -17,6 +17,7 @@
  */
 
 import { TrackState, MasterState } from '../audio/dawEngine';
+import { toSafeArray } from '../utils/safeIterables';
 
 export interface MediaAssetRecord {
   id: string;
@@ -274,11 +275,11 @@ export class AssetDatabase {
 
       // Очищаем и сохраняем актуальные дорожки
       store.clear();
-      for (const t of tracks) {
+      for (const t of toSafeArray<TrackState>(tracks)) {
         // Сохраняем дорожку без огромных встроенных буферов Float32Array (клипы сохраняются раздельно)
         const lightweightTrack: TrackState = {
           ...t,
-          clips: t.clips.map((c) => ({
+          clips: toSafeArray(t?.clips).map((c) => ({
             ...c,
             buffer: new Float32Array(0) // Метаданные клипа, буфер подгружается при необходимости
           }))
@@ -371,7 +372,7 @@ export class AssetDatabase {
       let videoCount = 0;
       let audioCount = 0;
 
-      for (const a of assets) {
+      for (const a of toSafeArray<MediaAssetRecord>(assets)) {
         totalBytes += a.sizeBytes || (a.blob ? a.blob.size : 0);
         if (a.type === 'video') videoCount++;
         if (a.type === 'audio') audioCount++;

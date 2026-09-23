@@ -25,6 +25,7 @@
 import { TrackState, MasterState, ClipConfig, VocalBusState } from '../audio/dawEngine';
 import { EMBEDDED_WASM_CORE_BASE64 } from '../data/embeddedWasmCore';
 import { systemLogger } from './SystemLogger';
+import { toSafeArray } from '../utils/safeIterables';
 
 export type WavBitDepth = 16 | 24 | 32;
 
@@ -1106,7 +1107,7 @@ export class NativeDAWBridge {
     let activeTrackCount = 0;
 
     const updatedTracks: TrackState[] = tracks.map((track) => {
-      const allClips = track.clips || [];
+      const allClips = toSafeArray<ClipConfig>(track?.clips);
       if (allClips.length === 0) {
         adjustments.push({
           trackId: track.id,
@@ -1235,8 +1236,8 @@ export class NativeDAWBridge {
   ): Promise<NativeRenderAudioResult> {
     // Расчет длительности в сэмплах
     let maxFrames = 0;
-    for (const track of tracks) {
-      for (const clip of track.clips || []) {
+    for (const track of toSafeArray<TrackState>(tracks)) {
+      for (const clip of toSafeArray<ClipConfig>(track?.clips)) {
         const endFrame = clip.offsetSamples + clip.lengthSamples;
         if (endFrame > maxFrames) maxFrames = endFrame;
       }
@@ -1316,7 +1317,7 @@ export class NativeDAWBridge {
         const isOriginal = !!t.isOriginalAudio || /видео|video|оригинал|original/i.test(t.name || '');
 
         // 2. Сэмплируем клипы дорожки, которые пересекаются с блоком
-        const clips = t.clips || [];
+        const clips = toSafeArray<ClipConfig>(t?.clips);
         for (const c of clips) {
           const pcm = c.buffer;
           if (!pcm || pcm.length === 0) continue;

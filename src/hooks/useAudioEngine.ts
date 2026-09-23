@@ -198,7 +198,6 @@ const getParamIdAsNumber = (paramName: string | number): number => {
 
     // Saturation (1..2)
     case 'drive': return 1;
-    case 'mix': return 2;
 
     default:
       return 0;
@@ -344,25 +343,33 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
               }
 
               // Жесткая проверка на массив перед вызовом итерации для предотвращения TypeError
-              if (Array.isArray(lastTracksData)) {
+              if (Array.isArray(lastTracksData) && lastTracksData.length > 0) {
+                const tracksSnapshot = [...lastTracksData];
+                lastTracksData = null;
                 setTrackMeters((prevMap) => {
-                  const newMap = new Map(prevMap);
-                  for (const item of lastTracksData!) {
+                  const safeMap = prevMap instanceof Map ? prevMap : new Map();
+                  const newMap = new Map(safeMap);
+                  const safeItems = toSafeArray<TrackMeterData>(tracksSnapshot);
+                  for (let i = 0; i < safeItems.length; i++) {
+                    const item = safeItems[i];
                     if (item && typeof item.trackId === 'number') {
                       newMap.set(item.trackId, item);
                     }
                   }
                   return newMap;
                 });
+              } else {
                 lastTracksData = null;
               }
               if (lastVocalBusData) {
-                setVocalBusMeter(lastVocalBusData);
+                const vocalBusSnapshot = { ...lastVocalBusData };
                 lastVocalBusData = null;
+                setVocalBusMeter(vocalBusSnapshot);
               }
               if (lastMasterData) {
-                setMasterMeter(lastMasterData);
+                const masterSnapshot = { ...lastMasterData };
                 lastMasterData = null;
+                setMasterMeter(masterSnapshot);
               }
               frameId = null;
             };
