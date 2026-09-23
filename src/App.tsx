@@ -765,6 +765,7 @@ export default function App() {
               tracks={tracks}
               master={master}
               sourceVideoFile={sourceVideoFile}
+              vocalBus={vocalBus}
             />
           </div>
         )}

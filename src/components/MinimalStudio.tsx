@@ -71,7 +71,8 @@ import { DubbingAIStudio } from './DubbingAIStudio';
 import { SubtitleCue } from '../services/ProjectManager';
 import { formatSMPTE } from '../utils/waveformUtils';
 import { VoiceoverMixWizardModal } from './VoiceoverMixWizardModal';
-import { ClipCollisionInfo } from '../utils/collisionDetector';
+import { ClipCollisionInfo, detectTrackCollisions } from '../utils/collisionDetector';
+import { globalAutoTimingService } from '../services/AutoTimingService';
 import { globalAIPipelineStore } from '../services/AIPipelineStore';
 import { globalStemSeparationService } from '../services/StemSeparationService';
 import { globalAudioAICleanupEngine } from '../services/AudioAICleanupEngine';
@@ -982,9 +983,70 @@ export const MinimalStudio: React.FC = () => {
     triggerAutoSave();
   };
 
+  const handleRunAutoTimingAndResolveCollisions = async (
+    customTracks?: TrackState[],
+    customSubtitles?: SubtitleCue[]
+  ): Promise<TrackState[]> => {
+    const sourceTracks = customTracks || tracks;
+    const sourceSubtitles = customSubtitles || subtitles;
+    const safeSubtitles = toSafeArray<SubtitleCue>(sourceSubtitles);
+
+    if (safeSubtitles.length === 0) {
+      setStatusMessage('Субтитры не загружены. Для авто-тайминга требуется файл субтитров (SRT, ASS, VTT).');
+      return sourceTracks;
+    }
+
+    setStatusMessage('Запуск C++ конвейера авто-тайминга: сопоставление актёров, совмещение по сабам и разведение коллизий...');
+    try {
+      const result = globalAutoTimingService.runAutoTimingPipeline(sourceTracks, safeSubtitles);
+      setTracks(result.updatedTracks);
+      syncAllTracks(result.updatedTracks);
+
+      // Синхронизируем срезы буферов и таймкоды с AudioWorklet
+      for (const track of result.updatedTracks) {
+        for (const clip of toSafeArray<ClipConfig>(track.clips)) {
+          if (clip.buffer && clip.buffer.length > 0) {
+            uploadRawPCMToTrack(
+              clip.buffer,
+              track.id,
+              clip.id,
+              clip.offsetSamples / 48000,
+              clip.gain,
+              clip.pan,
+              true
+            );
+          }
+        }
+      }
+
+      const collisions = detectTrackCollisions(result.updatedTracks);
+      setDetectedCollisions(collisions);
+      triggerAutoSave();
+
+      const summary = `⚡ Авто-тайминг: сопоставлено ${result.actorMappings.length} актёров, выровнено ${result.totalPhrasesAligned} фраз, устранено ${result.resolvedCollisionsCount} наездов, сохранено ${result.preservedScriptOverlapsCount} сценарных одновременных реплик.`;
+      setStatusMessage(summary);
+      setLoudnessMatchReport(summary);
+      return result.updatedTracks;
+    } catch (err: any) {
+      console.error('Ошибка выполнения авто-тайминга:', err);
+      setStatusMessage(`Ошибка авто-тайминга: ${err?.message || err}`);
+      return sourceTracks;
+    }
+  };
+
   const handleModalImportSubtitles = async (cues: SubtitleCue[], sourceFileName?: string) => {
-    setSubtitles(toSafeArray<SubtitleCue>(cues));
-    setStatusMessage(`Субтитры [${sourceFileName || 'файл'}] импортированы: ${toSafeArray<SubtitleCue>(cues).length} реплик.`);
+    const safeCues = toSafeArray<SubtitleCue>(cues);
+    setSubtitles(safeCues);
+    setStatusMessage(`Субтитры [${sourceFileName || 'файл'}] импортированы: ${safeCues.length} реплик.`);
+    
+    // Если на дорожках уже есть загруженные аудиоматериалы — автоматически запускаем умный тайминг
+    const safeTracks = toSafeArray<TrackState>(tracks);
+    const hasClips = safeTracks.some((t) => toSafeArray(t.clips).some((c) => c && c.lengthSamples > 0));
+    if (hasClips && safeCues.length > 0) {
+      setTimeout(() => {
+        handleRunAutoTimingAndResolveCollisions(safeTracks, safeCues);
+      }, 100);
+    }
     triggerAutoSave();
   };
 
@@ -1674,16 +1736,20 @@ export const MinimalStudio: React.FC = () => {
     await globalProjectManager.saveRenderedAsset(outputFileName, finalVideoBlob, true);
     await globalProjectManager.saveRenderedAsset(outputFileName, finalVideoBlob, false);
 
-    // Кэшируем ассет в SQL БД
-    await AssetDatabase.getInstance().saveAsset({
-      id: `render_${Date.now()}`,
-      name: outputFileName,
-      type: 'render',
-      mimeType: 'video/mp4',
-      sizeBytes: finalVideoBlob.size,
-      timestamp: Date.now(),
-      blob: finalVideoBlob
-    });
+    // Кэшируем ассет в SQL БД с защитой от сбоев
+    try {
+      await AssetDatabase.getInstance().saveAsset({
+        id: `render_${Date.now()}`,
+        name: outputFileName,
+        type: 'render',
+        mimeType: 'video/mp4',
+        sizeBytes: finalVideoBlob.size,
+        timestamp: Date.now(),
+        blob: finalVideoBlob
+      });
+    } catch (dbErr) {
+      console.warn('[MinimalStudio] Не удалось сохранить ассет в IndexedDB:', dbErr);
+    }
 
     setIsExporting(false);
     return {
@@ -2139,6 +2205,16 @@ export const MinimalStudio: React.FC = () => {
             </button>
 
             <button
+              id="btn-auto-timing-subtitles"
+              onClick={() => handleRunAutoTimingAndResolveCollisions()}
+              className="px-3.5 py-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 shadow-lg shadow-cyan-950/40 cursor-pointer"
+              title="Автоматически сопоставить актёров, совместить фразы по субтитрам и развести наезды"
+            >
+              <Zap size={14} className="text-cyan-200" />
+              ⚡ Авто-тайминг сабов
+            </button>
+
+            <button
               id="btn-loudness-match-broadcast"
               onClick={() => handleAutoLoudnessMatch(-18.0)}
               className="px-3.5 py-2 bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 shadow-lg shadow-blue-950/40 cursor-pointer"
@@ -2523,7 +2599,14 @@ export const MinimalStudio: React.FC = () => {
         tracks={safeTracksList}
         setTracks={setTracks}
         vocalBus={vocalBus}
-        setVocalBus={setVocalBus}
+        setVocalBus={setVocalBusState}
+        onVocalBusChange={(updatedVocalBus) => {
+          setVocalBusState(updatedVocalBus);
+          setVocalBus(updatedVocalBus);
+        }}
+        onTrackVolumeChange={(trackId, volumeDb) => {
+          setTrackVolume(trackId, volumeDb);
+        }}
         master={master}
         videoFile={videoFile}
         videoDuration={videoDuration}
@@ -2534,6 +2617,8 @@ export const MinimalStudio: React.FC = () => {
         onRunAIPipelineAndNorm={handleRunAIPipelineAndNorm}
         onRunFinalMasterAndMux={handleRunFinalMasterAndMux}
         onCollisionsDetected={setDetectedCollisions}
+        subtitles={subtitles}
+        onRunAutoTiming={handleRunAutoTimingAndResolveCollisions}
       />
     </div>
   );

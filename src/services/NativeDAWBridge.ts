@@ -1442,6 +1442,9 @@ export class NativeDAWBridge {
           vocalBusBlockL[i] *= vocalVolLinear * vPanL;
           vocalBusBlockR[i] *= vocalVolLinear * vPanR;
         }
+      } else if (vocalBus && vocalBus.mute) {
+        vocalBusBlockL.fill(0);
+        vocalBusBlockR.fill(0);
       }
 
       // 8. Авто-даккинг оригинального звука при наличии вокала

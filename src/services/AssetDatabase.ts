@@ -84,29 +84,29 @@ export class AssetDatabase {
   }
 
   /**
-   * Инициализация или открытие IndexedDB
+   * Инициализация или открытие IndexedDB с обработчиками переподключения
    */
-  public async initDatabase(): Promise<IDBDatabase> {
+  public async initDatabase(): Promise<IDBDatabase | null> {
     if (this.isFallbackMode) {
-      return null as any;
+      return null;
     }
-    if (this.db) return this.db;
+    if (this.db) {
+      return this.db;
+    }
     if (this.initPromise) {
       try {
         return await this.initPromise;
       } catch (err) {
-        console.warn('[AssetDatabase] Повторная попытка: используется Memory-хранилище в связи с прошлой ошибкой:', err);
-        this.isFallbackMode = true;
-        this.initPromise = Promise.resolve(null as any);
-        return null as any;
+        console.warn('[AssetDatabase] Ошибка ожидания initPromise, повторное открытие:', err);
+        this.initPromise = null;
       }
     }
 
-    this.initPromise = new Promise<IDBDatabase>((resolve, reject) => {
+    this.initPromise = new Promise<IDBDatabase | null>((resolve) => {
       if (typeof indexedDB === 'undefined') {
         console.warn('[AssetDatabase] IndexedDB не поддерживается, переходим на Memory-хранилище.');
         this.isFallbackMode = true;
-        resolve(null as any);
+        resolve(null);
         return;
       }
 
@@ -142,60 +142,134 @@ export class AssetDatabase {
           } catch (upgradeErr) {
             console.error('[AssetDatabase] Ошибка upgradeneeded в IndexedDB:', upgradeErr);
             this.isFallbackMode = true;
-            resolve(null as any);
+            resolve(null);
           }
         };
 
         req.onsuccess = (e) => {
-          this.db = (e.target as IDBOpenDBRequest).result;
+          const db = (e.target as IDBOpenDBRequest).result;
+          this.db = db;
+
+          db.onversionchange = () => {
+            try {
+              db.close();
+            } catch (_) {}
+            this.db = null;
+            this.initPromise = null;
+          };
+
+          db.onclose = () => {
+            this.db = null;
+            this.initPromise = null;
+          };
+
+          db.onerror = () => {
+            this.db = null;
+            this.initPromise = null;
+          };
+
           console.log('[AssetDatabase] База данных медиа-ассетов успешно подключена (SQL/IndexedDB)');
           resolve(this.db);
         };
 
         req.onerror = (e) => {
           console.warn('[AssetDatabase] Ошибка открытия базы данных, переключено на Memory-хранилище:', req.error || e);
+          this.db = null;
+          this.initPromise = null;
           this.isFallbackMode = true;
-          resolve(null as any);
+          resolve(null);
         };
 
         req.onblocked = (e) => {
-          console.warn('[AssetDatabase] Открытие базы данных заблокировано, переключено на Memory-хранилище:', e);
-          this.isFallbackMode = true;
-          resolve(null as any);
+          console.warn('[AssetDatabase] Открытие базы данных заблокировано:', e);
+          this.db = null;
+          this.initPromise = null;
+          resolve(null);
         };
       } catch (openErr) {
         console.warn('[AssetDatabase] Исключение при открытии базы данных, переключено на Memory-хранилище:', openErr);
         this.isFallbackMode = true;
-        resolve(null as any);
+        this.db = null;
+        this.initPromise = null;
+        resolve(null);
       }
     });
 
     try {
       return await this.initPromise;
     } catch (err) {
-      console.warn('[AssetDatabase] Ошибка при ожидании инициализации базы данных, переключено на Memory-хранилище:', err);
+      console.warn('[AssetDatabase] Ошибка при инициализации базы данных:', err);
       this.isFallbackMode = true;
-      this.initPromise = Promise.resolve(null as any);
-      return null as any;
+      this.initPromise = null;
+      return null;
     }
+  }
+
+  /**
+   * Безопасное выполнение транзакции с переподключением и фолбэком на Memory
+   */
+  private async executeTx<T>(
+    storeNames: string | string[],
+    mode: IDBTransactionMode,
+    callback: (tx: IDBTransaction) => Promise<T> | T
+  ): Promise<T | null> {
+    if (this.isFallbackMode) return null;
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        let db = await this.initDatabase();
+        if (!db) return null;
+
+        const tx = db.transaction(storeNames, mode);
+        return await new Promise<T>((resolve, reject) => {
+          let resolved = false;
+          tx.onerror = () => {
+            if (!resolved) reject(tx.error);
+          };
+          tx.onabort = () => {
+            if (!resolved) reject(new Error('IndexedDB transaction aborted'));
+          };
+          try {
+            const res = callback(tx);
+            if (res instanceof Promise) {
+              res.then((val) => {
+                resolved = true;
+                resolve(val);
+              }).catch(reject);
+            } else {
+              tx.oncomplete = () => {
+                resolved = true;
+                resolve(res);
+              };
+            }
+          } catch (callErr) {
+            reject(callErr);
+          }
+        });
+      } catch (err: any) {
+        console.warn(`[AssetDatabase] Сбой транзакции (попытка ${attempt + 1}/2):`, err?.message || err);
+        this.db = null;
+        this.initPromise = null;
+        if (attempt === 1) {
+          // После 2-х сбоев переключаемся в memory fallback режим
+          console.warn('[AssetDatabase] Переход в fallback-память из-за сбоя IndexedDB');
+          this.isFallbackMode = true;
+        }
+      }
+    }
+    return null;
   }
 
   /**
    * Сохранение медиа-ассета (видео или аудио)
    */
   public async saveAsset(asset: MediaAssetRecord): Promise<void> {
-    const db = await this.initDatabase();
-    if (this.isFallbackMode) {
-      this.fallbackStore.assets.set(asset.id, asset);
-      return;
-    }
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(AssetDatabase.STORE_ASSETS, 'readwrite');
-      const store = tx.objectStore(AssetDatabase.STORE_ASSETS);
-      const req = store.put(asset);
+    this.fallbackStore.assets.set(asset.id, asset);
+    if (this.isFallbackMode) return;
 
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
+    await this.executeTx(AssetDatabase.STORE_ASSETS, 'readwrite', (tx) => {
+      const store = tx.objectStore(AssetDatabase.STORE_ASSETS);
+      store.put(asset);
     });
   }
 
@@ -203,92 +277,66 @@ export class AssetDatabase {
    * Получение ассета по ID
    */
   public async getAsset(id: string): Promise<MediaAssetRecord | null> {
-    const db = await this.initDatabase();
-    if (this.isFallbackMode) {
+    if (this.fallbackStore.assets.has(id)) {
       return this.fallbackStore.assets.get(id) || null;
     }
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(AssetDatabase.STORE_ASSETS, 'readonly');
-      const store = tx.objectStore(AssetDatabase.STORE_ASSETS);
-      const req = store.get(id);
+    if (this.isFallbackMode) return null;
 
-      req.onsuccess = () => resolve(req.result || null);
-      req.onerror = () => reject(req.error);
+    const result = await this.executeTx(AssetDatabase.STORE_ASSETS, 'readonly', (tx) => {
+      return new Promise<MediaAssetRecord | null>((resolve, reject) => {
+        const store = tx.objectStore(AssetDatabase.STORE_ASSETS);
+        const req = store.get(id);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      });
     });
+
+    return result || this.fallbackStore.assets.get(id) || null;
   }
 
   /**
    * Получение всех сохраненных ассетов
    */
   public async getAllAssets(): Promise<MediaAssetRecord[]> {
-    const db = await this.initDatabase();
     if (this.isFallbackMode) {
       return Array.from(this.fallbackStore.assets.values());
     }
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(AssetDatabase.STORE_ASSETS, 'readonly');
-      const store = tx.objectStore(AssetDatabase.STORE_ASSETS);
-      const req = store.getAll();
 
-      req.onsuccess = () => resolve(req.result || []);
-      req.onerror = () => reject(req.error);
+    const result = await this.executeTx(AssetDatabase.STORE_ASSETS, 'readonly', (tx) => {
+      return new Promise<MediaAssetRecord[]>((resolve, reject) => {
+        const store = tx.objectStore(AssetDatabase.STORE_ASSETS);
+        const req = store.getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => reject(req.error);
+      });
     });
-  }
 
-  /**
-   * Удаление ассета по ID
-   */
-  public async deleteAsset(id: string): Promise<void> {
-    const db = await this.initDatabase();
-    if (this.isFallbackMode) {
-      this.fallbackStore.assets.delete(id);
-      return;
+    if (result && result.length > 0) {
+      return result;
     }
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(AssetDatabase.STORE_ASSETS, 'readwrite');
-      const store = tx.objectStore(AssetDatabase.STORE_ASSETS);
-      const req = store.delete(id);
-
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    });
+    return Array.from(this.fallbackStore.assets.values());
   }
 
   /**
    * Сохранение полной схемы дорожек проекта (до 32 дорожек)
    */
   public async saveTracks(tracks: TrackState[]): Promise<void> {
-    const db = await this.initDatabase();
-    if (this.isFallbackMode) {
-      this.fallbackStore.tracks = tracks.map((t) => ({
-        ...t,
-        clips: t.clips.map((c) => ({
-          ...c,
-          buffer: new Float32Array(0) // Метаданные клипа, буфер подгружается при необходимости
-        }))
-      }));
-      return;
-    }
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(AssetDatabase.STORE_TRACKS, 'readwrite');
-      const store = tx.objectStore(AssetDatabase.STORE_TRACKS);
+    const safeTracks = toSafeArray<TrackState>(tracks).map((t) => ({
+      ...t,
+      clips: toSafeArray(t?.clips).map((c) => ({
+        ...c,
+        buffer: new Float32Array(0)
+      }))
+    }));
+    this.fallbackStore.tracks = safeTracks;
+    if (this.isFallbackMode) return;
 
-      // Очищаем и сохраняем актуальные дорожки
+    await this.executeTx(AssetDatabase.STORE_TRACKS, 'readwrite', (tx) => {
+      const store = tx.objectStore(AssetDatabase.STORE_TRACKS);
       store.clear();
-      for (const t of toSafeArray<TrackState>(tracks)) {
-        // Сохраняем дорожку без огромных встроенных буферов Float32Array (клипы сохраняются раздельно)
-        const lightweightTrack: TrackState = {
-          ...t,
-          clips: toSafeArray(t?.clips).map((c) => ({
-            ...c,
-            buffer: new Float32Array(0) // Метаданные клипа, буфер подгружается при необходимости
-          }))
-        };
+      for (const lightweightTrack of safeTracks) {
         store.put(lightweightTrack);
       }
-
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
     });
   }
 
@@ -296,43 +344,35 @@ export class AssetDatabase {
    * Загрузка дорожек из базы данных
    */
   public async loadTracks(): Promise<TrackState[] | null> {
-    const db = await this.initDatabase();
     if (this.isFallbackMode) {
       return this.fallbackStore.tracks.length > 0 ? this.fallbackStore.tracks : null;
     }
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(AssetDatabase.STORE_TRACKS, 'readonly');
-      const store = tx.objectStore(AssetDatabase.STORE_TRACKS);
-      const req = store.getAll();
 
-      req.onsuccess = () => {
-        const res = req.result as TrackState[];
-        if (res && res.length > 0) {
-          resolve(res);
-        } else {
-          resolve(null);
-        }
-      };
-      req.onerror = () => reject(req.error);
+    const result = await this.executeTx(AssetDatabase.STORE_TRACKS, 'readonly', (tx) => {
+      return new Promise<TrackState[] | null>((resolve, reject) => {
+        const store = tx.objectStore(AssetDatabase.STORE_TRACKS);
+        const req = store.getAll();
+        req.onsuccess = () => {
+          const res = req.result as TrackState[];
+          resolve(res && res.length > 0 ? res : null);
+        };
+        req.onerror = () => reject(req.error);
+      });
     });
+
+    return result || (this.fallbackStore.tracks.length > 0 ? this.fallbackStore.tracks : null);
   }
 
   /**
    * Сохранение мастер-шины и настроек проекта
    */
   public async saveProjectMeta(meta: { activeDirName: string; master: MasterState; fps: number }): Promise<void> {
-    const db = await this.initDatabase();
-    if (this.isFallbackMode) {
-      this.fallbackStore.project.set('meta', { key: 'meta', data: meta, updated: Date.now() });
-      return;
-    }
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(AssetDatabase.STORE_PROJECT, 'readwrite');
+    this.fallbackStore.project.set('meta', { key: 'meta', data: meta, updated: Date.now() });
+    if (this.isFallbackMode) return;
+
+    await this.executeTx(AssetDatabase.STORE_PROJECT, 'readwrite', (tx) => {
       const store = tx.objectStore(AssetDatabase.STORE_PROJECT);
       store.put({ key: 'meta', data: meta, updated: Date.now() });
-
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
     });
   }
 
@@ -340,19 +380,23 @@ export class AssetDatabase {
    * Загрузка настроек проекта
    */
   public async loadProjectMeta(): Promise<any | null> {
-    const db = await this.initDatabase();
     if (this.isFallbackMode) {
       const record = this.fallbackStore.project.get('meta');
       return record ? record.data : null;
     }
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(AssetDatabase.STORE_PROJECT, 'readonly');
-      const store = tx.objectStore(AssetDatabase.STORE_PROJECT);
-      const req = store.get('meta');
 
-      req.onsuccess = () => resolve(req.result ? req.result.data : null);
-      req.onerror = () => reject(req.error);
+    const result = await this.executeTx(AssetDatabase.STORE_PROJECT, 'readonly', (tx) => {
+      return new Promise<any>((resolve, reject) => {
+        const store = tx.objectStore(AssetDatabase.STORE_PROJECT);
+        const req = store.get('meta');
+        req.onsuccess = () => resolve(req.result ? req.result.data : null);
+        req.onerror = () => reject(req.error);
+      });
     });
+
+    if (result) return result;
+    const fallbackRecord = this.fallbackStore.project.get('meta');
+    return fallbackRecord ? fallbackRecord.data : null;
   }
 
   /**
@@ -404,31 +448,23 @@ export class AssetDatabase {
    * Очистка всей базы данных
    */
   public async clearAll(): Promise<void> {
-    const db = await this.initDatabase();
-    if (this.isFallbackMode) {
-      this.fallbackStore.assets.clear();
-      this.fallbackStore.tracks = [];
-      this.fallbackStore.project.clear();
-      this.fallbackStore.chunks.clear();
-      console.log('[AssetDatabase] База данных медиа-ассетов очищена (Memory).');
-      return;
-    }
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(
-        [AssetDatabase.STORE_ASSETS, AssetDatabase.STORE_TRACKS, AssetDatabase.STORE_PROJECT, AssetDatabase.STORE_CHUNKS],
-        'readwrite'
-      );
-      tx.objectStore(AssetDatabase.STORE_ASSETS).clear();
-      tx.objectStore(AssetDatabase.STORE_TRACKS).clear();
-      tx.objectStore(AssetDatabase.STORE_PROJECT).clear();
-      tx.objectStore(AssetDatabase.STORE_CHUNKS).clear();
+    this.fallbackStore.assets.clear();
+    this.fallbackStore.tracks = [];
+    this.fallbackStore.project.clear();
+    this.fallbackStore.chunks.clear();
 
-      tx.oncomplete = () => {
-        console.log('[AssetDatabase] База данных медиа-ассетов очищена.');
-        resolve();
-      };
-      tx.onerror = () => reject(tx.error);
-    });
+    if (this.isFallbackMode) return;
+
+    await this.executeTx(
+      [AssetDatabase.STORE_ASSETS, AssetDatabase.STORE_TRACKS, AssetDatabase.STORE_PROJECT, AssetDatabase.STORE_CHUNKS],
+      'readwrite',
+      (tx) => {
+        tx.objectStore(AssetDatabase.STORE_ASSETS).clear();
+        tx.objectStore(AssetDatabase.STORE_TRACKS).clear();
+        tx.objectStore(AssetDatabase.STORE_PROJECT).clear();
+        tx.objectStore(AssetDatabase.STORE_CHUNKS).clear();
+      }
+    );
   }
 
   /**

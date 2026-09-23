@@ -94,6 +94,7 @@ export interface UseAudioEngineReturn {
   setTrackDeEsser: (trackId: number, deEsser: any) => void;
 
   setVocalBus: (vocalBus: VocalBusState) => void;
+  setVocalBusVolume: (volumeDb: number) => void;
 
   setMasterVolume: (volumeDb: number) => void;
   setMasterLimiter: (enabled: boolean, ceilingDb: number) => void;
@@ -853,14 +854,25 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
   }, []);
 
   const setVocalBus = useCallback((vocalBus: VocalBusState) => {
+    if (!vocalBus || typeof vocalBus === 'function') return;
     if (workletNodeRef.current) {
       workletNodeRef.current.port.postMessage({
         type: 'SET_VOCAL_BUS',
+        vocalBus,
         volumeDb: vocalBus.volumeDb,
         pan: vocalBus.pan,
         mute: vocalBus.mute,
         solo: vocalBus.solo,
         dsp: vocalBus.dsp
+      });
+    }
+  }, []);
+
+  const setVocalBusVolume = useCallback((volumeDb: number) => {
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({
+        type: 'SET_VOCAL_BUS',
+        volumeDb
       });
     }
   }, []);
@@ -1111,6 +1123,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     setTrackAutoDucker,
 
     setVocalBus,
+    setVocalBusVolume,
 
     setMasterVolume,
     setMasterLimiter,

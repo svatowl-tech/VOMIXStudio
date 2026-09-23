@@ -1019,6 +1019,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
             pan: t.pan || 0,
             solo: !!t.solo,
             mute: !!t.mute,
+            isOriginalAudio: !!t.isOriginalAudio,
             vstPlugins: t.vstPlugins || [],
             clips: trackClips
           });
@@ -1182,11 +1183,20 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       }
 
       case 'SET_VOCAL_BUS': {
-        if (msg.vocalBus) {
+        if (msg.vocalBus && typeof msg.vocalBus === 'object') {
           Object.assign(this.vocalBus, msg.vocalBus);
         }
         if (typeof msg.volumeDb === 'number') {
           this.vocalBus.volumeDb = msg.volumeDb;
+        }
+        if (typeof msg.pan === 'number') {
+          this.vocalBus.pan = msg.pan;
+        }
+        if (typeof msg.mute === 'boolean') {
+          this.vocalBus.mute = msg.mute;
+        }
+        if (typeof msg.solo === 'boolean') {
+          this.vocalBus.solo = msg.solo;
         }
         if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
           if (this.wasmModule._setVocalBusVolume && typeof this.vocalBus.volumeDb === 'number') {

@@ -10,11 +10,14 @@
  * ============================================================================
  */
 
-import React, { useState, useEffect } from 'react';
-import { TrackState, VocalBusState, MasterState } from '../audio/dawEngine';
+import React, { useState, useEffect, useMemo } from 'react';
+import { TrackState, VocalBusState, MasterState, createDefaultVocalBus } from '../audio/dawEngine';
 import { detectTrackCollisions, ClipCollisionInfo } from '../utils/collisionDetector';
 import { systemLogger } from '../services/SystemLogger';
 import { toSafeArray } from '../utils/safeIterables';
+import { globalLoudnessAutoAligner, LoudnessComparisonResult } from '../services/LoudnessAutoAligner';
+import { SubtitleCue } from '../services/ProjectManager';
+import { globalAutoTimingService } from '../services/AutoTimingService';
 import {
   Sparkles,
   AlertTriangle,
@@ -38,7 +41,11 @@ import {
   Music,
   Mic,
   ShieldCheck,
-  Info
+  Info,
+  Activity,
+  Gauge,
+  SlidersHorizontal,
+  Check
 } from 'lucide-react';
 
 export type WizardStage =
@@ -56,7 +63,9 @@ export interface VoiceoverMixWizardModalProps {
   tracks: TrackState[];
   setTracks: React.Dispatch<React.SetStateAction<TrackState[]>>;
   vocalBus: VocalBusState;
-  setVocalBus: React.Dispatch<React.SetStateAction<VocalBusState>>;
+  setVocalBus: React.Dispatch<React.SetStateAction<VocalBusState>> | ((vocalBus: VocalBusState) => void);
+  onVocalBusChange?: (updatedVocalBus: VocalBusState) => void;
+  onTrackVolumeChange?: (trackId: number, volumeDb: number) => void;
   master: MasterState;
   videoFile: File | null;
   videoDuration: number;
@@ -70,6 +79,8 @@ export interface VoiceoverMixWizardModalProps {
     updatedVocalBus: VocalBusState
   ) => Promise<{ videoBlob: Blob | null; videoUrl: string | null; outputFileName: string }>;
   onCollisionsDetected: (collisions: ClipCollisionInfo[]) => void;
+  subtitles?: SubtitleCue[];
+  onRunAutoTiming?: (tracksToTime?: TrackState[]) => Promise<TrackState[]>;
 }
 
 export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = ({
@@ -79,6 +90,8 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
   setTracks,
   vocalBus,
   setVocalBus,
+  onVocalBusChange,
+  onTrackVolumeChange,
   master,
   videoFile,
   videoDuration,
@@ -88,7 +101,9 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
   onSeek,
   onRunAIPipelineAndNorm,
   onRunFinalMasterAndMux,
-  onCollisionsDetected
+  onCollisionsDetected,
+  subtitles = [],
+  onRunAutoTiming
 }) => {
   const [stage, setStage] = useState<WizardStage>('idle');
   const [isMinimized, setIsMinimized] = useState<boolean>(false);
@@ -97,11 +112,77 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
   const [collisions, setCollisions] = useState<ClipCollisionInfo[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isAutoTimingRunning, setIsAutoTimingRunning] = useState<boolean>(false);
+  const [autoTimingSummary, setAutoTimingSummary] = useState<string | null>(null);
 
   // Финальный результат
   const [resultVideoUrl, setResultVideoUrl] = useState<string | null>(null);
   const [resultFileName, setResultFileName] = useState<string>('');
   const [resultBlob, setResultBlob] = useState<Blob | null>(null);
+
+  // Настройки стандарта громкости (целевая разница 3.5 - 4.5 dB, по умолчанию 4.0 dB)
+  const [targetDeltaDb, setTargetDeltaDb] = useState<number>(4.0);
+  const [autoAlignBeforeRender, setAutoAlignBeforeRender] = useState<boolean>(true);
+
+  // Локальное реактивное состояние Шины Вокала для плавной регулировки ползунка
+  const [currentVocalBus, setCurrentVocalBus] = useState<VocalBusState>(() => vocalBus || createDefaultVocalBus());
+
+  useEffect(() => {
+    if (vocalBus) {
+      setCurrentVocalBus(vocalBus);
+    }
+  }, [vocalBus]);
+
+  // Реактивный анализ громкостей (Оригинал vs Закадровый мастер-микс)
+  const loudnessComparison: LoudnessComparisonResult = useMemo(() => {
+    return globalLoudnessAutoAligner.compareProjectLoudness(
+      toSafeArray<TrackState>(tracks),
+      currentVocalBus,
+      targetDeltaDb
+    );
+  }, [tracks, currentVocalBus, targetDeltaDb]);
+
+  const handleApplyAutoLoudness = (customDelta?: number) => {
+    const delta = customDelta !== undefined ? customDelta : targetDeltaDb;
+    const aligned = globalLoudnessAutoAligner.applyAutoAlignment(
+      toSafeArray<TrackState>(tracks),
+      currentVocalBus,
+      master,
+      delta
+    );
+
+    setCurrentVocalBus(aligned.updatedVocalBus);
+    if (onVocalBusChange) {
+      onVocalBusChange(aligned.updatedVocalBus);
+    }
+    if (typeof setVocalBus === 'function') {
+      try {
+        (setVocalBus as any)(aligned.updatedVocalBus);
+      } catch (_) {}
+    }
+
+    addLog(
+      `⚡ Авто-выравнивание: Установлен баланс +${aligned.comparison.targetDeltaDb} dB (Шина вокала: ${aligned.updatedVocalBus.volumeDb > 0 ? '+' : ''}${aligned.updatedVocalBus.volumeDb.toFixed(1)} dB)`
+    );
+  };
+
+  const handleVocalBusVolumeChange = (newVolumeDb: number) => {
+    const updatedBus: VocalBusState = {
+      ...(currentVocalBus || vocalBus || createDefaultVocalBus()),
+      volumeDb: newVolumeDb
+    };
+    setCurrentVocalBus(updatedBus);
+
+    if (onVocalBusChange) {
+      onVocalBusChange(updatedBus);
+    }
+
+    if (typeof setVocalBus === 'function') {
+      try {
+        (setVocalBus as any)(updatedBus);
+      } catch (_) {}
+    }
+  };
 
   const addLog = (msg: string) => {
     const time = new Date().toLocaleTimeString();
@@ -177,6 +258,35 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
     }
   };
 
+  // Автоматический тайминг и разведение коллизий по субтитрам
+  const handleAutoTimingInWizard = async () => {
+    setIsAutoTimingRunning(true);
+    setStatusMessage('Запуск автоматического тайминга: сопоставление актёров и разведение коллизий...');
+    addLog('⚡ Запуск C++ алгоритма сценарного тайминга и устранения наездов...');
+    try {
+      let updated: TrackState[];
+      if (onRunAutoTiming) {
+        updated = await onRunAutoTiming(tracks);
+      } else {
+        const res = globalAutoTimingService.runAutoTimingPipeline(tracks, subtitles);
+        updated = res.updatedTracks;
+        setTracks(updated);
+        setAutoTimingSummary(
+          `Синхронизировано ${res.totalPhrasesAligned} фраз, устранено ${res.resolvedCollisionsCount} наездов, сохранено ${res.preservedScriptOverlapsCount} сценарных перекрытий.`
+        );
+      }
+      const rechecked = detectTrackCollisions(updated);
+      setCollisions(rechecked);
+      onCollisionsDetected(rechecked);
+      addLog(`⚡ Авто-тайминг выполнен: устранено коллизий, осталось: ${rechecked.length}.`);
+      setStatusMessage(`Авто-тайминг завершён: коллизий осталось: ${rechecked.length}.`);
+    } catch (e: any) {
+      addLog(`❌ Ошибка авто-тайминга: ${e?.message || e}`);
+    } finally {
+      setIsAutoTimingRunning(false);
+    }
+  };
+
   // Переход к Шагу 3 (Калибровка громкости и Шина Вокала)
   const handleProceedToVolumeBalance = () => {
     setStage('step3_volume_balance');
@@ -190,12 +300,37 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
   const handleProceedToFinalMasterAndMux = async () => {
     setStage('step4_master_and_mux');
     setProgressPercent(85);
-    setStatusMessage('Шаг 4/4: Применение мастер-эффектов, C++ рендеринг и вшивание аудио в видео...');
+    setStatusMessage('Шаг 4/4: Анализ громкостей, C++ мастеринг и вшивание аудио в видео...');
     addLog('Старт финального C++ мастеринга и FFmpeg видео-муксинга...');
     systemLogger.info('MVPPipeline', 'Шаг 4/4: Старт финального C++ мастеринга и FFmpeg видео-муксинга.');
 
     try {
-      const res = await onRunFinalMasterAndMux(tracks, vocalBus);
+      let targetVocalBus = currentVocalBus || vocalBus;
+      let targetTracks = [...tracks];
+
+      // Автоматическое согласование громкости перед рендером
+      if (autoAlignBeforeRender) {
+        const aligned = globalLoudnessAutoAligner.applyAutoAlignment(
+          toSafeArray<TrackState>(targetTracks),
+          targetVocalBus,
+          master,
+          targetDeltaDb
+        );
+
+        targetVocalBus = aligned.updatedVocalBus;
+        setCurrentVocalBus(aligned.updatedVocalBus);
+        if (onVocalBusChange) onVocalBusChange(aligned.updatedVocalBus);
+
+        addLog(
+          `[AutoLoudness] Финальная калибровка: Оригинал=${aligned.comparison.originalLoudness.speechRmsDb} dBFS, Дубляж=${aligned.comparison.dubbedLoudness.speechRmsDb} dBFS. Разница: +${aligned.comparison.targetDeltaDb} dB.`
+        );
+        systemLogger.info(
+          'MVPPipeline',
+          `Авто-выравнивание перед рендером: Оригинал=${aligned.comparison.originalLoudness.speechRmsDb} dBFS, Закадр=${aligned.comparison.dubbedLoudness.speechRmsDb} dBFS (Цель +${aligned.comparison.targetDeltaDb} dB)`
+        );
+      }
+
+      const res = await onRunFinalMasterAndMux(targetTracks, targetVocalBus);
       setResultVideoUrl(res.videoUrl);
       setResultFileName(res.outputFileName);
       setResultBlob(res.videoBlob);
@@ -393,7 +528,23 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
                     ))}
                   </div>
 
+                  {autoTimingSummary && (
+                    <div className="p-3 bg-cyan-950/40 border border-cyan-500/40 rounded-xl text-xs text-cyan-200 flex items-center gap-2 animate-fadeIn">
+                      <Zap size={15} className="text-cyan-400 shrink-0" />
+                      <span>{autoTimingSummary}</span>
+                    </div>
+                  )}
+
                   <div className="flex flex-wrap items-center gap-2 pt-2">
+                    <button
+                      onClick={handleAutoTimingInWizard}
+                      disabled={isAutoTimingRunning}
+                      className="px-4 py-2.5 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-cyan-950/40"
+                      title="Автоматически сопоставить актёров, совместить фразы по субтитрам и устранить нежелательные наезды"
+                    >
+                      {isAutoTimingRunning ? <RefreshCw size={14} className="animate-spin" /> : <Zap size={14} />}
+                      {isAutoTimingRunning ? 'Авто-разведение...' : '⚡ Авто-тайминг и разведение по сабам'}
+                    </button>
                     <button
                       onClick={() => setIsMinimized(true)}
                       className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer"
@@ -460,6 +611,155 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
                 </p>
               </div>
 
+              {/* БЛОК АВТОМАТИЧЕСКОГО ВЫРАВНИВАНИЯ ГРОМКОСТИ (СТАНДАРТ ЧИТАЕМОСТИ ЗАКАДРА +3.5..+4.5 dB) */}
+              <div className="p-4 bg-[#0d1527] border border-cyan-500/40 rounded-2xl space-y-4 shadow-xl">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <div className="p-1.5 bg-cyan-500/20 border border-cyan-500/30 rounded-lg text-cyan-400">
+                      <Activity size={16} />
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-bold text-slate-100 flex items-center gap-2">
+                        Анализ и авто-выравнивание громкости
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-mono">
+                          Стандарт: +{targetDeltaDb.toFixed(1)} dB
+                        </span>
+                      </h4>
+                      <p className="text-[11px] text-slate-400">
+                        Сравнение оригинальной дорожки и мастер-микса для кристальной читаемости речи
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => handleApplyAutoLoudness(targetDeltaDb)}
+                    className="px-3 py-1.5 bg-gradient-to-r from-cyan-600 to-emerald-600 hover:from-cyan-500 hover:to-emerald-500 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all cursor-pointer shadow-lg shadow-cyan-950/50"
+                  >
+                    <Zap size={14} className="text-amber-300" />
+                    Выровнять (+{targetDeltaDb.toFixed(1)} dB)
+                  </button>
+                </div>
+
+                {/* Сетка замеров громкости: Оригинал vs Закадр vs Дельта */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono text-xs">
+                  {/* Карточка 1: Оригинальная дорожка */}
+                  <div className="p-3 bg-slate-950/80 border border-slate-800 rounded-xl space-y-1.5">
+                    <div className="text-[10px] text-slate-400 uppercase font-sans font-bold flex items-center justify-between">
+                      <span>Оригинал (Видео)</span>
+                      <Film size={12} className="text-slate-500" />
+                    </div>
+                    <div className="text-sm font-bold text-slate-200">
+                      {loudnessComparison.originalLoudness.speechRmsDb > -80
+                        ? `${loudnessComparison.originalLoudness.speechRmsDb} dBFS`
+                        : '—'}
+                    </div>
+                    <div className="text-[10px] text-slate-400 flex items-center justify-between">
+                      <span>True Peak:</span>
+                      <span className="text-slate-300">
+                        {loudnessComparison.originalLoudness.peakDb > -80
+                          ? `${loudnessComparison.originalLoudness.peakDb} dB`
+                          : '—'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Карточка 2: Закадровый микс */}
+                  <div className="p-3 bg-slate-950/80 border border-slate-800 rounded-xl space-y-1.5">
+                    <div className="text-[10px] text-purple-400 uppercase font-sans font-bold flex items-center justify-between">
+                      <span>Мастер-голос (Закадр)</span>
+                      <Mic size={12} className="text-purple-400" />
+                    </div>
+                    <div className="text-sm font-bold text-purple-300">
+                      {loudnessComparison.dubbedLoudness.speechRmsDb > -80
+                        ? `${loudnessComparison.dubbedLoudness.speechRmsDb} dBFS`
+                        : '—'}
+                    </div>
+                    <div className="text-[10px] text-slate-400 flex items-center justify-between">
+                      <span>True Peak:</span>
+                      <span
+                        className={
+                          loudnessComparison.isPeakSafe ? 'text-emerald-400' : 'text-amber-400'
+                        }
+                      >
+                        {loudnessComparison.dubbedLoudness.peakDb > -80
+                          ? `${loudnessComparison.dubbedLoudness.peakDb} dB`
+                          : '—'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Карточка 3: Разница громкости */}
+                  <div
+                    className={`p-3 rounded-xl border space-y-1.5 ${
+                      loudnessComparison.status === 'optimal'
+                        ? 'bg-emerald-950/20 border-emerald-500/40 text-emerald-300'
+                        : loudnessComparison.status === 'too_quiet'
+                        ? 'bg-amber-950/20 border-amber-500/40 text-amber-300'
+                        : 'bg-cyan-950/20 border-cyan-500/40 text-cyan-300'
+                    }`}
+                  >
+                    <div className="text-[10px] uppercase font-sans font-bold flex items-center justify-between">
+                      <span>Разница ($\Delta$)</span>
+                      <Gauge size={12} />
+                    </div>
+                    <div className="text-sm font-bold">
+                      {loudnessComparison.currentDeltaDb > 0 ? '+' : ''}
+                      {loudnessComparison.currentDeltaDb} dB
+                    </div>
+                    <div className="text-[10px] flex items-center justify-between">
+                      <span>Статус:</span>
+                      <span className="font-sans font-medium text-[10px]">
+                        {loudnessComparison.status === 'optimal'
+                          ? 'Идеально'
+                          : loudnessComparison.status === 'too_quiet'
+                          ? 'Тише нормы'
+                          : 'Громче нормы'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Подстройка целевого стандарта и опция авто-рендера */}
+                <div className="space-y-2 pt-1 border-t border-slate-800/80">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-slate-300 flex items-center gap-1.5 font-medium">
+                      <SlidersHorizontal size={13} className="text-cyan-400" />
+                      Целевое превышение над оригиналом:
+                    </span>
+                    <span className="font-mono font-bold text-cyan-400">+{targetDeltaDb.toFixed(1)} dB</span>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <span className="text-[10px] font-mono text-slate-500">3.5 dB</span>
+                    <input
+                      type="range"
+                      min="3.5"
+                      max="4.5"
+                      step="0.1"
+                      value={targetDeltaDb}
+                      onChange={(e) => setTargetDeltaDb(parseFloat(e.target.value))}
+                      className="flex-1 accent-cyan-400 cursor-pointer"
+                    />
+                    <span className="text-[10px] font-mono text-slate-500">4.5 dB</span>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-1">
+                    <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-300 select-none">
+                      <input
+                        type="checkbox"
+                        checked={autoAlignBeforeRender}
+                        onChange={(e) => setAutoAlignBeforeRender(e.target.checked)}
+                        className="rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-0 cursor-pointer"
+                      />
+                      <span>Автоматически согласовать финальную громкость (+{targetDeltaDb.toFixed(1)} dB) перед рендером</span>
+                    </label>
+                    <span className="text-[10px] text-emerald-400 font-mono flex items-center gap-1">
+                      <ShieldCheck size={12} /> Limiter -0.1 dB
+                    </span>
+                  </div>
+                </div>
+              </div>
+
               {/* Управление Шиной Вокала */}
               <div className="p-4 bg-[#111827] border border-slate-800 rounded-2xl space-y-3">
                 <div className="flex items-center justify-between">
@@ -468,7 +768,10 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
                     Шина вокала (Vocal Bus Master)
                   </span>
                   <span className="text-xs font-mono font-bold text-purple-400">
-                    {vocalBus.volumeDb > 0 ? `+${vocalBus.volumeDb.toFixed(1)}` : vocalBus.volumeDb.toFixed(1)} dB
+                    {(currentVocalBus?.volumeDb ?? 0) > 0
+                      ? `+${(currentVocalBus?.volumeDb ?? 0).toFixed(1)}`
+                      : (currentVocalBus?.volumeDb ?? 0).toFixed(1)}{' '}
+                    dB
                   </span>
                 </div>
                 <input
@@ -476,13 +779,15 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
                   min="-24"
                   max="12"
                   step="0.5"
-                  value={vocalBus.volumeDb}
-                  onChange={(e) =>
-                    setVocalBus((prev) => ({
-                      ...prev,
-                      volumeDb: parseFloat(e.target.value)
-                    }))
-                  }
+                  value={currentVocalBus?.volumeDb ?? 0}
+                  onInput={(e) => {
+                    const val = parseFloat((e.target as HTMLInputElement).value);
+                    handleVocalBusVolumeChange(val);
+                  }}
+                  onChange={(e) => {
+                    const val = parseFloat(e.target.value);
+                    handleVocalBusVolumeChange(val);
+                  }}
                   className="w-full accent-purple-500 cursor-pointer"
                 />
               </div>
@@ -504,11 +809,19 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
                       max="12"
                       step="0.5"
                       value={track.volumeDb}
+                      onInput={(e) => {
+                        const val = parseFloat((e.target as HTMLInputElement).value);
+                        setTracks((prev) =>
+                          toSafeArray<TrackState>(prev).map((t) => (t.id === track.id ? { ...t, volumeDb: val } : t))
+                        );
+                        if (onTrackVolumeChange) onTrackVolumeChange(track.id, val);
+                      }}
                       onChange={(e) => {
                         const val = parseFloat(e.target.value);
                         setTracks((prev) =>
                           toSafeArray<TrackState>(prev).map((t) => (t.id === track.id ? { ...t, volumeDb: val } : t))
                         );
+                        if (onTrackVolumeChange) onTrackVolumeChange(track.id, val);
                       }}
                       className="flex-1 accent-cyan-500 cursor-pointer"
                     />

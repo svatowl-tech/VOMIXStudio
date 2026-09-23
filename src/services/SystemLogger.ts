@@ -24,6 +24,7 @@ export type LogSource =
   | 'AssetDatabase'
   | 'Project'
   | 'RenderManager'
+  | 'LoudnessAutoAligner'
   | 'DubbingAI'
   | 'AudioAI'
   | 'VSTPlugins'
