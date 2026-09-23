@@ -29,6 +29,16 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
     this.clipBufferCache = new Map();
     this.clipWasmPtrs = new Map(); // clipId -> wasmPtr
 
+    // RT-Safe Scratch Buffers для микширования блоков без аллокаций памяти
+    this.mixBlockL = new Float32Array(128);
+    this.mixBlockR = new Float32Array(128);
+    this.trackBlockL = new Float32Array(128);
+    this.trackBlockR = new Float32Array(128);
+    this.vocalBusBlockL = new Float32Array(128);
+    this.vocalBusBlockR = new Float32Array(128);
+    this.origBusBlockL = new Float32Array(128);
+    this.origBusBlockR = new Float32Array(128);
+
     // Реестр VST-слотов по стандарту Universal VST Contract (до 8 слотов на трек/шину)
     this.trackVstSlots = new Map(); // trackId -> Array[8]
     this.vocalBusVstSlots = new Array(8).fill(null);
@@ -189,14 +199,22 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
     if (!this.wasmModule || !this.wasmModule._malloc || !pcmData || pcmData.length === 0) {
       return 0;
     }
-    const bytesCount = pcmData.length * 4;
-    const ptr = this.wasmModule._malloc(bytesCount);
-    if (ptr) {
-      const heapF32 = this.wasmModule.HEAPF32;
-      const floatOffset = ptr >> 2;
-      heapF32.set(pcmData, floatOffset);
+    // Защита от OOM в 32-битном адресном пространстве WebAssembly при больших файлах (> 50 МБ)
+    if (pcmData.length > 12500000) {
+      return 0;
     }
-    return ptr;
+    try {
+      const bytesCount = pcmData.length * 4;
+      const ptr = this.wasmModule._malloc(bytesCount);
+      if (ptr) {
+        const heapF32 = this.wasmModule.HEAPF32;
+        const floatOffset = ptr >> 2;
+        heapF32.set(pcmData, floatOffset);
+      }
+      return ptr;
+    } catch (_) {
+      return 0;
+    }
   }
 
   /**
@@ -744,7 +762,9 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         const trackId = msg.trackId;
         const clipId = msg.clipId || Date.now();
         const pcmBuffer = msg.audioData || msg.pcmBuffer || msg.pcm || new Float32Array(0);
-        const offsetSamples = typeof msg.offsetSamples === 'number' ? msg.offsetSamples : 0;
+        const offsetSamples = typeof msg.offsetSamples === 'number'
+          ? msg.offsetSamples
+          : (typeof msg.offsetSec === 'number' ? Math.round(msg.offsetSec * this.sampleRate) : 0);
         const isStereo = msg.isStereo !== undefined ? msg.isStereo : true;
         const lengthSamples = msg.lengthSamples || (isStereo ? Math.floor(pcmBuffer.length / 2) : pcmBuffer.length);
         const gain = typeof msg.gain === 'number' ? msg.gain : 1.0;
@@ -1329,9 +1349,9 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
 
     const leftOut = output[0];
     const rightOut = output[1] || leftOut;
-    const numFrames = leftOut.length; // 128 сэмплов
+    const numFrames = leftOut.length; // Обычно 128 сэмплов
 
-    // Плавное сглаживание параметров
+    // Плавное сглаживание параметров плагинов
     this.smoothPluginGainRamps();
 
     if (!this.isPlaying) {
@@ -1346,101 +1366,235 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       return true;
     }
 
-    // Заполнение тишиной при неготовности C++ WASM ядра
-    if (!this.isWasmReady || !this.wasmModule || !this.mixerPtr) {
-      if (!this.hasReportedError) {
-        console.error('[AudioWorklet] WASM C++ Mixer не инициализирован. Выход заполняется тишиной.');
-        this.hasReportedError = true;
-      }
-      leftOut.fill(0);
-      if (rightOut !== leftOut) rightOut.fill(0);
-      return true;
-    }
-
     try {
-      // 1. Запуск рендеринга блока в нативном C++ микшере
-      this.wasmModule._processMixer(this.mixerPtr, this.outBufferPtr, numFrames);
+      if (numFrames > this.mixBlockL.length) {
+        this.mixBlockL = new Float32Array(numFrames);
+        this.mixBlockR = new Float32Array(numFrames);
+        this.trackBlockL = new Float32Array(numFrames);
+        this.trackBlockR = new Float32Array(numFrames);
+        this.vocalBusBlockL = new Float32Array(numFrames);
+        this.vocalBusBlockR = new Float32Array(numFrames);
+        this.origBusBlockL = new Float32Array(numFrames);
+        this.origBusBlockR = new Float32Array(numFrames);
+      }
 
-      // 2. Копирование интерливированного буфера C++ в Web Audio выходы
-      const heapF32 = this.wasmModule.HEAPF32;
-      const floatOffset = this.outBufferPtr >> 2;
+      this.vocalBusBlockL.fill(0);
+      this.vocalBusBlockR.fill(0);
+      this.origBusBlockL.fill(0);
+      this.origBusBlockR.fill(0);
+
+      const blockStart = this.currentTimelineSample;
+      const blockEnd = blockStart + numFrames;
+
+      // Проверяем наличие соло на дорожках
+      let hasSolo = false;
+      for (const t of this.jsTracks.values()) {
+        if (t.solo) {
+          hasSolo = true;
+          break;
+        }
+      }
+
+      const trackTelemetry = [];
+      let vocalPeakL = 0;
+      let vocalPeakR = 0;
+      let vocalRmsSumL = 0;
+      let vocalRmsSumR = 0;
+
+      // 1. Подорожечное сведение клипов с учетом громкости, панорамы, Mute и Solo
+      for (const [trackId, track] of this.jsTracks.entries()) {
+        let tPeakL = 0;
+        let tPeakR = 0;
+        let tRmsSumL = 0;
+        let tRmsSumR = 0;
+
+        if (track.mute || (hasSolo && !track.solo)) {
+          trackTelemetry.push({
+            trackId,
+            peakL: 0,
+            peakR: 0,
+            rmsL: 0,
+            rmsR: 0,
+            clipped: false,
+            latencySamples: 0,
+            pdcMs: 0
+          });
+          continue;
+        }
+
+        this.trackBlockL.fill(0);
+        this.trackBlockR.fill(0);
+
+        if (track.clips && track.clips.size > 0) {
+          for (const clip of track.clips.values()) {
+            const pcm = clip.pcm;
+            if (!pcm || pcm.length === 0) continue;
+
+            const clipOffset = clip.offsetSamples || 0;
+            const isStereo = clip.isStereo !== undefined ? clip.isStereo : (pcm.length >= 2);
+            const clipLen = clip.lengthSamples || (isStereo ? Math.floor(pcm.length / 2) : pcm.length);
+            const clipEnd = clipOffset + clipLen;
+
+            if (clipEnd <= blockStart || clipOffset >= blockEnd) continue;
+
+            const intersectStart = Math.max(clipOffset, blockStart);
+            const intersectEnd = Math.min(clipEnd, blockEnd);
+            const sampleOffsetInBlock = intersectStart - blockStart;
+            const framesToCopy = intersectEnd - intersectStart;
+            const clipSampleStart = intersectStart - clipOffset;
+
+            const cGain = typeof clip.gain === 'number' ? clip.gain : 1.0;
+            const fadeIn = clip.fadeInSamples || 0;
+            const fadeOut = clip.fadeOutSamples || 0;
+
+            for (let f = 0; f < framesToCopy; f++) {
+              const frameIdxInClip = clipSampleStart + f;
+              const targetIdx = sampleOffsetInBlock + f;
+
+              let fadeMult = 1.0;
+              if (fadeIn > 0 && frameIdxInClip < fadeIn) {
+                fadeMult = frameIdxInClip / fadeIn;
+              } else if (fadeOut > 0 && frameIdxInClip >= clipLen - fadeOut) {
+                fadeMult = Math.max(0, (clipLen - frameIdxInClip) / fadeOut);
+              }
+              const effectiveGain = cGain * fadeMult;
+
+              let sL = 0;
+              let sR = 0;
+              if (isStereo) {
+                sL = (pcm[frameIdxInClip * 2] || 0) * effectiveGain;
+                sR = (pcm[frameIdxInClip * 2 + 1] || 0) * effectiveGain;
+              } else {
+                sL = (pcm[frameIdxInClip] || 0) * effectiveGain;
+                sR = sL;
+              }
+
+              this.trackBlockL[targetIdx] += sL;
+              this.trackBlockR[targetIdx] += sR;
+            }
+          }
+        }
+
+        // Применяем громкость фейдера и панораму дорожки
+        const trackGain = Math.pow(10, (track.volumeDb || 0) / 20);
+        const panNorm = Math.max(-1.0, Math.min(1.0, track.pan || 0));
+        const panAngle = (panNorm + 1.0) * (Math.PI / 4);
+        const panGainL = Math.cos(panAngle) * Math.SQRT2;
+        const panGainR = Math.sin(panAngle) * Math.SQRT2;
+
+        for (let i = 0; i < numFrames; i++) {
+          const sL = this.trackBlockL[i] * trackGain * panGainL;
+          const sR = this.trackBlockR[i] * trackGain * panGainR;
+          this.trackBlockL[i] = sL;
+          this.trackBlockR[i] = sR;
+
+          const absL = Math.abs(sL);
+          const absR = Math.abs(sR);
+          if (absL > tPeakL) tPeakL = absL;
+          if (absR > tPeakR) tPeakR = absR;
+          tRmsSumL += sL * sL;
+          tRmsSumR += sR * sR;
+        }
+
+        // Маршрутизация дорожки: оригинал/видео или голоса дабберов (Шина Вокала)
+        const isOriginal = !!track.isOriginalAudio || /видео|video|оригинал|original/i.test(track.name || '');
+        if (isOriginal) {
+          for (let i = 0; i < numFrames; i++) {
+            this.origBusBlockL[i] += this.trackBlockL[i];
+            this.origBusBlockR[i] += this.trackBlockR[i];
+          }
+        } else {
+          for (let i = 0; i < numFrames; i++) {
+            this.vocalBusBlockL[i] += this.trackBlockL[i];
+            this.vocalBusBlockR[i] += this.trackBlockR[i];
+          }
+        }
+
+        const latencySamples = this.getTrackLatencySamples(trackId);
+        const pdcMs = (latencySamples / this.sampleRate) * 1000;
+
+        trackTelemetry.push({
+          trackId,
+          peakL: tPeakL,
+          peakR: tPeakR,
+          rmsL: Math.sqrt(tRmsSumL / numFrames),
+          rmsR: Math.sqrt(tRmsSumR / numFrames),
+          clipped: tPeakL >= 0.999 || tPeakR >= 0.999,
+          latencySamples,
+          pdcMs: Number(pdcMs.toFixed(2))
+        });
+      }
+
+      // 2. Обработка Шины Вокала (Vocal Bus Master)
+      const vocalGain = Math.pow(10, (this.vocalBus.volumeDb || 0) / 20);
+      const vocalPan = Math.max(-1.0, Math.min(1.0, this.vocalBus.pan || 0));
+      const vPanAngle = (vocalPan + 1.0) * (Math.PI / 4);
+      const vPanL = Math.cos(vPanAngle) * Math.SQRT2;
+      const vPanR = Math.sin(vPanAngle) * Math.SQRT2;
 
       for (let i = 0; i < numFrames; i++) {
-        const outL = heapF32[floatOffset + i * 2] || 0;
-        const outR = heapF32[floatOffset + i * 2 + 1] || 0;
-        leftOut[i] = outL;
-        if (rightOut !== leftOut) {
-          rightOut[i] = outR;
+        const vbL = this.vocalBusBlockL[i] * vocalGain * vPanL;
+        const vbR = this.vocalBusBlockR[i] * vocalGain * vPanR;
+        this.vocalBusBlockL[i] = vbL;
+        this.vocalBusBlockR[i] = vbR;
+
+        const absL = Math.abs(vbL);
+        const absR = Math.abs(vbR);
+        if (absL > vocalPeakL) vocalPeakL = absL;
+        if (absR > vocalPeakR) vocalPeakR = absR;
+        vocalRmsSumL += vbL * vbL;
+        vocalRmsSumR += vbR * vbR;
+      }
+
+      // 3. Авто-даккинг оригинальной звуковой дорожки при наличии голоса дабберов
+      let duckGain = 1.0;
+      const ducker = this.vocalBus?.dsp?.autoDucker || this.vocalBus?.autoDucker;
+      if (ducker && ducker.enabled) {
+        const threshLinear = Math.pow(10, (ducker.thresholdDb ?? -28.0) / 20);
+        if (vocalPeakL > threshLinear || vocalPeakR > threshLinear) {
+          duckGain = Math.pow(10, (ducker.duckDepthDb ?? ducker.duckingDb ?? -10.0) / 20);
         }
+      }
+
+      // 4. Суммирование в Мастер с защитным Soft Peak Limiter
+      const masterGain = Math.pow(10, (this.masterVolumeDb || 0) / 20);
+      let masterPeakL = 0;
+      let masterPeakR = 0;
+      let masterRmsSumL = 0;
+      let masterRmsSumR = 0;
+
+      for (let i = 0; i < numFrames; i++) {
+        const origL = this.origBusBlockL[i] * duckGain;
+        const origR = this.origBusBlockR[i] * duckGain;
+        const rawMixL = (this.vocalBusBlockL[i] + origL) * masterGain;
+        const rawMixR = (this.vocalBusBlockR[i] + origR) * masterGain;
+
+        // Плавный True Peak Guard без щелчков и цифрового треска
+        const limL = rawMixL > 1.0 ? Math.tanh(rawMixL) : (rawMixL < -1.0 ? Math.tanh(rawMixL) : rawMixL);
+        const limR = rawMixR > 1.0 ? Math.tanh(rawMixR) : (rawMixR < -1.0 ? Math.tanh(rawMixR) : rawMixR);
+
+        leftOut[i] = limL;
+        if (rightOut !== leftOut) {
+          rightOut[i] = limR;
+        }
+
+        const absL = Math.abs(limL);
+        const absR = Math.abs(limR);
+        if (absL > masterPeakL) masterPeakL = absL;
+        if (absR > masterPeakR) masterPeakR = absR;
+        masterRmsSumL += limL * limL;
+        masterRmsSumR += limR * limR;
       }
 
       this.currentTimelineSample += numFrames;
 
-      // 3. Прямое считывание пиковых и RMS уровней из C++ движка
+      // 5. Отправка высокоточной телеметрии уровней каждые ~40 мс
       this.meterFrameCounter++;
       if (this.meterFrameCounter >= this.meterReportInterval) {
-        const trackTelemetry = [];
-
-        for (const [trackId, track] of this.jsTracks.entries()) {
-          let tPeakL = 0;
-          let tPeakR = 0;
-          let tRmsL = 0;
-          let tRmsR = 0;
-
-          if (this.wasmModule._getTrackPeak) {
-            tPeakL = this.wasmModule._getTrackPeak(this.mixerPtr, trackId, 0) || 0;
-            tPeakR = this.wasmModule._getTrackPeak(this.mixerPtr, trackId, 1) || 0;
-          }
-          if (this.wasmModule._getTrackRMS) {
-            tRmsL = this.wasmModule._getTrackRMS(this.mixerPtr, trackId, 0) || 0;
-            tRmsR = this.wasmModule._getTrackRMS(this.mixerPtr, trackId, 1) || 0;
-          }
-
-          if (track.mute) {
-            tPeakL = 0;
-            tPeakR = 0;
-            tRmsL = 0;
-            tRmsR = 0;
-          }
-
-          const latencySamples = this.getTrackLatencySamples(trackId);
-          const pdcMs = (latencySamples / this.sampleRate) * 1000;
-
-          trackTelemetry.push({
-            trackId,
-            peakL: tPeakL,
-            peakR: tPeakR,
-            rmsL: tRmsL,
-            rmsR: tRmsR,
-            clipped: tPeakL >= 0.999 || tPeakR >= 0.999,
-            latencySamples,
-            pdcMs: Number(pdcMs.toFixed(2))
-          });
-        }
-
-        let masterPeakL = 0;
-        let masterPeakR = 0;
-        let masterRmsL = 0;
-        let masterRmsR = 0;
-        let vocalPeakL = 0;
-        let vocalPeakR = 0;
-        let vocalRmsL = 0;
-        let vocalRmsR = 0;
-
-        if (this.wasmModule._getTrackPeak) {
-          masterPeakL = this.wasmModule._getTrackPeak(this.mixerPtr, 1000, 0) || 0;
-          masterPeakR = this.wasmModule._getTrackPeak(this.mixerPtr, 1000, 1) || 0;
-          vocalPeakL = this.wasmModule._getTrackPeak(this.mixerPtr, 999, 0) || 0;
-          vocalPeakR = this.wasmModule._getTrackPeak(this.mixerPtr, 999, 1) || 0;
-        }
-
-        if (this.wasmModule._getTrackRMS) {
-          masterRmsL = this.wasmModule._getTrackRMS(this.mixerPtr, 1000, 0) || 0;
-          masterRmsR = this.wasmModule._getTrackRMS(this.mixerPtr, 1000, 1) || 0;
-          vocalRmsL = this.wasmModule._getTrackRMS(this.mixerPtr, 999, 0) || 0;
-          vocalRmsR = this.wasmModule._getTrackRMS(this.mixerPtr, 999, 1) || 0;
-        }
-
+        const vocalRmsL = Math.sqrt(vocalRmsSumL / numFrames);
+        const vocalRmsR = Math.sqrt(vocalRmsSumR / numFrames);
+        const masterRmsL = Math.sqrt(masterRmsSumL / numFrames);
+        const masterRmsR = Math.sqrt(masterRmsSumR / numFrames);
         const isClipped = masterPeakL >= 0.999 || masterPeakR >= 0.999;
 
         this.sendTelemetryMeters(
@@ -1453,7 +1607,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       }
     } catch (err) {
       if (!this.hasReportedError) {
-        console.error('[AudioWorklet] Сбой в реалтайм C++ Mixer processBlock:', err);
+        console.error('[AudioWorklet] Сбой в реалтайм аудиопотоке:', err);
         try {
           this.port.postMessage({
             type: 'WORKLET_PROCESS_ERROR',

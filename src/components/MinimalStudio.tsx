@@ -1645,9 +1645,11 @@ export const MinimalStudio: React.FC = () => {
 
     const timelineHasOriginalAudio = safeTracks.some(
       (t) =>
-        (t.name.toLowerCase().includes('видео') ||
+        (t.isOriginalAudio ||
+          t.name.toLowerCase().includes('видео') ||
           t.name.toLowerCase().includes('video') ||
-          t.name.toLowerCase().includes('оригинал')) &&
+          t.name.toLowerCase().includes('оригинал') ||
+          t.name.toLowerCase().includes('original')) &&
         toSafeArray(t.clips).length > 0 &&
         !t.mute
     );

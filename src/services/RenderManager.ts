@@ -271,18 +271,18 @@ export class RenderManager {
       if (!hasTimelineOriginal) {
         // Если на таймлайне не было оригинального звука видео, подмешиваем его как фон к голосам дабберов
         try {
-          this.addLog('Подмешивание оригинального звука видео к сведенным дорожкам дабберов...');
+          this.addLog('Подмешивание оригинального звука видео к сведенным дорожкам дабберов (баланс закадрового озвучания)...');
           await this.ffmpeg.exec([
             '-i', 'input_video.mp4',
             '-i', 'audio_mix.wav',
-            '-filter_complex', '[0:a:0]volume=0.75[aorig];[1:a:0]volume=1.0[adub];[aorig][adub]amix=inputs=2:duration=first:dropout_transition=0[aout]',
+            '-filter_complex', '[0:a:0]volume=0.22[aorig];[1:a:0]volume=1.25[adub];[aorig][adub]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]',
             '-map', '0:v:0',
             '-map', '[aout]',
             '-map', '0:a:0?',
             '-c:v', 'copy',
             '-c:a', 'aac',
             '-b:a', '320k',
-            '-metadata:s:a:0', 'title=Дубляж + Оригинал',
+            '-metadata:s:a:0', 'title=Закадровый перевод + Фон',
             '-metadata:s:a:1', 'title=Оригинал (Чистый)',
             '-shortest',
             '-movflags', '+faststart',

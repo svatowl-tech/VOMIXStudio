@@ -82,7 +82,14 @@ Track* Mixer::getTrack(uint32_t trackId) noexcept {
             return t.get();
         }
     }
-    return nullptr;
+    try {
+        auto newTrack = std::make_unique<Track>(trackId, "Track " + std::to_string(trackId), sampleRate);
+        Track* ptr = newTrack.get();
+        tracks.emplace_back(std::move(newTrack));
+        return ptr;
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 void Mixer::removeAllTracks() noexcept {
