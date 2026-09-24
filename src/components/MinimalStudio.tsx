@@ -49,7 +49,8 @@ import {
   Layers,
   X,
   Terminal,
-  BrainCircuit
+  BrainCircuit,
+  Scissors
 } from 'lucide-react';
 import { systemLogger } from '../services/SystemLogger';
 import { useAudioEngine } from '../hooks/useAudioEngine';
@@ -1031,6 +1032,89 @@ export const MinimalStudio: React.FC = () => {
       console.error('Ошибка выполнения авто-тайминга:', err);
       setStatusMessage(`Ошибка авто-тайминга: ${err?.message || err}`);
       return sourceTracks;
+    }
+  };
+
+  /**
+   * Удаление тишины и нарезка на фразы для всех дорожек проекта (C++ VAD Strip Silence)
+   */
+  const handleStripSilenceAllTracks = async (thresholdDb = -40.0, minSilenceMs = 280) => {
+    setStatusMessage('Запуск C++ SIMD128 Strip Silence: удаление пауз и нарезка на голосовые фразы...');
+    try {
+      const safeTracks = toSafeArray<TrackState>(tracks);
+      let totalCutPhrases = 0;
+
+      const updatedTracks = safeTracks.map((track) => {
+        if (track.isOriginalAudio) return track;
+        const updated = globalAutoTimingService.stripSilenceFromTrack(track, thresholdDb, minSilenceMs);
+        totalCutPhrases += toSafeArray(updated.clips).length;
+        return updated;
+      });
+
+      setTracks(updatedTracks);
+      syncAllTracks(updatedTracks);
+
+      for (const track of updatedTracks) {
+        for (const clip of toSafeArray<ClipConfig>(track.clips)) {
+          if (clip.buffer && clip.buffer.length > 0) {
+            uploadRawPCMToTrack(
+              clip.buffer,
+              track.id,
+              clip.id,
+              clip.offsetSamples / 48000,
+              clip.gain,
+              clip.pan,
+              true
+            );
+          }
+        }
+      }
+
+      triggerAutoSave();
+      const msg = `✂️ Удаление тишины завершено: дорожки нарезаны на ${totalCutPhrases} отдельных реплик (порог: ${thresholdDb} dBFS, мин. пауза: ${minSilenceMs} мс).`;
+      setStatusMessage(msg);
+      setLoudnessMatchReport(msg);
+    } catch (err: any) {
+      console.error('Ошибка удаления тишины:', err);
+      setStatusMessage(`Ошибка удаления тишины: ${err?.message || err}`);
+    }
+  };
+
+  /**
+   * Удаление тишины и нарезка на фразы для конкретной дорожки
+   */
+  const handleStripSilenceTrack = async (trackId: number, thresholdDb = -40.0, minSilenceMs = 280) => {
+    try {
+      const safeTracks = toSafeArray<TrackState>(tracks);
+      const target = safeTracks.find((t) => t.id === trackId);
+      if (!target) return;
+
+      const updated = globalAutoTimingService.stripSilenceFromTrack(target, thresholdDb, minSilenceMs);
+      const updatedTracks = safeTracks.map((t) => (t.id === trackId ? updated : t));
+
+      setTracks(updatedTracks);
+      syncAllTracks(updatedTracks);
+
+      for (const clip of toSafeArray<ClipConfig>(updated.clips)) {
+        if (clip.buffer && clip.buffer.length > 0) {
+          uploadRawPCMToTrack(
+            clip.buffer,
+            target.id,
+            clip.id,
+            clip.offsetSamples / 48000,
+            clip.gain,
+            clip.pan,
+            true
+          );
+        }
+      }
+
+      triggerAutoSave();
+      const clipCount = toSafeArray(updated.clips).length;
+      setStatusMessage(`✂️ Дорожка "${target.name}" нарезана на ${clipCount} реплик без тишины.`);
+    } catch (err: any) {
+      console.error('Ошибка нарезки тишины на дорожке:', err);
+      setStatusMessage(`Ошибка удаления тишины: ${err?.message || err}`);
     }
   };
 
@@ -2205,6 +2289,16 @@ export const MinimalStudio: React.FC = () => {
             </button>
 
             <button
+              id="btn-strip-silence-all"
+              onClick={() => handleStripSilenceAllTracks(-40.0, 280)}
+              className="px-3.5 py-2 bg-gradient-to-r from-teal-700 to-emerald-700 hover:from-teal-600 hover:to-emerald-600 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 shadow-lg shadow-teal-950/40 cursor-pointer"
+              title="Удалить тишину и автоматически нарезать дорожки на голосовые фразы (C++ VAD)"
+            >
+              <Scissors size={14} className="text-teal-200" />
+              ✂️ Удалить тишину (VAD)
+            </button>
+
+            <button
               id="btn-auto-timing-subtitles"
               onClick={() => handleRunAutoTimingAndResolveCollisions()}
               className="px-3.5 py-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 shadow-lg shadow-cyan-950/40 cursor-pointer"
@@ -2298,26 +2392,39 @@ export const MinimalStudio: React.FC = () => {
                     <div className="text-[11px] truncate flex-1">
                       {hasClips ? (
                         <span className="text-emerald-400 font-medium truncate block" title={safeClips[0].name}>
-                          {safeClips[0].name} ({((safeClips[0].lengthSamples || 0) / 48000).toFixed(1)}с)
+                          {safeClips[0].name} ({((safeClips[0].lengthSamples || 0) / 48000).toFixed(1)}с, {safeClips.length} фраз)
                         </span>
                       ) : (
                         <span className="text-slate-500">Нет аудиофайла</span>
                       )}
                     </div>
 
-                    <label className="shrink-0 px-2 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 rounded text-[10px] font-semibold flex items-center gap-1 cursor-pointer transition-all">
-                      <Upload size={10} />
-                      <span>{hasClips ? 'Заменить' : 'Загрузить'}</span>
-                      <input
-                        type="file"
-                        accept="audio/*"
-                        onChange={(e) => {
-                          const f = e.target.files?.[0];
-                          if (f) handleTrackFileUpload(track.id, f);
-                        }}
-                        className="hidden"
-                      />
-                    </label>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {hasClips && (
+                        <button
+                          onClick={() => handleStripSilenceTrack(track.id)}
+                          className="px-2 py-1 bg-teal-950/80 hover:bg-teal-900 border border-teal-700/60 text-teal-300 rounded text-[10px] font-semibold flex items-center gap-1 cursor-pointer transition-all"
+                          title="Вырезать тишину из этой дорожки (C++ VAD)"
+                        >
+                          <Scissors size={10} />
+                          <span>VAD</span>
+                        </button>
+                      )}
+
+                      <label className="px-2 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 rounded text-[10px] font-semibold flex items-center gap-1 cursor-pointer transition-all">
+                        <Upload size={10} />
+                        <span>{hasClips ? 'Заменить' : 'Загрузить'}</span>
+                        <input
+                          type="file"
+                          accept="audio/*"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            if (f) handleTrackFileUpload(track.id, f);
+                          }}
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
                   </div>
 
                   {/* Кнопка открытия C++ DSP рэка */}

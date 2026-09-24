@@ -178,8 +178,8 @@ size_t SilenceStripper::detectSegments(
                         : 0;
 
                     if (segLengthFrames > 0 && segmentCount < maxSegments) {
-                        outSegments[segmentCount].offsetSamples = currentSegmentStartFrame * channels;
-                        outSegments[segmentCount].lengthSamples = segLengthFrames * channels;
+                        outSegments[segmentCount].offsetSamples = currentSegmentStartFrame;
+                        outSegments[segmentCount].lengthSamples = segLengthFrames;
                         outSegments[segmentCount].peakLevel = currentSegmentPeak;
                         outSegments[segmentCount].rmsLevel = (currentSegmentSampleCount > 0)
                             ? static_cast<float>(std::sqrt(currentSegmentSumSq / currentSegmentSampleCount))
@@ -208,8 +208,8 @@ size_t SilenceStripper::detectSegments(
             : 0;
 
         if (segLengthFrames > 0) {
-            outSegments[segmentCount].offsetSamples = currentSegmentStartFrame * channels;
-            outSegments[segmentCount].lengthSamples = segLengthFrames * channels;
+            outSegments[segmentCount].offsetSamples = currentSegmentStartFrame;
+            outSegments[segmentCount].lengthSamples = segLengthFrames;
             outSegments[segmentCount].peakLevel = currentSegmentPeak;
             outSegments[segmentCount].rmsLevel = (currentSegmentSampleCount > 0)
                 ? static_cast<float>(std::sqrt(currentSegmentSumSq / currentSegmentSampleCount))

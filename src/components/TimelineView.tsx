@@ -264,6 +264,45 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   // Состояние активного перетаскивания (Drag / Trim / Fade / Time-Stretch / Cue)
   const [activeDrag, setActiveDrag] = useState<ActiveDragState | null>(null);
 
+  // Состояние навигационной шкалы-миникарты всего таймлайна (Overview Minimap Navigator)
+  const [scrollState, setScrollState] = useState({ scrollLeft: 0, clientWidth: 1000 });
+  const minimapRef = useRef<HTMLDivElement | null>(null);
+  const [minimapDragMode, setMinimapDragMode] = useState<'pan' | 'resize-left' | 'resize-right' | null>(null);
+  const minimapDragStateRef = useRef<{
+    startX: number;
+    initialScrollLeft: number;
+    initialPxPerSec: number;
+    minimapWidth: number;
+  }>({
+    startX: 0,
+    initialScrollLeft: 0,
+    initialPxPerSec: 60,
+    minimapWidth: 800
+  });
+
+  // Отслеживание прокрутки и размера видимой области мультитрека для миникарты
+  useEffect(() => {
+    const el = timelineScrollRef.current;
+    if (!el) return;
+
+    const handleScroll = () => {
+      setScrollState({ scrollLeft: el.scrollLeft, clientWidth: el.clientWidth });
+    };
+
+    handleScroll();
+    el.addEventListener('scroll', handleScroll, { passive: true });
+
+    const resizeObs = new ResizeObserver(() => {
+      handleScroll();
+    });
+    resizeObs.observe(el);
+
+    return () => {
+      el.removeEventListener('scroll', handleScroll);
+      resizeObs.disconnect();
+    };
+  }, []);
+
   // Показ уведомлений на 3.5 секунды
   const showNotice = useCallback((text: string, type: 'success' | 'info' | 'warn' = 'success') => {
     setTimelineNotice({ text, type });
@@ -1373,6 +1412,78 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     handleSyncTrackClips
   ]);
 
+  // ==========================================================================
+  // ОБРАБОТЧИКИ НАВИГАТОРА-МИНИКАРТЫ ТАЙМЛАЙНА
+  // ==========================================================================
+  const handleMinimapBackgroundClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = minimapRef.current?.getBoundingClientRect();
+    if (!rect || !timelineScrollRef.current) return;
+
+    const clickX = e.clientX - rect.left;
+    const ratio = Math.max(0, Math.min(1, clickX / rect.width));
+    const targetTimeSec = ratio * effectiveDurationSec;
+
+    // Центрируем видимое окно мультитрека вокруг времени клика
+    const targetScrollLeft = targetTimeSec * pxPerSec - (scrollState.clientWidth / 2);
+    timelineScrollRef.current.scrollLeft = Math.max(0, targetScrollLeft);
+    onSeek(targetTimeSec);
+  };
+
+  const handleMinimapViewportMouseDown = (
+    e: React.MouseEvent,
+    mode: 'pan' | 'resize-left' | 'resize-right'
+  ) => {
+    e.stopPropagation();
+    const rect = minimapRef.current?.getBoundingClientRect();
+    if (!rect || !timelineScrollRef.current) return;
+
+    setMinimapDragMode(mode);
+    minimapDragStateRef.current = {
+      startX: e.clientX,
+      initialScrollLeft: timelineScrollRef.current.scrollLeft,
+      initialPxPerSec: pxPerSec,
+      minimapWidth: rect.width
+    };
+  };
+
+  useEffect(() => {
+    if (!minimapDragMode) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const container = timelineScrollRef.current;
+      if (!container) return;
+
+      const { startX, initialScrollLeft, initialPxPerSec, minimapWidth } = minimapDragStateRef.current;
+      const deltaX = e.clientX - startX;
+
+      if (minimapDragMode === 'pan') {
+        const deltaRatio = deltaX / minimapWidth;
+        const deltaScrollPx = deltaRatio * totalWidthPx;
+        container.scrollLeft = Math.max(
+          0,
+          Math.min(totalWidthPx - container.clientWidth, initialScrollLeft + deltaScrollPx)
+        );
+      } else if (minimapDragMode === 'resize-left' || minimapDragMode === 'resize-right') {
+        const sign = minimapDragMode === 'resize-left' ? -1 : 1;
+        const zoomDelta = (deltaX * sign) / (minimapWidth * 0.4);
+        const newPxPerSec = Math.max(12, Math.min(500, initialPxPerSec * (1 - zoomDelta)));
+        setPxPerSec(newPxPerSec);
+      }
+    };
+
+    const handleMouseUp = () => {
+      setMinimapDragMode(null);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [minimapDragMode, totalWidthPx, pxPerSec]);
+
   const getTrackIcon = (track: TrackState) => {
     if (track.isOriginalAudio || /видео|video|оригинал|original/i.test(track.name)) {
       return <Disc size={13} className="text-amber-400" />;
@@ -1624,6 +1735,158 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
           </button>
         </div>
       )}
+
+      {/* =====================================================================
+          TIMELINE OVERVIEW MINIMAP & VIEWPORT NAVIGATOR BAR
+          ===================================================================== */}
+      <div className="bg-[#090d16] border-b border-[#1e293b] px-4 py-2 flex flex-col gap-1.5 shadow-inner select-none">
+        <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono">
+          <div className="flex items-center gap-2">
+            <span className="text-cyan-400 font-semibold flex items-center gap-1.5">
+              <Layers size={13} />
+              Навигатор таймлайна (Overview Minimap)
+            </span>
+            <span className="text-slate-500">•</span>
+            <span className="text-slate-400">
+              00:00 — {formatCompactTime(effectiveDurationSec)} ({effectiveDurationSec.toFixed(1)}с)
+            </span>
+          </div>
+          <div className="flex items-center gap-3 text-[10px]">
+            <span className="text-purple-400">■ Субтитры ({(subtitles || []).length})</span>
+            <span className="text-emerald-400">■ Аудиоклипы</span>
+            <span className="text-cyan-300 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-800/60 font-sans">
+              Перетащите рамку для навигации • Тяните края для зума
+            </span>
+          </div>
+        </div>
+
+        {/* Minimap Track Canvas Container */}
+        <div
+          ref={minimapRef}
+          onClick={handleMinimapBackgroundClick}
+          className="relative h-12 w-full bg-[#050811] rounded-xl border border-slate-800/80 overflow-hidden cursor-pointer shadow-inner group"
+        >
+          {/* 1. Subtitle layer on minimap (top micro row) */}
+          <div className="absolute top-0.5 inset-x-0 h-2 flex items-center pointer-events-none">
+            {(subtitles || []).map((cue) => {
+              const leftPct = (cue.startSec / effectiveDurationSec) * 100;
+              const widthPct = Math.max(0.4, ((cue.endSec - cue.startSec) / effectiveDurationSec) * 100);
+              return (
+                <div
+                  key={`minimap-cue-${cue.index}`}
+                  style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+                  className="absolute h-1.5 rounded-full bg-purple-500/80 shadow-xs"
+                  title={`#${cue.index} [${cue.speaker || 'Диктор'}]: ${cue.text}`}
+                />
+              );
+            })}
+          </div>
+
+          {/* 2. Tracks layer on minimap */}
+          <div className="absolute top-3 inset-x-0 bottom-1 flex flex-col justify-evenly pointer-events-none px-0.5">
+            {/* Video track mini-lane */}
+            {videoDuration > 0 && (
+              <div
+                style={{ width: `${Math.min(100, (videoDuration / effectiveDurationSec) * 100)}%` }}
+                className="h-1 bg-purple-900/60 rounded-full"
+              />
+            )}
+
+            {/* Audio tracks mini-lanes */}
+            {(tracks || []).slice(0, 8).map((track) => (
+              <div key={`minimap-track-${track.id}`} className="relative h-1 w-full">
+                {(track.clips || []).map((clip) => {
+                  const clipStartSec = (clip.offsetSamples || 0) / sampleRate;
+                  const clipDurSec = (clip.lengthSamples || 0) / sampleRate;
+                  const leftPct = (clipStartSec / effectiveDurationSec) * 100;
+                  const widthPct = Math.max(0.3, (clipDurSec / effectiveDurationSec) * 100);
+                  return (
+                    <div
+                      key={`minimap-clip-${clip.id}`}
+                      style={{
+                        left: `${leftPct}%`,
+                        width: `${widthPct}%`,
+                        backgroundColor: track.color || '#10b981'
+                      }}
+                      className="absolute h-1 rounded-xs opacity-85"
+                    />
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+
+          {/* 3. Collisions warning markers */}
+          {(collisions || []).map((col, idx) => {
+            const leftPct = (col.overlapStartSec / effectiveDurationSec) * 100;
+            return (
+              <div
+                key={`minimap-collision-${idx}`}
+                style={{ left: `${leftPct}%` }}
+                className="absolute top-0 bottom-0 w-1 bg-rose-500/90 shadow-sm shadow-rose-500 animate-pulse pointer-events-none"
+              />
+            );
+          })}
+
+          {/* 4. Playhead line on Minimap */}
+          <div
+            style={{
+              left: `${Math.max(0, Math.min(100, (currentTimeSec / effectiveDurationSec) * 100))}%`
+            }}
+            className="absolute top-0 bottom-0 w-0.5 bg-amber-400 z-30 shadow-md shadow-amber-400 pointer-events-none"
+          >
+            <div className="w-2 h-2 -ml-[3px] bg-amber-400 rotate-45 rounded-xs" />
+          </div>
+
+          {/* 5. Viewport Frame / Rectangle (Квадрат-рамка видимого окна таймлайна) */}
+          {(() => {
+            const viewportStartSec = Math.max(0, scrollState.scrollLeft / pxPerSec);
+            const viewportDurationSec = Math.min(effectiveDurationSec, scrollState.clientWidth / pxPerSec);
+            const leftPct = Math.max(0, Math.min(99, (viewportStartSec / effectiveDurationSec) * 100));
+            const widthPct = Math.max(1.5, Math.min(100 - leftPct, (viewportDurationSec / effectiveDurationSec) * 100));
+
+            return (
+              <div
+                style={{
+                  left: `${leftPct}%`,
+                  width: `${widthPct}%`
+                }}
+                onMouseDown={(e) => handleMinimapViewportMouseDown(e, 'pan')}
+                className={`absolute top-0 bottom-0 border-2 rounded-lg z-20 transition-colors ${
+                  minimapDragMode === 'pan'
+                    ? 'border-cyan-300 bg-cyan-400/25 shadow-xl shadow-cyan-500/30 cursor-grabbing'
+                    : 'border-cyan-400/90 bg-cyan-500/15 hover:border-cyan-300 hover:bg-cyan-500/20 shadow-md shadow-cyan-950/40 cursor-grab'
+                }`}
+              >
+                {/* Left resize handle (Zoom) */}
+                <div
+                  onMouseDown={(e) => handleMinimapViewportMouseDown(e, 'resize-left')}
+                  className="absolute left-0 top-0 bottom-0 w-2.5 bg-cyan-400/80 hover:bg-cyan-300 cursor-ew-resize flex items-center justify-center rounded-l"
+                  title="Потяните для зума"
+                >
+                  <div className="w-0.5 h-3 bg-slate-950 rounded-full" />
+                </div>
+
+                {/* Center view label */}
+                <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity">
+                  <span className="text-[9px] font-mono font-bold text-cyan-200 bg-slate-950/80 px-1.5 py-0.2 rounded border border-cyan-500/30">
+                    {formatCompactTime(viewportStartSec)} - {formatCompactTime(viewportStartSec + viewportDurationSec)}
+                  </span>
+                </div>
+
+                {/* Right resize handle (Zoom) */}
+                <div
+                  onMouseDown={(e) => handleMinimapViewportMouseDown(e, 'resize-right')}
+                  className="absolute right-0 top-0 bottom-0 w-2.5 bg-cyan-400/80 hover:bg-cyan-300 cursor-ew-resize flex items-center justify-center rounded-r"
+                  title="Потяните для зума"
+                >
+                  <div className="w-0.5 h-3 bg-slate-950 rounded-full" />
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      </div>
 
       {/* =====================================================================
           MAIN TIMELINE SCROLLABLE CONTAINER

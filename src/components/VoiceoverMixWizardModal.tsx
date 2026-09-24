@@ -11,13 +11,14 @@
  */
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { TrackState, VocalBusState, MasterState, createDefaultVocalBus } from '../audio/dawEngine';
+import { TrackState, VocalBusState, MasterState, createDefaultVocalBus, ClipConfig } from '../audio/dawEngine';
 import { detectTrackCollisions, ClipCollisionInfo } from '../utils/collisionDetector';
 import { systemLogger } from '../services/SystemLogger';
 import { toSafeArray } from '../utils/safeIterables';
 import { globalLoudnessAutoAligner, LoudnessComparisonResult } from '../services/LoudnessAutoAligner';
 import { SubtitleCue } from '../services/ProjectManager';
 import { globalAutoTimingService } from '../services/AutoTimingService';
+import { formatCompactTime, formatSMPTE } from '../utils/waveformUtils';
 import {
   Sparkles,
   AlertTriangle,
@@ -45,7 +46,13 @@ import {
   Activity,
   Gauge,
   SlidersHorizontal,
-  Check
+  Check,
+  SkipBack,
+  SkipForward,
+  FastForward,
+  Rewind,
+  Clock,
+  Compass
 } from 'lucide-react';
 
 export type WizardStage =
@@ -132,6 +139,53 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
       setCurrentVocalBus(vocalBus);
     }
   }, [vocalBus]);
+
+  // Полная длительность проекта для мини-таймлайна конвейера
+  const wizardTotalDurationSec = useMemo(() => {
+    let maxSec = Math.max(videoDuration || 0, 0);
+    toSafeArray<TrackState>(tracks).forEach((t) => {
+      toSafeArray<ClipConfig>(t.clips).forEach((c) => {
+        const endSec = ((c.offsetSamples || 0) + (c.lengthSamples || 0)) / 48000;
+        if (endSec > maxSec) maxSec = endSec;
+      });
+    });
+    toSafeArray<SubtitleCue>(subtitles).forEach((s) => {
+      if (s.endSec > maxSec) maxSec = s.endSec;
+    });
+    return Math.max(maxSec, 15);
+  }, [tracks, videoDuration, subtitles]);
+
+  // Активная реплика субтитров в текущий момент времени
+  const activeCurrentCue = useMemo(() => {
+    return toSafeArray<SubtitleCue>(subtitles).find(
+      (c) => currentTimeSec >= c.startSec - 0.1 && currentTimeSec <= c.endSec + 0.1
+    );
+  }, [subtitles, currentTimeSec]);
+
+  const handleSeekRelative = (deltaSec: number) => {
+    const target = Math.max(0, Math.min(wizardTotalDurationSec, currentTimeSec + deltaSec));
+    onSeek(target);
+  };
+
+  const handleJumpToPercentage = (pct: number) => {
+    const target = Math.max(0, Math.min(wizardTotalDurationSec, (wizardTotalDurationSec * pct) / 100));
+    onSeek(target);
+  };
+
+  const handleJumpToCue = (direction: 'prev' | 'next') => {
+    const sorted = [...toSafeArray<SubtitleCue>(subtitles)].sort((a, b) => a.startSec - b.startSec);
+    if (sorted.length === 0) return;
+
+    if (direction === 'next') {
+      const next = sorted.find((c) => c.startSec > currentTimeSec + 0.3);
+      if (next) onSeek(next.startSec);
+      else onSeek(sorted[0].startSec);
+    } else {
+      const prev = [...sorted].reverse().find((c) => c.startSec < currentTimeSec - 0.5);
+      if (prev) onSeek(prev.startSec);
+      else onSeek(0);
+    }
+  };
 
   // Реактивный анализ громкостей (Оригинал vs Закадровый мастер-микс)
   const loudnessComparison: LoudnessComparisonResult = useMemo(() => {
@@ -607,8 +661,186 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
                   </button>
                 </div>
                 <p className="text-xs text-slate-300">
-                  Проверьте общий баланс с начала записи. С помощью Шины Вокала подстройте уровень всех дикторов одновременно, а регуляторами дорожек подкорректируйте отдельный акцент.
+                  Проверьте общий баланс в любой части ролика. С помощью Шины Вокала подстройте уровень всех дикторов одновременно, а регуляторами дорожек подкорректируйте отдельный акцент.
                 </p>
+              </div>
+
+              {/* ИНТЕРАКТИВНЫЙ МИНИ-ТАЙМЛАЙН КОНВЕЙЕРА ДЛЯ БЫСТРОЙ ОЦЕНКИ И НАВИГАЦИИ */}
+              <div className="p-4 bg-[#080d1a] border border-cyan-500/50 rounded-2xl space-y-3 shadow-2xl">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="p-1.5 bg-cyan-500/20 text-cyan-400 rounded-lg">
+                      <Compass size={14} />
+                    </span>
+                    <div>
+                      <h4 className="text-xs font-bold text-slate-100 flex items-center gap-1.5">
+                        Навигация по таймлайну и прослушивание
+                      </h4>
+                      <p className="text-[10px] text-slate-400">
+                        Быстрый переход в любое место ролика для проверки баланса громкости
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Таймкод и кнопка Play */}
+                  <div className="flex items-center gap-2">
+                    <div className="bg-slate-950 px-2.5 py-1 rounded-lg border border-slate-800 font-mono text-xs text-cyan-300 font-bold flex items-center gap-1.5">
+                      <Clock size={12} className="text-cyan-400" />
+                      <span>{formatCompactTime(currentTimeSec)}</span>
+                      <span className="text-slate-600">/</span>
+                      <span className="text-slate-400">{formatCompactTime(wizardTotalDurationSec)}</span>
+                    </div>
+
+                    <button
+                      onClick={onTogglePlay}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md ${
+                        isPlaying
+                          ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-amber-950/40'
+                          : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-950/40'
+                      }`}
+                    >
+                      {isPlaying ? <Pause size={13} /> : <Play size={13} />}
+                      <span>{isPlaying ? 'Пауза' : 'Плей'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Интерактивная полоса скраббера таймлайна */}
+                <div className="space-y-1">
+                  <div
+                    onClick={(e) => {
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                      onSeek(ratio * wizardTotalDurationSec);
+                    }}
+                    className="relative h-6 bg-[#040711] rounded-xl border border-slate-700/80 overflow-hidden cursor-pointer group shadow-inner flex items-center"
+                  >
+                    {/* Реплики субтитров на мини-таймлайне */}
+                    <div className="absolute inset-0 pointer-events-none flex items-center">
+                      {toSafeArray<SubtitleCue>(subtitles).map((cue) => {
+                        const leftPct = (cue.startSec / wizardTotalDurationSec) * 100;
+                        const widthPct = Math.max(0.5, ((cue.endSec - cue.startSec) / wizardTotalDurationSec) * 100);
+                        return (
+                          <div
+                            key={`wiz-cue-${cue.index}`}
+                            style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+                            className="absolute h-2.5 rounded bg-purple-500/60 group-hover:bg-purple-500/80 transition-colors shadow-xs"
+                            title={`#${cue.index} [${cue.speaker || 'Диктор'}]: ${cue.text}`}
+                          />
+                        );
+                      })}
+                    </div>
+
+                    {/* Заполненная полоса прогресса */}
+                    <div
+                      style={{
+                        width: `${Math.max(0, Math.min(100, (currentTimeSec / wizardTotalDurationSec) * 100))}%`
+                      }}
+                      className="absolute left-0 top-0 bottom-0 bg-cyan-500/20 border-r-2 border-cyan-400 pointer-events-none"
+                    />
+
+                    {/* Плейхед иголка */}
+                    <div
+                      style={{
+                        left: `${Math.max(0, Math.min(100, (currentTimeSec / wizardTotalDurationSec) * 100))}%`
+                      }}
+                      className="absolute top-0 bottom-0 w-1 bg-amber-400 z-10 -ml-0.5 shadow-md shadow-amber-400 pointer-events-none flex flex-col items-center justify-between"
+                    >
+                      <div className="w-2.5 h-2.5 bg-amber-400 rotate-45 rounded-xs" />
+                      <div className="w-2.5 h-2.5 bg-amber-400 rotate-45 rounded-xs" />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Кнопки быстрой навигации и прыжков */}
+                <div className="flex flex-wrap items-center justify-between gap-1.5 text-[11px] pt-1">
+                  <div className="flex items-center gap-1 font-mono">
+                    <button
+                      onClick={() => handleJumpToPercentage(0)}
+                      className="px-2 py-1 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded-lg border border-slate-800 hover:border-slate-700 transition-all cursor-pointer font-semibold"
+                      title="Перейти в самое начало (00:00)"
+                    >
+                      ⏮ Старт 0:00
+                    </button>
+                    <button
+                      onClick={() => handleJumpToPercentage(25)}
+                      className="px-2 py-1 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded-lg border border-slate-800 hover:border-slate-700 transition-all cursor-pointer"
+                    >
+                      25%
+                    </button>
+                    <button
+                      onClick={() => handleJumpToPercentage(50)}
+                      className="px-2 py-1 bg-slate-900 hover:bg-slate-800 text-cyan-300 rounded-lg border border-cyan-800/60 hover:border-cyan-600 transition-all cursor-pointer font-semibold"
+                      title="Перейти в середину ролика"
+                    >
+                      50% (Середина)
+                    </button>
+                    <button
+                      onClick={() => handleJumpToPercentage(75)}
+                      className="px-2 py-1 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded-lg border border-slate-800 hover:border-slate-700 transition-all cursor-pointer"
+                    >
+                      75%
+                    </button>
+                    <button
+                      onClick={() => onSeek(Math.max(0, wizardTotalDurationSec - 10))}
+                      className="px-2 py-1 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded-lg border border-slate-800 hover:border-slate-700 transition-all cursor-pointer"
+                      title="Перейти к финалу (-10 сек)"
+                    >
+                      Финал ⏭
+                    </button>
+                  </div>
+
+                  {/* Прыжки по фразам и +-5 сек */}
+                  <div className="flex items-center gap-1 font-mono">
+                    <button
+                      onClick={() => handleSeekRelative(-5)}
+                      className="px-2 py-1 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded-lg border border-slate-800 hover:border-slate-700 transition-all cursor-pointer"
+                      title="Назад на 5 секунд"
+                    >
+                      -5с
+                    </button>
+                    <button
+                      onClick={() => handleSeekRelative(5)}
+                      className="px-2 py-1 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded-lg border border-slate-800 hover:border-slate-700 transition-all cursor-pointer"
+                      title="Вперед на 5 секунд"
+                    >
+                      +5с
+                    </button>
+                    <button
+                      onClick={() => handleJumpToCue('prev')}
+                      disabled={toSafeArray(subtitles).length === 0}
+                      className="px-2 py-1 bg-purple-950/80 hover:bg-purple-900 text-purple-200 rounded-lg border border-purple-800/80 transition-all cursor-pointer disabled:opacity-40"
+                      title="Прыгнуть к предыдущей реплике субтитров"
+                    >
+                      <SkipBack size={11} className="inline mr-1" />
+                      Пред. фраза
+                    </button>
+                    <button
+                      onClick={() => handleJumpToCue('next')}
+                      disabled={toSafeArray(subtitles).length === 0}
+                      className="px-2 py-1 bg-purple-950/80 hover:bg-purple-900 text-purple-200 rounded-lg border border-purple-800/80 transition-all cursor-pointer disabled:opacity-40"
+                      title="Прыгнуть к следующей реплике субтитров"
+                    >
+                      След. фраза
+                      <SkipForward size={11} className="inline ml-1" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Плашка активной реплики в текущем месте */}
+                {activeCurrentCue && (
+                  <div className="bg-purple-950/40 border border-purple-500/30 px-3 py-1.5 rounded-xl text-xs flex items-center justify-between gap-2 text-purple-200 animate-fadeIn">
+                    <div className="flex items-center gap-2 truncate">
+                      <span className="font-bold text-amber-300 shrink-0">
+                        #{activeCurrentCue.index} [{activeCurrentCue.speaker || 'Диктор'}]:
+                      </span>
+                      <span className="text-slate-200 truncate italic">"{activeCurrentCue.text}"</span>
+                    </div>
+                    <span className="text-[10px] font-mono text-purple-400 shrink-0">
+                      {formatCompactTime(activeCurrentCue.startSec)} - {formatCompactTime(activeCurrentCue.endSec)}
+                    </span>
+                  </div>
+                )}
               </div>
 
               {/* БЛОК АВТОМАТИЧЕСКОГО ВЫРАВНИВАНИЯ ГРОМКОСТИ (СТАНДАРТ ЧИТАЕМОСТИ ЗАКАДРА +3.5..+4.5 dB) */}

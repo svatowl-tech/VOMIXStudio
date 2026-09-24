@@ -2093,7 +2093,7 @@ export class NativeDAWBridge {
         const freeSeg = mod.freeSegmentBuffer || mod._free;
 
         if (typeof stripFn === 'function' && typeof allocSeg === 'function') {
-          const maxSegments = 1024;
+          const maxSegments = 2048;
           let inPcmPtr = 0;
           let outSegPtr = 0;
 
@@ -2101,16 +2101,18 @@ export class NativeDAWBridge {
             inPcmPtr = this.writeFloat32Direct(samples);
             outSegPtr = allocSeg(maxSegments * 16);
 
+            // Правильный порядок аргументов C++ Emscripten:
+            // (inPcmPtr, totalSamples, thresholdDb, minSilenceMs, paddingMs, isStereo, sampleRate, outSegmentsPtr, maxSegments)
             const count = stripFn(
               inPcmPtr,
               samples.length,
               thresholdDb,
               minSilenceMs,
               paddingMs,
-              outSegPtr,
-              maxSegments,
               isStereo,
-              sampleRate
+              sampleRate,
+              outSegPtr,
+              maxSegments
             );
 
             const wasmBuffer = mod.HEAPU8?.buffer || mod.HEAPF32?.buffer || mod.wasmMemory?.buffer || mod.buffer;
@@ -2125,17 +2127,21 @@ export class NativeDAWBridge {
                 const length = heapU32[base + 1];
                 const peak = heapF32[base + 2];
                 const rms = heapF32[base + 3];
-                const duration = length / (channels * sampleRate);
+                const duration = length / sampleRate;
 
-                result.push({
-                  offsetSamples: offset,
-                  lengthSamples: length,
-                  durationSec: duration,
-                  peakLevel: peak,
-                  rmsLevel: rms
-                });
+                if (length > 0) {
+                  result.push({
+                    offsetSamples: offset,
+                    lengthSamples: length,
+                    durationSec: duration,
+                    peakLevel: peak,
+                    rmsLevel: rms
+                  });
+                }
               }
-              return result;
+              if (result.length > 0) {
+                return result;
+              }
             }
           } catch (wasmErr) {
             console.warn('[NativeDAWBridge] Сбой C++ stripSilenceNative, переключаемся на DSP VAD:', wasmErr);
@@ -2156,9 +2162,9 @@ export class NativeDAWBridge {
   }
 
   /**
-   * Чистый JavaScript VAD стриппер без ограничений памяти кучи WASM
+   * Чистый JavaScript VAD стриппер без ограничений памяти кучи WASM с адаптивным шумовым профилированием
    */
-  private stripSilenceFallback(
+  public stripSilenceFallback(
     samples: Float32Array,
     thresholdDb: number = -40.0,
     minSilenceMs: number = 300.0,
@@ -2170,34 +2176,72 @@ export class NativeDAWBridge {
     const totalFrames = Math.floor(samples.length / channels);
     if (totalFrames <= 0) return [];
 
-    const thresholdAmp = Math.pow(10, thresholdDb / 20);
-    const windowSize = Math.max(128, Math.floor(sampleRate * 0.01)); // 10 ms
+    let effectiveThresholdDb = thresholdDb;
+    const windowSize = Math.max(64, Math.floor(sampleRate * 0.01)); // 10 ms
     const minSilenceFrames = Math.floor((minSilenceMs / 1000) * sampleRate);
     const paddingFrames = Math.floor((paddingMs / 1000) * sampleRate);
-
     const numWindows = Math.ceil(totalFrames / windowSize);
-    const isSpeech = new Uint8Array(numWindows);
+
+    // Первичный расчет RMS энергии по всем окнам 10 мс
+    const windowRms = new Float32Array(numWindows);
+    const windowPeak = new Float32Array(numWindows);
+    let maxOverallPeak = 0;
+    let sumOverallRms = 0;
 
     for (let w = 0; w < numWindows; w++) {
       const startF = w * windowSize;
       const endF = Math.min(totalFrames, startF + windowSize);
       let sumSq = 0;
+      let peak = 0;
       let count = 0;
 
       for (let f = startF; f < endF; f++) {
         const idx = f * channels;
-        const sL = samples[idx];
-        const sR = isStereo ? samples[idx + 1] : sL;
+        const sL = Math.abs(samples[idx] || 0);
+        const sR = isStereo ? Math.abs(samples[idx + 1] || 0) : sL;
         sumSq += sL * sL + sR * sR;
+        if (sL > peak) peak = sL;
+        if (sR > peak) peak = sR;
         count += channels;
       }
 
       const rms = count > 0 ? Math.sqrt(sumSq / count) : 0;
-      if (rms >= thresholdAmp) {
+      windowRms[w] = rms;
+      windowPeak[w] = peak;
+      if (peak > maxOverallPeak) maxOverallPeak = peak;
+      sumOverallRms += rms;
+    }
+
+    // Если сигнал не пустой, но заданный фиксированный порог слишком строгий/мягкий,
+    // выполняем адаптивную калибровку порога речи
+    if (maxOverallPeak > 0.005) {
+      const sortedRms = Float32Array.from(windowRms).sort();
+      // Оценка шума покоя (10-й процентиль) и речи (90-й процентиль)
+      const p10 = sortedRms[Math.floor(numWindows * 0.1)] || 0.0001;
+      const p90 = sortedRms[Math.floor(numWindows * 0.9)] || 0.01;
+      const p10Db = 20 * Math.log10(Math.max(1e-5, p10));
+      const p90Db = 20 * Math.log10(Math.max(1e-5, p90));
+
+      // Если динамический диапазон между тишиной и речью больше 10 dB
+      if (p90Db - p10Db > 10) {
+        // Устанавливаем порог на 40% расстояния между шумом и речью
+        const adaptiveDb = p10Db + (p90Db - p10Db) * 0.35;
+        // Ограничиваем разумными пределами для дикторской речи (-52 dB .. -26 dB)
+        effectiveThresholdDb = Math.max(-52.0, Math.min(-26.0, adaptiveDb));
+      }
+    }
+
+    const thresholdAmp = Math.pow(10, effectiveThresholdDb / 20);
+    const peakThresholdAmp = thresholdAmp * 1.4;
+    const isSpeech = new Uint8Array(numWindows);
+
+    for (let w = 0; w < numWindows; w++) {
+      if (windowRms[w] >= thresholdAmp || windowPeak[w] >= peakThresholdAmp) {
         isSpeech[w] = 1;
       }
     }
 
+    // Склеивание коротких внутрисловных пауз (короче minSilenceMs)
     const minSilenceWindows = Math.ceil(minSilenceFrames / windowSize);
     let lastSpeech = -1;
     for (let w = 0; w < numWindows; w++) {
@@ -2247,8 +2291,8 @@ export class NativeDAWBridge {
 
       for (let f = paddedStart; f < paddedEnd; f += stride) {
         const idx = f * channels;
-        const sL = Math.abs(samples[idx]);
-        const sR = isStereo ? Math.abs(samples[idx + 1]) : sL;
+        const sL = Math.abs(samples[idx] || 0);
+        const sR = isStereo ? Math.abs(samples[idx + 1] || 0) : sL;
         if (sL > maxPeak) maxPeak = sL;
         if (sR > maxPeak) maxPeak = sR;
         sumSq += sL * sL + sR * sR;

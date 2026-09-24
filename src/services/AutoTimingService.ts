@@ -304,46 +304,90 @@ export class AutoTimingService {
   // ==========================================================================
 
   /**
-   * Нарезка длинного аудиофайла дорожки на отдельные голосовые фразы
+   * Нарезка длинного аудиофайла дорожки на отдельные голосовые фразы с удалением тишины
    */
   public sliceTrackIntoPhrases(
     track: TrackState,
-    sampleRate: number = 48000
+    sampleRate: number = 48000,
+    forceReslice: boolean = false
   ): ClipConfig[] {
     const safeClips = toSafeArray<ClipConfig>(track.clips);
     if (safeClips.length === 0) return [];
 
-    // Если на дорожке уже несколько нарезанных клипов — возвращаем их
-    if (safeClips.length > 1) {
+    // Если на дорожке уже несколько нарезанных клипов и не запрошен принудительный перерасчет — возвращаем их
+    if (safeClips.length > 1 && !forceReslice) {
       return [...safeClips].sort((a, b) => a.offsetSamples - b.offsetSamples);
     }
 
     const firstClip = safeClips[0];
-    const buffer = firstClip.buffer || firstClip.untrimmedBuffer;
+    const buffer = firstClip.untrimmedBuffer || firstClip.buffer;
     if (!buffer || buffer.length === 0) return safeClips;
 
-    // Детекция пауз и голосовых сегментов через C++ WASM ядро
+    // Определение количества каналов (стерео или моно)
+    const totalFrames = firstClip.lengthSamples || Math.floor(buffer.length / 2);
+    const isStereo = buffer.length >= totalFrames * 1.5;
+    const channels = isStereo ? 2 : 1;
+    const durationSec = buffer.length / (channels * sampleRate);
+
+    // Детекция пауз и голосовых сегментов через C++ WASM ядро с адаптивным подбором порогов
     try {
-      const nativeSegments = globalNativeDAWBridge.stripSilenceNative(
+      let segments = globalNativeDAWBridge.stripSilenceNative(
         buffer,
-        -42.0, // Порог тишины -42 dBFS
-        300,   // Мин. тишина 300 мс между репликами
-        80,    // Буферизация 80 мс
-        true,  // Стерео буфер
+        -40.0, // Базовый порог тишины -40 dBFS
+        280,   // Мин. тишина 280 мс между репликами
+        60,    // Буферизация 60 мс
+        isStereo,
         sampleRate
       );
 
-      if (nativeSegments && nativeSegments.length > 1) {
+      // Если на аудио длиннее 4 секунд не удалось найти несколько сегментов, пробуем адаптивные проходы
+      if ((!segments || segments.length <= 1) && durationSec > 3.5) {
+        const candidateThresholds = [-45.0, -36.0, -48.0, -32.0, -52.0, -28.0];
+        for (const thresh of candidateThresholds) {
+          const testSegs = globalNativeDAWBridge.stripSilenceNative(
+            buffer,
+            thresh,
+            240,
+            50,
+            isStereo,
+            sampleRate
+          );
+          if (testSegs && testSegs.length > 1) {
+            segments = testSegs;
+            break;
+          }
+        }
+      }
+
+      // Если все еще 1 сегмент, вызываем прямой адаптивный VAD fallback
+      if ((!segments || segments.length <= 1) && durationSec > 3.5) {
+        const fallbackSegs = globalNativeDAWBridge.stripSilenceFallback(
+          buffer,
+          -38.0,
+          250,
+          50,
+          isStereo,
+          sampleRate
+        );
+        if (fallbackSegs && fallbackSegs.length > 1) {
+          segments = fallbackSegs;
+        }
+      }
+
+      if (segments && segments.length > 0) {
         systemLogger.info(
           'LoudnessAutoAligner',
-          `[AutoTiming] Дорожка "${track.name}" успешно сегментирована на ${nativeSegments.length} реплик через C++ StripSilence.`
+          `[AutoTiming] Дорожка "${track.name}" успешно сегментирована на ${segments.length} реплик (тишина удалена).`
         );
 
-        return nativeSegments.map((seg, idx) => {
+        return segments.map((seg, idx) => {
           const startFrame = seg.offsetSamples;
           const frameLen = seg.lengthSamples;
+          const startSample = Math.max(0, Math.min(buffer.length, startFrame * channels));
+          const endSample = Math.max(startSample, Math.min(buffer.length, (startFrame + frameLen) * channels));
+
           // Извлекаем срез PCM буфера для отдельного клипа
-          const slicedBuf = buffer.subarray(startFrame * 2, (startFrame + frameLen) * 2);
+          const slicedBuf = buffer.subarray(startSample, endSample);
 
           return {
             id: Date.now() + idx + Math.floor(Math.random() * 1000),
@@ -366,6 +410,78 @@ export class AutoTimingService {
     }
 
     return safeClips;
+  }
+
+  /**
+   * Удаление тишины и нарезка на фразы для конкретной дорожки с обновлением клипов
+   */
+  public stripSilenceFromTrack(
+    track: TrackState,
+    thresholdDb: number = -40.0,
+    minSilenceMs: number = 280.0,
+    paddingMs: number = 60.0,
+    sampleRate: number = 48000
+  ): TrackState {
+    const safeClips = toSafeArray<ClipConfig>(track.clips);
+    if (safeClips.length === 0) return track;
+
+    const sourceClip = safeClips[0];
+    const buffer = sourceClip.untrimmedBuffer || sourceClip.buffer;
+    if (!buffer || buffer.length === 0) return track;
+
+    const totalFrames = sourceClip.lengthSamples || Math.floor(buffer.length / 2);
+    const isStereo = buffer.length >= totalFrames * 1.5;
+    const channels = isStereo ? 2 : 1;
+
+    let segments = globalNativeDAWBridge.stripSilenceNative(
+      buffer,
+      thresholdDb,
+      minSilenceMs,
+      paddingMs,
+      isStereo,
+      sampleRate
+    );
+
+    if (!segments || segments.length === 0) {
+      segments = globalNativeDAWBridge.stripSilenceFallback(
+        buffer,
+        thresholdDb,
+        minSilenceMs,
+        paddingMs,
+        isStereo,
+        sampleRate
+      );
+    }
+
+    if (!segments || segments.length === 0) return track;
+
+    const newClips: ClipConfig[] = segments.map((seg, idx) => {
+      const startFrame = seg.offsetSamples;
+      const frameLen = seg.lengthSamples;
+      const startSample = Math.max(0, Math.min(buffer.length, startFrame * channels));
+      const endSample = Math.max(startSample, Math.min(buffer.length, (startFrame + frameLen) * channels));
+      const slicedBuf = buffer.subarray(startSample, endSample);
+
+      return {
+        id: Date.now() + idx + Math.floor(Math.random() * 1000),
+        name: `${track.name} [Фраза #${idx + 1}]`,
+        offsetSamples: startFrame,
+        lengthSamples: frameLen,
+        gain: 1.0,
+        pan: 0,
+        fadeInSamples: Math.min(240, Math.floor(sampleRate * 0.005)),
+        fadeOutSamples: Math.min(240, Math.floor(sampleRate * 0.005)),
+        buffer: new Float32Array(slicedBuf),
+        untrimmedBuffer: buffer,
+        trimStartSamples: startFrame,
+        color: track.color
+      };
+    });
+
+    return {
+      ...track,
+      clips: newClips
+    };
   }
 
   // ==========================================================================
