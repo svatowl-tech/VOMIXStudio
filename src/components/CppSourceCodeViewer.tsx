@@ -18,7 +18,8 @@ export const CppSourceCodeViewer: React.FC<CppSourceCodeViewerProps> = ({ cppCod
   const emccCmd = `emcc -O3 -std=c++17 -msimd128 -flto --bind \\
   -I. \\
   -s WASM=1 \\
-  -s INITIAL_MEMORY=67108864 \\
+  -s INITIAL_MEMORY=134217728 \\
+  -s MAXIMUM_MEMORY=1073741824 \\
   -s ALLOW_MEMORY_GROWTH=1 \\
   -s ENVIRONMENT=web,worker \\
   -s MODULARIZE=1 \\

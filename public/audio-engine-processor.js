@@ -69,7 +69,21 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
 
     // Метрики и телеметрия уровней (metering + PDC)
     this.meterFrameCounter = 0;
-    this.meterReportInterval = 4; // каждые ~10.6 мс при блоке 128 сэмплов
+    this.meterReportInterval = 15; // каждые ~40 мс (25 FPS) при блоке 128 сэмплов @ 48kHz
+
+    // RT-Safe пул объектов телеметрии треков для предотвращения аллокаций памяти и пауз GC
+    this.trackTelemetryPool = [];
+    this.trackTelemetryList = [];
+    this.vocalBusMeterTelemetry = { peakL: 0, peakR: 0, rmsL: 0, rmsR: 0 };
+    this.masterMeterTelemetry = { peakL: 0, peakR: 0, rmsL: 0, rmsR: 0 };
+    this.telemetryMessage = {
+      type: 'METERS_TELEMETRY',
+      currentTimeSec: 0,
+      tracks: [],
+      vocalBus: { peakL: 0, peakR: 0, rmsL: 0, rmsR: 0, latencySamples: 0, pdcMs: 0 },
+      master: { peakL: 0, peakR: 0, rmsL: 0, rmsR: 0, clipped: false, latencySamples: 0, pdcMs: 0 },
+      pdc: { sampleRate: this.sampleRate, vocalBusLatencySamples: 0, masterLatencySamples: 0 }
+    };
 
     // Обработчик входящих команд хоста
     this.port.onmessage = (event) => this.handleHostMessage(event.data);
@@ -79,6 +93,25 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       type: 'WORKLET_READY',
       sampleRate: this.sampleRate
     });
+  }
+
+  /**
+   * Получение переиспользуемого объекта телеметрии трека из пула (RT-Safe, без аллокаций)
+   */
+  getTrackTelemetryItem(index) {
+    if (index >= this.trackTelemetryPool.length) {
+      this.trackTelemetryPool.push({
+        trackId: 0,
+        peakL: 0,
+        peakR: 0,
+        rmsL: 0,
+        rmsR: 0,
+        clipped: false,
+        latencySamples: 0,
+        pdcMs: 0
+      });
+    }
+    return this.trackTelemetryPool[index];
   }
 
   /**
@@ -225,6 +258,35 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
     if (ptr && this.wasmModule && this.wasmModule._free) {
       this.wasmModule._free(ptr);
       this.clipWasmPtrs.delete(clipId);
+    }
+  }
+
+  /**
+   * Метод garbageCollectWasm()
+   * Сверяет существующие ID клипов во всех треках с активными указателями в WASM (clipWasmPtrs).
+   * Удаляет «орфанов» (осиротевшие указатели) через _free, предотвращая утечки памяти.
+   */
+  garbageCollectWasm() {
+    if (!this.wasmModule || !this.wasmModule._free) return;
+    const activeClipIds = new Set();
+    for (const [, track] of this.jsTracks.entries()) {
+      if (track && track.clips instanceof Map) {
+        for (const [clipId] of track.clips.entries()) {
+          activeClipIds.add(clipId);
+        }
+      }
+    }
+
+    for (const [clipId, ptr] of this.clipWasmPtrs.entries()) {
+      if (!activeClipIds.has(clipId)) {
+        try {
+          this.wasmModule._free(ptr);
+        } catch (e) {
+          console.warn(`[AudioWorklet] Ошибка освобождения осиротевшего указателя #${clipId}:`, e);
+        }
+        this.clipWasmPtrs.delete(clipId);
+        this.clipBufferCache.delete(clipId);
+      }
     }
   }
 
@@ -805,6 +867,12 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
 
         // Загружаем в C++ микшер
         if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
+          // Жестко проверяем мапу clipWasmPtrs и вызываем принудительное освобождение _free для перезаписываемых ID клипов
+          const existingPtr = this.clipWasmPtrs.get(clipId);
+          if (existingPtr && this.wasmModule._free) {
+            this.wasmModule._free(existingPtr);
+            this.clipWasmPtrs.delete(clipId);
+          }
           this.freeWasmClipBuffer(clipId);
           if (cachedPcm.length > 0) {
             const bufferPtr = this.allocateWasmBuffer(cachedPcm);
@@ -832,8 +900,95 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           type: 'CLIP_LOADED_SUCCESS',
           trackId,
           clipId,
-          lengthSamples
+          lengthSamples,
+          wasmPtr: this.clipWasmPtrs.get(clipId) || 0
         });
+        break;
+      }
+
+      // ======================================================================
+      // 6.1. UPDATE_TRACK: Обновление дорожки и синхронизация клипов с WASM
+      // ======================================================================
+      case 'UPDATE_TRACK': {
+        const track = msg.track;
+        if (!track || typeof track.id !== 'number') break;
+        const trackId = track.id;
+
+        if (!this.jsTracks.has(trackId)) {
+          this.jsTracks.set(trackId, {
+            id: trackId,
+            volumeDb: 0.0,
+            pan: 0.0,
+            solo: false,
+            mute: false,
+            vstPlugins: [],
+            clips: new Map()
+          });
+        }
+        const currentTrack = this.jsTracks.get(trackId);
+        if (typeof track.volumeDb === 'number') currentTrack.volumeDb = track.volumeDb;
+        if (typeof track.pan === 'number') currentTrack.pan = track.pan;
+        if (typeof track.solo === 'boolean') currentTrack.solo = track.solo;
+        if (typeof track.mute === 'boolean') currentTrack.mute = track.mute;
+
+        if (Array.isArray(track.clips)) {
+          for (const c of track.clips) {
+            if (!c || typeof c.id !== 'number') continue;
+            let pcmBuffer = (c.buffer && c.buffer.length > 0) ? c.buffer : (this.clipBufferCache.get(c.id) || null);
+            if (pcmBuffer && pcmBuffer.length > 0) {
+              this.clipBufferCache.set(c.id, pcmBuffer);
+              if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
+                // Перед отправкой новых pcmBuffer в WASM жестко проверяем мапу clipWasmPtrs и вызываем принудительное освобождение _free
+                const existingPtr = this.clipWasmPtrs.get(c.id);
+                if (existingPtr && this.wasmModule._free) {
+                  this.wasmModule._free(existingPtr);
+                  this.clipWasmPtrs.delete(c.id);
+                }
+                const bufferPtr = this.allocateWasmBuffer(pcmBuffer);
+                if (bufferPtr) {
+                  this.clipWasmPtrs.set(c.id, bufferPtr);
+                  const isStereo = c.isStereo !== undefined ? c.isStereo : (pcmBuffer.length >= (c.lengthSamples || 0) * 2);
+                  const lengthSamples = c.lengthSamples || (isStereo ? Math.floor(pcmBuffer.length / 2) : pcmBuffer.length);
+                  this.wasmModule._addClipToTrack(
+                    this.mixerPtr,
+                    trackId,
+                    c.id,
+                    bufferPtr,
+                    pcmBuffer.length,
+                    c.offsetSamples || 0,
+                    lengthSamples,
+                    typeof c.gain === 'number' ? c.gain : 1.0,
+                    typeof c.pan === 'number' ? c.pan : 0.0,
+                    c.fadeInSamples || 0,
+                    c.fadeOutSamples || 0,
+                    isStereo
+                  );
+                }
+              }
+            }
+          }
+        }
+        this.garbageCollectWasm();
+        break;
+      }
+
+      // ======================================================================
+      // 6.2. FREE_CLIP_BUFFER: Принудительное освобождение пойнтера клипа
+      // ======================================================================
+      case 'FREE_CLIP_BUFFER': {
+        const { clipId } = msg;
+        if (typeof clipId === 'number') {
+          this.freeWasmClipBuffer(clipId);
+          this.clipBufferCache.delete(clipId);
+        }
+        break;
+      }
+
+      // ======================================================================
+      // 6.3. GARBAGE_COLLECT_WASM: Принудительная сборка мусора указателей WASM
+      // ======================================================================
+      case 'GARBAGE_COLLECT_WASM': {
+        this.garbageCollectWasm();
         break;
       }
 
@@ -900,6 +1055,11 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           });
 
           if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
+            const existingPtr = this.clipWasmPtrs.get(c.id);
+            if (existingPtr && this.wasmModule._free) {
+              this.wasmModule._free(existingPtr);
+              this.clipWasmPtrs.delete(c.id);
+            }
             this.freeWasmClipBuffer(c.id);
             const bufferPtr = this.allocateWasmBuffer(pcmBuffer);
             if (bufferPtr) {
@@ -921,6 +1081,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
             }
           }
         }
+        this.garbageCollectWasm();
         break;
       }
 
@@ -990,6 +1151,11 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
               });
 
               if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
+                const existingPtr = this.clipWasmPtrs.get(c.id);
+                if (existingPtr && this.wasmModule._free) {
+                  this.wasmModule._free(existingPtr);
+                  this.clipWasmPtrs.delete(c.id);
+                }
                 const bufferPtr = this.allocateWasmBuffer(pcmBuffer);
                 if (bufferPtr) {
                   this.clipWasmPtrs.set(c.id, bufferPtr);
@@ -1069,6 +1235,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
             });
           }
         }
+        this.garbageCollectWasm();
         break;
       }
 
@@ -1405,7 +1572,13 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         }
       }
 
-      const trackTelemetry = [];
+      // Флаг отправки телеметрии в этом кванте (каждые 15 блоков = ~40 мс = 25 FPS)
+      const isTelemetryFrame = (this.meterFrameCounter + 1 >= this.meterReportInterval);
+      if (isTelemetryFrame) {
+        this.trackTelemetryList.length = 0;
+      }
+      let telemetryIndex = 0;
+
       let vocalPeakL = 0;
       let vocalPeakR = 0;
       let vocalRmsSumL = 0;
@@ -1419,16 +1592,18 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         let tRmsSumR = 0;
 
         if (track.mute || (hasSolo && !track.solo)) {
-          trackTelemetry.push({
-            trackId,
-            peakL: 0,
-            peakR: 0,
-            rmsL: 0,
-            rmsR: 0,
-            clipped: false,
-            latencySamples: 0,
-            pdcMs: 0
-          });
+          if (isTelemetryFrame) {
+            const item = this.getTrackTelemetryItem(telemetryIndex++);
+            item.trackId = trackId;
+            item.peakL = 0;
+            item.peakR = 0;
+            item.rmsL = 0;
+            item.rmsR = 0;
+            item.clipped = false;
+            item.latencySamples = 0;
+            item.pdcMs = 0;
+            this.trackTelemetryList.push(item);
+          }
           continue;
         }
 
@@ -1520,19 +1695,20 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           }
         }
 
-        const latencySamples = this.getTrackLatencySamples(trackId);
-        const pdcMs = (latencySamples / this.sampleRate) * 1000;
-
-        trackTelemetry.push({
-          trackId,
-          peakL: tPeakL,
-          peakR: tPeakR,
-          rmsL: Math.sqrt(tRmsSumL / numFrames),
-          rmsR: Math.sqrt(tRmsSumR / numFrames),
-          clipped: tPeakL >= 0.999 || tPeakR >= 0.999,
-          latencySamples,
-          pdcMs: Number(pdcMs.toFixed(2))
-        });
+        if (isTelemetryFrame) {
+          const latencySamples = this.getTrackLatencySamples(trackId);
+          const pdcMs = (latencySamples / this.sampleRate) * 1000;
+          const item = this.getTrackTelemetryItem(telemetryIndex++);
+          item.trackId = trackId;
+          item.peakL = tPeakL;
+          item.peakR = tPeakR;
+          item.rmsL = Math.sqrt(tRmsSumL / numFrames);
+          item.rmsR = Math.sqrt(tRmsSumR / numFrames);
+          item.clipped = tPeakL >= 0.999 || tPeakR >= 0.999;
+          item.latencySamples = latencySamples;
+          item.pdcMs = Math.round(pdcMs * 100) / 100;
+          this.trackTelemetryList.push(item);
+        }
       }
 
       // 2. Обработка Шины Вокала (Vocal Bus Master)
@@ -1598,19 +1774,25 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
 
       this.currentTimelineSample += numFrames;
 
-      // 5. Отправка высокоточной телеметрии уровней каждые ~40 мс
+      // 5. Отправка высокоточной телеметрии уровней каждые ~40 мс (25 FPS)
       this.meterFrameCounter++;
       if (this.meterFrameCounter >= this.meterReportInterval) {
-        const vocalRmsL = Math.sqrt(vocalRmsSumL / numFrames);
-        const vocalRmsR = Math.sqrt(vocalRmsSumR / numFrames);
-        const masterRmsL = Math.sqrt(masterRmsSumL / numFrames);
-        const masterRmsR = Math.sqrt(masterRmsSumR / numFrames);
+        this.vocalBusMeterTelemetry.peakL = vocalPeakL;
+        this.vocalBusMeterTelemetry.peakR = vocalPeakR;
+        this.vocalBusMeterTelemetry.rmsL = Math.sqrt(vocalRmsSumL / numFrames);
+        this.vocalBusMeterTelemetry.rmsR = Math.sqrt(vocalRmsSumR / numFrames);
+
+        this.masterMeterTelemetry.peakL = masterPeakL;
+        this.masterMeterTelemetry.peakR = masterPeakR;
+        this.masterMeterTelemetry.rmsL = Math.sqrt(masterRmsSumL / numFrames);
+        this.masterMeterTelemetry.rmsR = Math.sqrt(masterRmsSumR / numFrames);
+
         const isClipped = masterPeakL >= 0.999 || masterPeakR >= 0.999;
 
         this.sendTelemetryMeters(
-          trackTelemetry,
-          { peakL: vocalPeakL, peakR: vocalPeakR, rmsL: vocalRmsL, rmsR: vocalRmsR },
-          { peakL: masterPeakL, peakR: masterPeakR, rmsL: masterRmsL, rmsR: masterRmsR },
+          this.trackTelemetryList,
+          this.vocalBusMeterTelemetry,
+          this.masterMeterTelemetry,
           isClipped
         );
         this.meterFrameCounter = 0;
@@ -1640,33 +1822,32 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
     const vocalBusLatency = this.getVocalBusLatencySamples();
     const masterLatency = this.getMasterLatencySamples();
 
-    this.port.postMessage({
-      type: 'METERS_TELEMETRY',
-      currentTimeSec: this.currentTimelineSample / this.sampleRate,
-      tracks: trackMeters,
-      vocalBus: {
-        peakL: vocalBusMeter ? (vocalBusMeter.peakL || 0) : 0,
-        peakR: vocalBusMeter ? (vocalBusMeter.peakR || 0) : 0,
-        rmsL: vocalBusMeter ? (vocalBusMeter.rmsL || 0) : 0,
-        rmsR: vocalBusMeter ? (vocalBusMeter.rmsR || 0) : 0,
-        latencySamples: vocalBusLatency,
-        pdcMs: Number(((vocalBusLatency / this.sampleRate) * 1000).toFixed(2))
-      },
-      master: {
-        peakL: masterMeter ? (masterMeter.peakL || 0) : 0,
-        peakR: masterMeter ? (masterMeter.peakR || 0) : 0,
-        rmsL: masterMeter ? (masterMeter.rmsL || 0) : 0,
-        rmsR: masterMeter ? (masterMeter.rmsR || 0) : 0,
-        clipped: !!clipped,
-        latencySamples: masterLatency,
-        pdcMs: Number(((masterLatency / this.sampleRate) * 1000).toFixed(2))
-      },
-      pdc: {
-        sampleRate: this.sampleRate,
-        vocalBusLatencySamples: vocalBusLatency,
-        masterLatencySamples: masterLatency
-      }
-    });
+    this.telemetryMessage.currentTimeSec = this.currentTimelineSample / this.sampleRate;
+    this.telemetryMessage.tracks = trackMeters;
+
+    const vb = this.telemetryMessage.vocalBus;
+    vb.peakL = vocalBusMeter ? (vocalBusMeter.peakL || 0) : 0;
+    vb.peakR = vocalBusMeter ? (vocalBusMeter.peakR || 0) : 0;
+    vb.rmsL = vocalBusMeter ? (vocalBusMeter.rmsL || 0) : 0;
+    vb.rmsR = vocalBusMeter ? (vocalBusMeter.rmsR || 0) : 0;
+    vb.latencySamples = vocalBusLatency;
+    vb.pdcMs = Math.round(((vocalBusLatency / this.sampleRate) * 1000) * 100) / 100;
+
+    const mm = this.telemetryMessage.master;
+    mm.peakL = masterMeter ? (masterMeter.peakL || 0) : 0;
+    mm.peakR = masterMeter ? (masterMeter.peakR || 0) : 0;
+    mm.rmsL = masterMeter ? (masterMeter.rmsL || 0) : 0;
+    mm.rmsR = masterMeter ? (masterMeter.rmsR || 0) : 0;
+    mm.clipped = !!clipped;
+    mm.latencySamples = masterLatency;
+    mm.pdcMs = Math.round(((masterLatency / this.sampleRate) * 1000) * 100) / 100;
+
+    const pdc = this.telemetryMessage.pdc;
+    pdc.sampleRate = this.sampleRate;
+    pdc.vocalBusLatencySamples = vocalBusLatency;
+    pdc.masterLatencySamples = masterLatency;
+
+    this.port.postMessage(this.telemetryMessage);
   }
 }
 

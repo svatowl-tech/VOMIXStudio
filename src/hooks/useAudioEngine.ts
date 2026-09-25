@@ -13,7 +13,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { MediaNormalizer, LoudnessMatchingResult, TrackLoudnessAdjustment } from '../services/MediaNormalizer';
-import { TrackState, ClipConfig, VocalBusState } from '../audio/dawEngine';
+import { TrackState, ClipConfig, VocalBusState, globalLiveDAWEngine } from '../audio/dawEngine';
 import { VSTPluginInstance, VSTPluginDescriptor } from '../audio/vstTypes';
 import { systemLogger } from '../services/SystemLogger';
 import { globalNativeDAWBridge } from '../services/NativeDAWBridge';
@@ -80,6 +80,8 @@ export interface UseAudioEngineReturn {
 
   syncTrackClips: (trackId: number, clips: ClipConfig[]) => void;
   syncAllTracks: (tracks: TrackState[]) => void;
+  handleUpdateTrack: (updatedTrack: TrackState) => void;
+  garbageCollectWasm: (currentTracks?: TrackState[]) => void;
 
   setTrackVolume: (trackId: number, volumeDb: number) => void;
   setTrackPan: (trackId: number, pan: number) => void;
@@ -236,6 +238,9 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
   // Согласование времени плейхеда без дрожания с помощью performance.now()
   const playheadStartPerfRef = useRef<number>(performance.now());
   const playheadStartTimeSecRef = useRef<number>(0);
+  const lastReportedTimeSecRef = useRef<number>(0);
+  const currentTimeSecRef = useRef<number>(0);
+  const currentWorkletTimeSecRef = useRef<number>(0);
 
   // Реестры ожидающих промисов для асинхронных VST операций
   // key: `${trackId}_${slotIdx}` -> resolve callback
@@ -246,6 +251,73 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
   // Кэш ссылок на буферы клипов, уже переданные в AudioWorklet (clipId -> Float32Array)
   // Исключает катастрофическое повторное клонирование сотен мегабайт PCM буферов через postMessage на каждый чих интерфейса
   const syncedClipBuffersRef = useRef<Map<number, Float32Array>>(new Map());
+
+  // Мапа активных указателей кучи C++ WebAssembly для клипов (clipId -> wasmBufferPtr)
+  const clipWasmPtrs = useRef<Map<number, number>>(new Map());
+
+  /**
+   * Принудительное освобождение памяти WASM буфера клипа (HEAPF32 _free)
+   */
+  const freeClipWasmPointer = useCallback((clipId: number) => {
+    const ptr = clipWasmPtrs.current.get(clipId);
+    if (ptr) {
+      try {
+        globalNativeDAWBridge.freeFloats(ptr);
+      } catch (e) {
+        console.warn(`[useAudioEngine] Ошибка освобождения WASM пойнтера clip #${clipId}:`, e);
+      }
+      clipWasmPtrs.current.delete(clipId);
+    }
+    syncedClipBuffersRef.current.delete(clipId);
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({
+        type: 'FREE_CLIP_BUFFER',
+        clipId
+      });
+    }
+  }, []);
+
+  /**
+   * Сборщик мусора WebAssembly (garbageCollectWasm)
+   * Сверяет существующие ID клипов в TrackState с активными пойнтерами в WASM и освобождает орфанов.
+   */
+  const garbageCollectWasm = useCallback((currentTracks?: TrackState[]) => {
+    if (currentTracks) {
+      globalLiveDAWEngine.syncAllTracks(currentTracks);
+    } else {
+      globalLiveDAWEngine.garbageCollectWasm();
+    }
+
+    if (currentTracks && Array.isArray(currentTracks)) {
+      const activeIds = new Set<number>();
+      for (const track of currentTracks) {
+        if (track && Array.isArray(track.clips)) {
+          for (const clip of track.clips) {
+            if (clip && typeof clip.id === 'number') {
+              activeIds.add(clip.id);
+            }
+          }
+        }
+      }
+      for (const [clipId, ptr] of clipWasmPtrs.current.entries()) {
+        if (!activeIds.has(clipId)) {
+          try {
+            globalNativeDAWBridge.freeFloats(ptr);
+          } catch (e) {
+            console.warn(`[useAudioEngine] Ошибка GC WASM пойнтера clip #${clipId}:`, e);
+          }
+          clipWasmPtrs.current.delete(clipId);
+          syncedClipBuffersRef.current.delete(clipId);
+        }
+      }
+    }
+
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({
+        type: 'GARBAGE_COLLECT_WASM'
+      });
+    }
+  }, []);
 
   /**
    * Инициализация AudioContext, загрузка C++ WebAssembly ядра и запуск AudioWorklet
@@ -324,32 +396,20 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             });
 
             // Слушаем сообщения телеметрии и статуса из AudioWorklet
-            let lastUpdateTimestamp = 0;
-            const THROTTLE_MS = 16.6; // Обновление ~60 FPS
-            let lastTimeSec = 0;
+            let lastMetersUpdateTimestamp = 0;
+            const METERS_THROTTLE_MS = 33; // Жесткий throttle индикаторов не чаще 1 раза в 33 мс (~30 FPS)
             let lastTracksData: TrackMeterData[] | null = null;
             let lastVocalBusData: VocalBusMeterData | null = null;
             let lastMasterData: MasterMeterData | null = null;
-            let frameId: number | null = null;
+            let metersFrameId: number | null = null;
+            let metersTimerId: number | null = null;
 
-            const updateStateThrottled = () => {
-              // Плавная интерполяция времени плейхеда без сетевого/IPC дрожания
-              const now = performance.now();
-              const elapsedSec = (now - playheadStartPerfRef.current) / 1000;
-              const smoothTimeSec = playheadStartTimeSecRef.current + elapsedSec;
-
-              // Если рассинхронизация с C++ ворклером превышает 80мс, плавно примагничиваем
-              if (Math.abs(smoothTimeSec - lastTimeSec) > 0.08) {
-                playheadStartTimeSecRef.current = lastTimeSec;
-                playheadStartPerfRef.current = now;
-                setCurrentTimeSec(Math.max(0, lastTimeSec));
-              } else {
-                setCurrentTimeSec(Math.max(0, smoothTimeSec));
-              }
+            const updateMetersThrottled = () => {
+              metersFrameId = null;
 
               // Жесткая проверка на массив перед вызовом итерации для предотвращения TypeError
               if (Array.isArray(lastTracksData) && lastTracksData.length > 0) {
-                const tracksSnapshot = [...lastTracksData];
+                const tracksSnapshot = lastTracksData;
                 lastTracksData = null;
                 setTrackMeters((prevMap) => {
                   const safeMap = prevMap instanceof Map ? prevMap : new Map();
@@ -376,17 +436,30 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
                 lastMasterData = null;
                 setMasterMeter(masterSnapshot);
               }
-              frameId = null;
             };
 
-            workletNode.port.onmessage = (e) => {
+            const handleHostMessage = (e: MessageEvent) => {
               const data = e.data;
               if (!data) return;
 
               if (data.type === 'METERS_TELEMETRY') {
-                lastTimeSec = data.currentTimeSec || 0;
+                const workletTime = typeof data.currentTimeSec === 'number' ? data.currentTimeSec : 0;
+                currentWorkletTimeSecRef.current = workletTime;
+
+                // 1. Прием METERS_TELEMETRY не должен дергать setCurrentTimeSec, если разница во времени менее 100 мс (0.1с).
+                // UI курсор интерполируется через requestAnimationFrame независимо от стейта.
+                const timeDiff = Math.abs(workletTime - lastReportedTimeSecRef.current);
+                if (timeDiff >= 0.1) {
+                  lastReportedTimeSecRef.current = workletTime;
+                  playheadStartTimeSecRef.current = workletTime;
+                  playheadStartPerfRef.current = performance.now();
+                  currentTimeSecRef.current = workletTime;
+                  setCurrentTimeSec(Math.max(0, workletTime));
+                }
+
+                // 2. Буферизация данных телеметрии уровней (TrackMeters, VocalBus, Master)
                 if (data.tracks && Array.isArray(data.tracks)) {
-                  lastTracksData = data.tracks.filter(Boolean);
+                  lastTracksData = data.tracks;
                 }
                 if (data.vocalBus) {
                   lastVocalBusData = data.vocalBus;
@@ -395,12 +468,20 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
                   lastMasterData = data.master;
                 }
 
+                // 3. Жесткий throttle индикаторов громкости не чаще 1 раза в 33 мс (~30 FPS)
                 const now = performance.now();
-                if (now - lastUpdateTimestamp >= THROTTLE_MS) {
-                  lastUpdateTimestamp = now;
-                  if (frameId === null) {
-                    frameId = requestAnimationFrame(updateStateThrottled);
+                if (now - lastMetersUpdateTimestamp >= METERS_THROTTLE_MS) {
+                  lastMetersUpdateTimestamp = now;
+                  if (metersFrameId === null) {
+                    metersFrameId = requestAnimationFrame(updateMetersThrottled);
                   }
+                } else if (metersTimerId === null) {
+                  const delay = Math.max(1, METERS_THROTTLE_MS - (now - lastMetersUpdateTimestamp));
+                  metersTimerId = window.setTimeout(() => {
+                    metersTimerId = null;
+                    lastMetersUpdateTimestamp = performance.now();
+                    updateMetersThrottled();
+                  }, delay);
                 }
               } else if (data.type === 'VST_PLUGIN_LOADED') {
                 const key = `${data.trackId}_${data.slotIdx}`;
@@ -417,10 +498,17 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
                   cb(data.chunk || '');
                 }
               } else if (data.type === 'CLIP_LOADED_SUCCESS') {
+                if (typeof data.clipId === 'number' && typeof data.wasmPtr === 'number' && data.wasmPtr > 0) {
+                  clipWasmPtrs.current.set(data.clipId, data.wasmPtr);
+                }
                 const cb = pendingClipAcksRef.current.get(data.clipId);
                 if (cb) {
                   pendingClipAcksRef.current.delete(data.clipId);
                   cb();
+                }
+              } else if (data.type === 'FREE_CLIP_BUFFER') {
+                if (typeof data.clipId === 'number') {
+                  freeClipWasmPointer(data.clipId);
                 }
               } else if (data.type === 'WASM_INIT_SUCCESS') {
                 setIsAudioWorkletActive(true);
@@ -429,6 +517,8 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
                 systemLogger.error('AudioWorklet', `Сбой реалтайм C++ Mixer processBlock в фоновом потоке: ${data.error}`);
               }
             };
+
+            workletNode.port.onmessage = handleHostMessage;
 
             workletNode.connect(ctx.destination);
             workletNodeRef.current = workletNode;
@@ -485,6 +575,8 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     }
     playheadStartPerfRef.current = performance.now();
     playheadStartTimeSecRef.current = currentTimeSec;
+    lastReportedTimeSecRef.current = currentTimeSec;
+    currentTimeSecRef.current = currentTimeSec;
     if (workletNodeRef.current) {
       workletNodeRef.current.port.postMessage({ type: 'PLAY' });
     }
@@ -495,6 +587,10 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     if (workletNodeRef.current) {
       workletNodeRef.current.port.postMessage({ type: 'PAUSE' });
     }
+    const finalTime = currentWorkletTimeSecRef.current || currentTimeSecRef.current;
+    lastReportedTimeSecRef.current = finalTime;
+    currentTimeSecRef.current = finalTime;
+    setCurrentTimeSec(finalTime);
     setIsPlaying(false);
   }, []);
 
@@ -510,6 +606,9 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     const safeTime = Math.max(0, timeSec);
     playheadStartPerfRef.current = performance.now();
     playheadStartTimeSecRef.current = safeTime;
+    lastReportedTimeSecRef.current = safeTime;
+    currentTimeSecRef.current = safeTime;
+    currentWorkletTimeSecRef.current = safeTime;
     if (workletNodeRef.current) {
       workletNodeRef.current.port.postMessage({ type: 'SEEK', timeSec: safeTime });
     }
@@ -578,6 +677,12 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             });
           });
 
+          // Перед отправкой нового pcmBuffer в WASM жестко проверяем мапу clipWasmPtrs
+          // и вызываем принудительное освобождение _free для перезаписываемого ID клипа
+          if (clipWasmPtrs.current.has(clipId)) {
+            freeClipWasmPointer(clipId);
+          }
+
           syncedClipBuffersRef.current.set(clipId, pcmFloat32);
           workletNodeRef.current.port.postMessage({
             type: 'LOAD_TRACK_CLIP',
@@ -598,7 +703,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
         pcmData: pcmFloat32
       };
     },
-    [isInitialized, initAudioEngine]
+    [isInitialized, initAudioEngine, freeClipWasmPointer]
   );
 
   const uploadRawPCMToTrack = useCallback(
@@ -612,6 +717,12 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
       isStereo: boolean = true
     ) => {
       if (workletNodeRef.current) {
+        // Перед отправкой нового pcmBuffer в WASM жестко проверяем мапу clipWasmPtrs
+        // и вызываем принудительное освобождение _free для перезаписываемого ID клипа
+        if (clipWasmPtrs.current.has(clipId)) {
+          freeClipWasmPointer(clipId);
+        }
+
         syncedClipBuffersRef.current.set(clipId, pcmFloat32);
 
         const handleAck = (e: MessageEvent) => {
@@ -636,7 +747,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
         });
       }
     },
-    []
+    [freeClipWasmPointer]
   );
 
   const syncTrackClips = useCallback((trackId: number, clips: ClipConfig[]) => {
@@ -649,6 +760,11 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
           if (!c) continue;
           const prevBuf = syncedClipBuffersRef.current.get(c.id);
           if (c.buffer instanceof Float32Array && c.buffer.length > 0 && prevBuf !== c.buffer) {
+            // Перед отправкой новых pcmBuffer в WASM жестко проверяем мапу clipWasmPtrs
+            // и вызываем принудительное освобождение _free для перезаписываемых ID клипов
+            if (clipWasmPtrs.current.has(c.id)) {
+              freeClipWasmPointer(c.id);
+            }
             syncedClipBuffersRef.current.set(c.id, c.buffer);
             workletNodeRef.current.port.postMessage({
               type: 'LOAD_TRACK_CLIP',
@@ -679,11 +795,14 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true
           }))
         });
+
+        // Сборка мусора осиротевших указателей WASM после syncTrackClips
+        garbageCollectWasm();
       } catch (err) {
         console.warn('[useAudioEngine] syncTrackClips postMessage ignored:', err);
       }
     }
-  }, []);
+  }, [freeClipWasmPointer, garbageCollectWasm]);
 
   const syncAllTracks = useCallback((tracks: TrackState[]) => {
     if (workletNodeRef.current) {
@@ -697,6 +816,11 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             if (!c) continue;
             const prevBuf = syncedClipBuffersRef.current.get(c.id);
             if (c.buffer instanceof Float32Array && c.buffer.length > 0 && prevBuf !== c.buffer) {
+              // Перед отправкой новых pcmBuffer в WASM жестко проверяем мапу clipWasmPtrs
+              // и вызываем принудительное освобождение _free для перезаписываемых ID клипов
+              if (clipWasmPtrs.current.has(c.id)) {
+                freeClipWasmPointer(c.id);
+              }
               syncedClipBuffersRef.current.set(c.id, c.buffer);
               workletNodeRef.current.port.postMessage({
                 type: 'LOAD_TRACK_CLIP',
@@ -746,11 +870,67 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             }))
           }))
         });
+
+        // Сборка мусора осиротевших указателей WASM после syncAllTracks
+        garbageCollectWasm(safeTracks);
       } catch (err) {
         console.warn('[useAudioEngine] syncAllTracks postMessage ignored:', err);
       }
     }
-  }, []);
+  }, [freeClipWasmPointer, garbageCollectWasm]);
+
+  /**
+   * Обновление состояния дорожки с контролем памяти WASM и принудительным освобождением _free
+   */
+  const handleUpdateTrack = useCallback(
+    (updatedTrack: TrackState) => {
+      if (!updatedTrack) return;
+
+      const safeClips = toSafeArray<ClipConfig>(updatedTrack.clips);
+
+      // Перед отправкой новых pcmBuffer в WASM жестко проверяем мапу clipWasmPtrs
+      // и вызываем принудительное освобождение _free для перезаписываемых ID клипов
+      for (const c of safeClips) {
+        if (!c || typeof c.id !== 'number') continue;
+        const prevBuf = syncedClipBuffersRef.current.get(c.id);
+        const isBufferChanged = c.buffer instanceof Float32Array && c.buffer.length > 0 && prevBuf !== c.buffer;
+        if (isBufferChanged) {
+          if (clipWasmPtrs.current.has(c.id)) {
+            freeClipWasmPointer(c.id);
+          }
+        }
+      }
+
+      // Синхронизируем клипы дорожки
+      syncTrackClips(updatedTrack.id, safeClips);
+
+      // Передаем параметры дорожки в AudioWorklet
+      if (workletNodeRef.current) {
+        workletNodeRef.current.port.postMessage({
+          type: 'UPDATE_TRACK',
+          track: {
+            id: updatedTrack.id,
+            volumeDb: updatedTrack.volumeDb ?? 0,
+            pan: updatedTrack.pan ?? 0,
+            solo: Boolean(updatedTrack.solo),
+            mute: Boolean(updatedTrack.mute),
+            clips: safeClips.map((c) => ({
+              id: c.id,
+              name: c.name,
+              offsetSamples: c.offsetSamples,
+              lengthSamples: c.lengthSamples,
+              gain: typeof c.gain === 'number' ? c.gain : 1.0,
+              pan: typeof c.pan === 'number' ? c.pan : 0.0,
+              fadeInSamples: c.fadeInSamples || 0,
+              fadeOutSamples: c.fadeOutSamples || 0,
+              isStereo: c.buffer ? c.buffer.length >= (c.lengthSamples || 0) * 2 : true
+            }))
+          }
+        });
+      }
+    },
+    [syncTrackClips, freeClipWasmPointer]
+  );
 
   const performLoudnessMatching = useCallback(
     (
@@ -1109,6 +1289,8 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     uploadRawPCMToTrack,
     syncTrackClips,
     syncAllTracks,
+    handleUpdateTrack,
+    garbageCollectWasm,
 
     setTrackVolume,
     setTrackPan,

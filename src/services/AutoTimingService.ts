@@ -32,6 +32,19 @@ export interface ActorTrackMapping {
   status: 'matched' | 'created' | 'unmatched';
 }
 
+export interface TrackAcousticProfile {
+  trackId: number;
+  trackName: string;
+  noiseFloorDb: number;        // Уровень фонового шума в dBFS
+  quietestSpeechRmsDb: number; // Уровень самой тихой реплики в dBFS
+  loudestSpeechRmsDb: number;  // Уровень громкой речи в dBFS
+  peakDb: number;              // Пиковый уровень
+  snrDb: number;               // Отношение сигнал / шум
+  optimalThresholdDb: number;  // Расчетный оптимальный порог отсечки тишины
+  optimalMinSilenceMs: number; // Оптимальная длительность паузы между репликами
+  optimalPaddingMs: number;    // Защитные буферы по краям для согласных звуков
+}
+
 export interface PhraseAlignmentDetail {
   cueIndex: number;
   speaker: string;
@@ -300,11 +313,166 @@ export class AutoTimingService {
   }
 
   // ==========================================================================
-  // 3. СЕГМЕНТАЦИЯ ДОРОЖКИ НА ФРАЗЫ (C++ ENERGY VAD / STRIP SILENCE)
+  // 3. АКУСТИЧЕСКИЙ АНАЛИЗ И АДАПТИВНАЯ СЕГМЕНТАЦИЯ НА ФРАЗЫ (PER-TRACK VAD)
   // ==========================================================================
 
   /**
-   * Нарезка длинного аудиофайла дорожки на отдельные голосовые фразы с удалением тишины
+   * Акустический анализ дорожки: получение индивидуальных параметров (фоновый шум, тихая/громкая речь, SNR и адаптивный порог)
+   */
+  public analyzeTrackAcousticProfile(
+    track: TrackState,
+    sampleRate: number = 48000
+  ): TrackAcousticProfile {
+    const safeClips = toSafeArray<ClipConfig>(track.clips);
+    const defaultProfile: TrackAcousticProfile = {
+      trackId: track.id,
+      trackName: track.name,
+      noiseFloorDb: -58.0,
+      quietestSpeechRmsDb: -28.0,
+      loudestSpeechRmsDb: -14.0,
+      peakDb: -6.0,
+      snrDb: 30.0,
+      optimalThresholdDb: -40.0,
+      optimalMinSilenceMs: 280,
+      optimalPaddingMs: 60
+    };
+
+    if (safeClips.length === 0) return defaultProfile;
+    const firstClip = safeClips[0];
+    const buffer = firstClip.untrimmedBuffer || firstClip.buffer;
+    if (!buffer || buffer.length === 0) return defaultProfile;
+
+    const totalFrames = firstClip.lengthSamples || Math.floor(buffer.length / 2);
+    const isStereo = buffer.length >= totalFrames * 1.5;
+    const channels = isStereo ? 2 : 1;
+    const framesCount = Math.floor(buffer.length / channels);
+
+    // Окна 15 мс для детального RMS анализа
+    const windowSize = Math.max(64, Math.floor(sampleRate * 0.015));
+    const numWindows = Math.ceil(framesCount / windowSize);
+    if (numWindows <= 0) return defaultProfile;
+
+    const windowRmsList: number[] = [];
+    let maxAbsPeak = 0;
+
+    for (let w = 0; w < numWindows; w++) {
+      const startF = w * windowSize;
+      const endF = Math.min(framesCount, startF + windowSize);
+      let sumSq = 0;
+      let count = 0;
+
+      for (let f = startF; f < endF; f++) {
+        const idx = f * channels;
+        const sL = Math.abs(buffer[idx] || 0);
+        const sR = isStereo ? Math.abs(buffer[idx + 1] || 0) : sL;
+        sumSq += sL * sL + sR * sR;
+        if (sL > maxAbsPeak) maxAbsPeak = sL;
+        if (sR > maxAbsPeak) maxAbsPeak = sR;
+        count += channels;
+      }
+
+      if (count > 0) {
+        const rms = Math.sqrt(sumSq / count);
+        if (rms > 1e-6) {
+          windowRmsList.push(rms);
+        }
+      }
+    }
+
+    if (windowRmsList.length === 0) return defaultProfile;
+
+    windowRmsList.sort((a, b) => a - b);
+    const N = windowRmsList.length;
+
+    // 1. Уровень фонового шума (10-й процентиль)
+    const noiseRms = windowRmsList[Math.floor(N * 0.1)] || 1e-4;
+    const noiseFloorDb = Math.max(-80.0, Math.min(-20.0, 20 * Math.log10(noiseRms)));
+
+    // 2. Отфильтровываем активные голосовые окна (выше шума на +5 dB)
+    const voiceThresholdRms = noiseRms * Math.pow(10, 5 / 20);
+    const voiceWindows = windowRmsList.filter((rms) => rms >= voiceThresholdRms);
+
+    const quietSpeechRms = voiceWindows.length > 0 ? voiceWindows[Math.floor(voiceWindows.length * 0.15)] : noiseRms * 3.0;
+    const loudSpeechRms = voiceWindows.length > 0 ? voiceWindows[Math.floor(voiceWindows.length * 0.85)] : noiseRms * 10.0;
+
+    const quietestSpeechRmsDb = Math.max(-65.0, Math.min(-10.0, 20 * Math.log10(Math.max(1e-5, quietSpeechRms))));
+    const loudestSpeechRmsDb = Math.max(-50.0, Math.min(-3.0, 20 * Math.log10(Math.max(1e-4, loudSpeechRms))));
+    const peakDb = Math.max(-60.0, Math.min(0.0, 20 * Math.log10(Math.max(1e-5, maxAbsPeak))));
+    const snrDb = Math.max(0, loudestSpeechRmsDb - noiseFloorDb);
+
+    // 3. Вычисление оптимального порога отсечки тишины
+    let optimalThresholdDb = -40.0;
+    if (quietestSpeechRmsDb > noiseFloorDb + 4.0) {
+      const dynamicThresh = noiseFloorDb + (quietestSpeechRmsDb - noiseFloorDb) * 0.35;
+      optimalThresholdDb = Math.min(quietestSpeechRmsDb - 2.5, Math.max(noiseFloorDb + 2.0, dynamicThresh));
+    } else {
+      optimalThresholdDb = noiseFloorDb + 3.0;
+    }
+    optimalThresholdDb = Math.max(-56.0, Math.min(-24.0, optimalThresholdDb));
+
+    // 4. Оптимальная пауза и буферизация
+    const optimalMinSilenceMs = snrDb > 25 ? 260 : snrDb > 15 ? 280 : 320;
+    const optimalPaddingMs = snrDb > 20 ? 55 : 70;
+
+    return {
+      trackId: track.id,
+      trackName: track.name,
+      noiseFloorDb: Math.round(noiseFloorDb * 10) / 10,
+      quietestSpeechRmsDb: Math.round(quietestSpeechRmsDb * 10) / 10,
+      loudestSpeechRmsDb: Math.round(loudestSpeechRmsDb * 10) / 10,
+      peakDb: Math.round(peakDb * 10) / 10,
+      snrDb: Math.round(snrDb * 10) / 10,
+      optimalThresholdDb: Math.round(optimalThresholdDb * 10) / 10,
+      optimalMinSilenceMs,
+      optimalPaddingMs
+    };
+  }
+
+  /**
+   * Адаптивное удаление тишины и нарезка на фразы для конкретной дорожки на основе её акустического профиля
+   */
+  public stripSilenceAdaptiveFromTrack(
+    track: TrackState,
+    sampleRate: number = 48000
+  ): { updatedTrack: TrackState; profile: TrackAcousticProfile; phraseCount: number } {
+    const profile = this.analyzeTrackAcousticProfile(track, sampleRate);
+    const updatedTrack = this.stripSilenceFromTrack(
+      track,
+      profile.optimalThresholdDb,
+      profile.optimalMinSilenceMs,
+      profile.optimalPaddingMs,
+      sampleRate
+    );
+    const phraseCount = toSafeArray(updatedTrack.clips).length;
+    return { updatedTrack, profile, phraseCount };
+  }
+
+  /**
+   * Адаптивное удаление тишины для всех дорожек проекта (с индивидуальной авто-настройкой параметров)
+   */
+  public stripSilenceAdaptiveAllTracks(
+    tracks: TrackState[],
+    sampleRate: number = 48000
+  ): { updatedTracks: TrackState[]; profiles: TrackAcousticProfile[]; totalPhrases: number } {
+    const safeTracks = toSafeArray<TrackState>(tracks);
+    const profiles: TrackAcousticProfile[] = [];
+    let totalPhrases = 0;
+
+    const updatedTracks = safeTracks.map((t) => {
+      if (t.isOriginalAudio || /оригинал|original|видео|video/i.test(t.name)) {
+        return t;
+      }
+      const res = this.stripSilenceAdaptiveFromTrack(t, sampleRate);
+      profiles.push(res.profile);
+      totalPhrases += res.phraseCount;
+      return res.updatedTrack;
+    });
+
+    return { updatedTracks, profiles, totalPhrases };
+  }
+
+  /**
+   * Нарезка длинного аудиофайла дорожки на отдельные голосовые фразы с адаптивным удалением тишины
    */
   public sliceTrackIntoPhrases(
     track: TrackState,
@@ -329,24 +497,28 @@ export class AutoTimingService {
     const channels = isStereo ? 2 : 1;
     const durationSec = buffer.length / (channels * sampleRate);
 
-    // Детекция пауз и голосовых сегментов через C++ WASM ядро с адаптивным подбором порогов
+    // Получаем индивидуальный профиль дорожки (уровень шума, тихой речи и оптимальный порог)
+    const profile = this.analyzeTrackAcousticProfile(track, sampleRate);
+
+    // Детекция пауз и голосовых сегментов через C++ WASM ядро с адаптивным порогом
     try {
       let segments = globalNativeDAWBridge.stripSilenceNative(
         buffer,
-        -40.0, // Базовый порог тишины -40 dBFS
-        280,   // Мин. тишина 280 мс между репликами
-        60,    // Буферизация 60 мс
+        profile.optimalThresholdDb,
+        profile.optimalMinSilenceMs,
+        profile.optimalPaddingMs,
         isStereo,
         sampleRate
       );
 
-      // Если на аудио длиннее 4 секунд не удалось найти несколько сегментов, пробуем адаптивные проходы
+      // Если на аудио длиннее 4 секунд не удалось найти несколько сегментов, пробуем адаптивные вариации
       if ((!segments || segments.length <= 1) && durationSec > 3.5) {
-        const candidateThresholds = [-45.0, -36.0, -48.0, -32.0, -52.0, -28.0];
-        for (const thresh of candidateThresholds) {
+        const candidateOffsets = [-4.0, +4.0, -8.0, +8.0, -12.0, +12.0];
+        for (const offset of candidateOffsets) {
+          const testThresh = Math.max(-56.0, Math.min(-24.0, profile.optimalThresholdDb + offset));
           const testSegs = globalNativeDAWBridge.stripSilenceNative(
             buffer,
-            thresh,
+            testThresh,
             240,
             50,
             isStereo,
@@ -363,9 +535,9 @@ export class AutoTimingService {
       if ((!segments || segments.length <= 1) && durationSec > 3.5) {
         const fallbackSegs = globalNativeDAWBridge.stripSilenceFallback(
           buffer,
-          -38.0,
-          250,
-          50,
+          profile.optimalThresholdDb,
+          profile.optimalMinSilenceMs,
+          profile.optimalPaddingMs,
           isStereo,
           sampleRate
         );
@@ -377,7 +549,7 @@ export class AutoTimingService {
       if (segments && segments.length > 0) {
         systemLogger.info(
           'LoudnessAutoAligner',
-          `[AutoTiming] Дорожка "${track.name}" успешно сегментирована на ${segments.length} реплик (тишина удалена).`
+          `[AutoTiming] Дорожка "${track.name}" успешно сегментирована на ${segments.length} реплик (Шум: ${profile.noiseFloorDb} dB, Тихая речь: ${profile.quietestSpeechRmsDb} dB, Порог: ${profile.optimalThresholdDb} dB).`
         );
 
         return segments.map((seg, idx) => {

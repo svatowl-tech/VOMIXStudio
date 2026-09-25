@@ -17,7 +17,7 @@ import { systemLogger } from '../services/SystemLogger';
 import { toSafeArray } from '../utils/safeIterables';
 import { globalLoudnessAutoAligner, LoudnessComparisonResult } from '../services/LoudnessAutoAligner';
 import { SubtitleCue } from '../services/ProjectManager';
-import { globalAutoTimingService } from '../services/AutoTimingService';
+import { globalAutoTimingService, TrackAcousticProfile } from '../services/AutoTimingService';
 import { formatCompactTime, formatSMPTE } from '../utils/waveformUtils';
 import {
   Sparkles,
@@ -121,6 +121,8 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isAutoTimingRunning, setIsAutoTimingRunning] = useState<boolean>(false);
   const [autoTimingSummary, setAutoTimingSummary] = useState<string | null>(null);
+  const [acousticProfiles, setAcousticProfiles] = useState<TrackAcousticProfile[]>([]);
+  const [totalStrippedPhrases, setTotalStrippedPhrases] = useState<number>(0);
 
   // Финальный результат
   const [resultVideoUrl, setResultVideoUrl] = useState<string | null>(null);
@@ -266,14 +268,32 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
         setProgressPercent(Math.round(10 + pct * 0.25)); // Scale progress to 10% - 35%
         addLog(msg);
       });
-      setTracks(processedTracks);
       addLog('AI обработка и EBU R128 нормализация всех дорожек успешно завершена.');
       systemLogger.info('MVPPipeline', 'AI обработка и EBU R128 нормализация всех дорожек успешно завершена.');
       setProgressPercent(35);
 
-      // 2. Детекция коллизий
-      setStatusMessage('Шаг 2/4: Детекция коллизий и наездов фраз...');
-      const detectedCollisions = detectTrackCollisions(processedTracks);
+      // 1.5. Акустический анализ (фоновый шум, тихая речь) и адаптивное удаление тишины для каждой дорожки даббера ДО детекции коллизий
+      setStatusMessage('Шаг 1.5/4: Акустический анализ (шум/речь) и адаптивное удаление тишины для каждой дорожки...');
+      addLog('✂️ Запуск индивидуального акустического анализа и нарезки на фразы для всех дорожек дабберов...');
+
+      const { updatedTracks: silenceStrippedTracks, profiles, totalPhrases } =
+        globalAutoTimingService.stripSilenceAdaptiveAllTracks(processedTracks, 48000);
+
+      setAcousticProfiles(profiles);
+      setTotalStrippedPhrases(totalPhrases);
+      setTracks(silenceStrippedTracks);
+
+      profiles.forEach((p) => {
+        addLog(
+          `🎙️ [${p.trackName}] Шум: ${p.noiseFloorDb} dBFS | Тихая речь: ${p.quietestSpeechRmsDb} dBFS ➔ Порог VAD: ${p.optimalThresholdDb} dBFS (мин. пауза: ${p.optimalMinSilenceMs}мс)`
+        );
+      });
+      addLog(`✅ Удаление тишины завершено: выделено ${totalPhrases} отдельных голосовых реплик без фонового шума.`);
+      setProgressPercent(45);
+
+      // 2. Детекция коллизий НА ДОРОЖКАХ С УДАЛЁННОЙ ТИШИНОЙ
+      setStatusMessage('Шаг 2/4: Детекция коллизий и наездов между репликами...');
+      const detectedCollisions = detectTrackCollisions(silenceStrippedTracks);
       setCollisions(detectedCollisions);
       onCollisionsDetected(detectedCollisions);
 
@@ -281,7 +301,7 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
       setProgressPercent(50);
 
       if (detectedCollisions.length > 0) {
-        addLog(`⚠️ ВНИМАНИЕ: Обнаружено ${detectedCollisions.length} коллизий / наездов фраз! Конвейер приостановлен.`);
+        addLog(`⚠️ ВНИМАНИЕ: Обнаружено ${detectedCollisions.length} реальных коллизий / наездов фраз! Конвейер приостановлен.`);
         setStatusMessage(`Обнаружено коллизий: ${detectedCollisions.length} шт. Конвейер приостановлен для проверки.`);
         systemLogger.warn('MVPPipeline', `Обнаружено ${detectedCollisions.length} коллизий / наездов фраз. Конвейер переведен в режим паузы для правки на таймлайне.`);
       } else {
@@ -544,6 +564,42 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
           {/* ШАГ 2: Детекция коллизий и наездов фраз */}
           {stage === 'step2_collision_check' && (
             <div className="space-y-4 animate-fadeIn">
+              {/* Акустические профили дорожек (Анализ шума, тихой речи и авто-порога) */}
+              {acousticProfiles.length > 0 && (
+                <div className="p-3.5 bg-slate-900/90 border border-slate-800 rounded-2xl space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                      <SlidersHorizontal size={14} className="text-teal-400" />
+                      Акустические параметры дорожек и удаление тишины:
+                    </span>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-teal-500/20 text-teal-300 border border-teal-500/30 font-mono">
+                      Нарезано: {totalStrippedPhrases} реплик
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+                    {acousticProfiles.map((prof) => (
+                      <div
+                        key={prof.trackId}
+                        className="p-2.5 bg-slate-950/70 border border-slate-800/80 rounded-xl space-y-1"
+                      >
+                        <div className="font-semibold text-slate-200 truncate flex items-center justify-between">
+                          <span className="truncate">{prof.trackName}</span>
+                          <span className="text-teal-400 font-mono text-[10px] ml-1">
+                            {prof.optimalThresholdDb} dB
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-[10px] text-slate-400">
+                          <span>Шум: <b className="text-slate-300">{prof.noiseFloorDb} dB</b></span>
+                          <span>Тихая речь: <b className="text-slate-300">{prof.quietestSpeechRmsDb} dB</b></span>
+                          <span>SNR: <b className="text-emerald-400">+{prof.snrDb} dB</b></span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {collisions.length > 0 ? (
                 <div className="space-y-3">
                   <div className="p-4 bg-rose-950/40 border border-rose-500/40 rounded-2xl space-y-2">

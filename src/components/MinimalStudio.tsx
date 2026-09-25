@@ -1036,20 +1036,13 @@ export const MinimalStudio: React.FC = () => {
   };
 
   /**
-   * Удаление тишины и нарезка на фразы для всех дорожек проекта (C++ VAD Strip Silence)
+   * Удаление тишины и нарезка на фразы для всех дорожек проекта (C++ VAD Strip Silence с адаптивным анализом)
    */
-  const handleStripSilenceAllTracks = async (thresholdDb = -40.0, minSilenceMs = 280) => {
-    setStatusMessage('Запуск C++ SIMD128 Strip Silence: удаление пауз и нарезка на голосовые фразы...');
+  const handleStripSilenceAllTracks = async () => {
+    setStatusMessage('Запуск C++ адаптивного Strip Silence: анализ шума/речи и нарезка на голосовые фразы...');
     try {
       const safeTracks = toSafeArray<TrackState>(tracks);
-      let totalCutPhrases = 0;
-
-      const updatedTracks = safeTracks.map((track) => {
-        if (track.isOriginalAudio) return track;
-        const updated = globalAutoTimingService.stripSilenceFromTrack(track, thresholdDb, minSilenceMs);
-        totalCutPhrases += toSafeArray(updated.clips).length;
-        return updated;
-      });
+      const { updatedTracks, profiles, totalPhrases } = globalAutoTimingService.stripSilenceAdaptiveAllTracks(safeTracks);
 
       setTracks(updatedTracks);
       syncAllTracks(updatedTracks);
@@ -1071,7 +1064,8 @@ export const MinimalStudio: React.FC = () => {
       }
 
       triggerAutoSave();
-      const msg = `✂️ Удаление тишины завершено: дорожки нарезаны на ${totalCutPhrases} отдельных реплик (порог: ${thresholdDb} dBFS, мин. пауза: ${minSilenceMs} мс).`;
+      const summaryProfiles = profiles.map(p => `${p.trackName}: шум ${p.noiseFloorDb}dB / речь ${p.quietestSpeechRmsDb}dB ➔ порог ${p.optimalThresholdDb}dB`).join(' | ');
+      const msg = `✂️ Адаптивное удаление тишины завершено: нарезано ${totalPhrases} фраз. (${summaryProfiles})`;
       setStatusMessage(msg);
       setLoudnessMatchReport(msg);
     } catch (err: any) {
@@ -1081,21 +1075,21 @@ export const MinimalStudio: React.FC = () => {
   };
 
   /**
-   * Удаление тишины и нарезка на фразы для конкретной дорожки
+   * Удаление тишины и нарезка на фразы для конкретной дорожки с индивидуальным акустическим профилем
    */
-  const handleStripSilenceTrack = async (trackId: number, thresholdDb = -40.0, minSilenceMs = 280) => {
+  const handleStripSilenceTrack = async (trackId: number) => {
     try {
       const safeTracks = toSafeArray<TrackState>(tracks);
       const target = safeTracks.find((t) => t.id === trackId);
       if (!target) return;
 
-      const updated = globalAutoTimingService.stripSilenceFromTrack(target, thresholdDb, minSilenceMs);
-      const updatedTracks = safeTracks.map((t) => (t.id === trackId ? updated : t));
+      const { updatedTrack, profile, phraseCount } = globalAutoTimingService.stripSilenceAdaptiveFromTrack(target);
+      const updatedTracks = safeTracks.map((t) => (t.id === trackId ? updatedTrack : t));
 
       setTracks(updatedTracks);
       syncAllTracks(updatedTracks);
 
-      for (const clip of toSafeArray<ClipConfig>(updated.clips)) {
+      for (const clip of toSafeArray<ClipConfig>(updatedTrack.clips)) {
         if (clip.buffer && clip.buffer.length > 0) {
           uploadRawPCMToTrack(
             clip.buffer,
@@ -1110,8 +1104,7 @@ export const MinimalStudio: React.FC = () => {
       }
 
       triggerAutoSave();
-      const clipCount = toSafeArray(updated.clips).length;
-      setStatusMessage(`✂️ Дорожка "${target.name}" нарезана на ${clipCount} реплик без тишины.`);
+      setStatusMessage(`✂️ Дорожка "${target.name}" нарезана на ${phraseCount} реплик (Шум: ${profile.noiseFloorDb} dB, Речь: ${profile.quietestSpeechRmsDb} dB, Порог: ${profile.optimalThresholdDb} dB).`);
     } catch (err: any) {
       console.error('Ошибка нарезки тишины на дорожке:', err);
       setStatusMessage(`Ошибка удаления тишины: ${err?.message || err}`);
@@ -2290,9 +2283,9 @@ export const MinimalStudio: React.FC = () => {
 
             <button
               id="btn-strip-silence-all"
-              onClick={() => handleStripSilenceAllTracks(-40.0, 280)}
+              onClick={() => handleStripSilenceAllTracks()}
               className="px-3.5 py-2 bg-gradient-to-r from-teal-700 to-emerald-700 hover:from-teal-600 hover:to-emerald-600 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 shadow-lg shadow-teal-950/40 cursor-pointer"
-              title="Удалить тишину и автоматически нарезать дорожки на голосовые фразы (C++ VAD)"
+              title="Удалить тишину и автоматически нарезать дорожки на голосовые фразы (C++ VAD с адаптивным анализом)"
             >
               <Scissors size={14} className="text-teal-200" />
               ✂️ Удалить тишину (VAD)

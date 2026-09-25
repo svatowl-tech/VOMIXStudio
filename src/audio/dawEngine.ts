@@ -420,11 +420,21 @@ export class LiveDAWEngine {
 
   // --- Управление памятью WebAssembly кучи (HEAPF32) ---
   public syncClipBufferToWasm(clip: ClipConfig): number {
-    if (clip.wasmBufferPtr) {
+    const existingPtr = this.activeWasmPointers.get(clip.id);
+    if (existingPtr && clip.wasmBufferPtr && existingPtr !== clip.wasmBufferPtr) {
+      globalNativeDAWBridge.freeFloats(existingPtr);
+      this.activeWasmPointers.delete(clip.id);
+    }
+    if (clip.wasmBufferPtr && this.activeWasmPointers.get(clip.id) === clip.wasmBufferPtr) {
       return clip.wasmBufferPtr;
     }
     if (!clip.buffer || clip.buffer.length === 0) {
       return 0;
+    }
+    // Если для этого clipId уже был выделен другой буфер в WASM, принудительно освобождаем старый перед повторной аллокацией
+    if (existingPtr) {
+      globalNativeDAWBridge.freeFloats(existingPtr);
+      this.activeWasmPointers.delete(clip.id);
     }
     const ptr = globalNativeDAWBridge.writeFloat32Direct(clip.buffer);
     clip.wasmBufferPtr = ptr;
@@ -438,6 +448,75 @@ export class LiveDAWEngine {
       globalNativeDAWBridge.freeFloats(ptr);
       this.activeWasmPointers.delete(clipId);
     }
+  }
+
+  /**
+   * Метод garbageCollectWasm()
+   * Сверяет существующие ID клипов во всех дорожках TrackState с активными указателями в WASM (activeWasmPointers).
+   * Принудительно освобождает через Module._free / freeFloats все осиротевшие указатели ("орфаны"),
+   * защищая кучу C++ от утечек памяти и фрагментации при нарезке (Split), удалении и AI обработке.
+   */
+  public garbageCollectWasm(): number {
+    const existingClipIds = new Set<number>();
+    for (const track of this.tracks) {
+      if (track && Array.isArray(track.clips)) {
+        for (const clip of track.clips) {
+          if (clip && typeof clip.id === 'number') {
+            existingClipIds.add(clip.id);
+          }
+        }
+      }
+    }
+
+    let freedCount = 0;
+    for (const [clipId, ptr] of this.activeWasmPointers.entries()) {
+      if (!existingClipIds.has(clipId)) {
+        try {
+          globalNativeDAWBridge.freeFloats(ptr);
+        } catch (err) {
+          console.warn(`[LiveDAWEngine] Ошибка освобождения осиротевшего WASM указателя clip #${clipId} (ptr: ${ptr}):`, err);
+        }
+        this.activeWasmPointers.delete(clipId);
+        freedCount++;
+      }
+    }
+
+    return freedCount;
+  }
+
+  /**
+   * Синхронизация клипов конкретной дорожки с автоматической сборкой мусора WASM
+   */
+  public syncTrackClips(trackId: number, clips: ClipConfig[]): void {
+    const track = this.tracks.find((t) => t.id === trackId);
+    if (track) {
+      track.clips = clips;
+      for (const clip of clips) {
+        if (clip && clip.buffer) {
+          this.syncClipBufferToWasm(clip);
+        }
+      }
+    }
+    // Вызываем сборку мусора после синхронизации клипов
+    this.garbageCollectWasm();
+  }
+
+  /**
+   * Синхронизация всех дорожек проекта с автоматической сборкой мусора WASM
+   */
+  public syncAllTracks(tracks: TrackState[]): void {
+    this.tracks = tracks;
+    for (const track of tracks) {
+      if (track && Array.isArray(track.clips)) {
+        for (const clip of track.clips) {
+          if (clip && clip.buffer) {
+            this.syncClipBufferToWasm(clip);
+          }
+        }
+      }
+    }
+    // Вызываем сборку мусора после полной синхронизации всех дорожек
+    this.garbageCollectWasm();
   }
 
   // --- Управление воспроизведением и таймлайном ---
@@ -464,6 +543,7 @@ export class LiveDAWEngine {
 
   public setTracks(tracks: TrackState[]): void {
     this.tracks = tracks;
+    this.garbageCollectWasm();
   }
 
   public addTrack(name?: string, color?: string): TrackState {
@@ -479,6 +559,7 @@ export class LiveDAWEngine {
       track.clips.forEach((c) => this.releaseClipWasmBuffer(c.id));
     }
     this.tracks = this.tracks.filter((t) => t.id !== trackId);
+    this.garbageCollectWasm();
   }
 
   public getVocalBus(): VocalBusState {
@@ -524,3 +605,41 @@ export class LiveDAWEngine {
     return { leftBuffer, rightBuffer };
   }
 }
+
+/**
+ * Вспомогательная утилита для сверки активных WASM пойнтеров с реальными клипами в дорожках
+ * и принудительного вызова _free для осиротевших участков кучи.
+ */
+export function garbageCollectWasm(tracks: TrackState[], activeWasmPointers: Map<number, number>): number {
+  const existingClipIds = new Set<number>();
+  for (const track of tracks) {
+    if (track && Array.isArray(track.clips)) {
+      for (const clip of track.clips) {
+        if (clip && typeof clip.id === 'number') {
+          existingClipIds.add(clip.id);
+        }
+      }
+    }
+  }
+
+  let freedCount = 0;
+  for (const [clipId, ptr] of activeWasmPointers.entries()) {
+    if (!existingClipIds.has(clipId)) {
+      try {
+        globalNativeDAWBridge.freeFloats(ptr);
+      } catch (err) {
+        console.warn(`[garbageCollectWasm] Ошибка освобождения осиротевшего WASM указателя clip #${clipId} (ptr: ${ptr}):`, err);
+      }
+      activeWasmPointers.delete(clipId);
+      freedCount++;
+    }
+  }
+
+  return freedCount;
+}
+
+/**
+ * Глобальный экземпляр контроллера звукового ядра C++ DAW
+ */
+export const globalLiveDAWEngine = new LiveDAWEngine();
+
