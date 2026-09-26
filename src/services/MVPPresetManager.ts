@@ -21,6 +21,13 @@ import { VSTPluginInstance } from '../audio/vstTypes';
 import { globalVSTHostEngine } from './VSTHostEngine';
 import { systemLogger } from './SystemLogger';
 import { globalAIPipelineStore, TrackAIConfig } from './AIPipelineStore';
+import {
+  globalRenderPipelineGraphManager,
+  RenderPipelineGraph,
+  DEFAULT_ZAKADR_GRAPH,
+  DEFAULT_RECAST_GRAPH,
+  DEFAULT_REDUB_GRAPH
+} from './RenderPipelineGraphManager';
 
 export type MVPPresetCategory = 'Закадр' | 'Рекаст' | 'Редаб' | 'Ридап' | 'Дубляж' | 'Custom';
 
@@ -77,6 +84,9 @@ export interface MVPPreset {
 
   // Матрица маршрутизации нейросетевой обработки (цепочки AI-моделей, этапы, параметры)
   aiPipelineConfigs?: Record<number, TrackAIConfig>;
+
+  // Нодовая структура роутинга рендера и сведения (Render Pipeline Graph)
+  renderPipelineGraph?: RenderPipelineGraph;
 }
 
 const STORAGE_USER_PRESETS_KEY = 'vomix_mvp_pipeline_presets_v2';
@@ -235,7 +245,8 @@ export const BUILT_IN_MVP_PRESETS: MVPPreset[] = [
           }
         ]
       }
-    }
+    },
+    renderPipelineGraph: DEFAULT_ZAKADR_GRAPH
   },
 
   // 2. РЕКАСТ (Recast)
@@ -384,7 +395,8 @@ export const BUILT_IN_MVP_PRESETS: MVPPreset[] = [
           }
         ]
       }
-    }
+    },
+    renderPipelineGraph: DEFAULT_RECAST_GRAPH
   },
 
   // 3. РЕДАБ (Redub / «Под дубляж»)
@@ -533,7 +545,8 @@ export const BUILT_IN_MVP_PRESETS: MVPPreset[] = [
           }
         ]
       }
-    }
+    },
+    renderPipelineGraph: DEFAULT_REDUB_GRAPH
   },
 
   // 4. ДУБЛЯЖ (Full Dubbing)
@@ -682,6 +695,11 @@ export const BUILT_IN_MVP_PRESETS: MVPPreset[] = [
           }
         ]
       }
+    },
+    renderPipelineGraph: {
+      ...DEFAULT_REDUB_GRAPH,
+      name: 'Дубляж полный граф',
+      category: 'Дубляж'
     }
   }
 ];
@@ -858,6 +876,7 @@ export class MVPPresetManager {
       vstChain: master.vstPlugins ? JSON.parse(JSON.stringify(master.vstPlugins)) : []
     };
     userPreset.aiPipelineConfigs = globalAIPipelineStore.getSerializableConfigs();
+    userPreset.renderPipelineGraph = globalRenderPipelineGraphManager.getSerializableGraph();
     userPreset.customTrackChains = tracks.map((t, idx) => ({
       trackIndex: idx,
       trackName: t.name,
@@ -941,7 +960,8 @@ export class MVPPresetManager {
           autoDucker: JSON.parse(JSON.stringify(t.autoDucker))
         }
       })),
-      aiPipelineConfigs: globalAIPipelineStore.getSerializableConfigs()
+      aiPipelineConfigs: globalAIPipelineStore.getSerializableConfigs(),
+      renderPipelineGraph: globalRenderPipelineGraphManager.getSerializableGraph()
     };
 
     this.userPresets.push(newPreset);

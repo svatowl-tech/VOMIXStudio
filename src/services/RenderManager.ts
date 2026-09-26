@@ -24,6 +24,7 @@ import {
   WavBitDepth
 } from './NativeDAWBridge';
 import { systemLogger } from './SystemLogger';
+import { VideoExportParameters, DEFAULT_VIDEO_EXPORT_PARAMS } from './RenderPipelineGraphManager';
 
 export interface RenderProgressInfo {
   stage: 'idle' | 'rendering_audio' | 'stems' | 'loading_ffmpeg' | 'muxing_video' | 'completed' | 'error';
@@ -223,8 +224,12 @@ export class RenderManager {
   }
 
   /**
-   * Видео-муксинг: вшивание сведенного WAV аудио в исходное видео с помощью FFmpeg WASM
-   * Заменяет оригинальную аудиодорожку в MP4/MKV/WebM без перекодирования видеопотока (-c:v copy).
+   * Видео-муксинг и экспорт: вшивание сведенного WAV аудио в видеофайл с гибкой настройкой качества
+   * Поддерживает:
+   * 1. Пресет "Без потери качества" (Direct Stream Copy, -c:v copy).
+   * 2. Перекодирование с контролем битрейта (VBR/CBR/CRF), разрешения (4K, 1080p, 720p), FPS.
+   * 3. Однопроходный (1-Pass) и Двухпроходный (2-Pass) рендеринг.
+   * 4. Настройку битрейта аудио (320k, 256k, 192k) и метаданных дорожек.
    */
   public async muxAudioIntoVideo(
     sourceVideoFile: File,
@@ -232,10 +237,16 @@ export class RenderManager {
     outputFileName: string = 'final_dubbed_video.mp4',
     options?: {
       timelineHasOriginalAudio?: boolean;
+      exportParams?: Partial<VideoExportParameters>;
     }
   ): Promise<Blob | null> {
     this.logs = [];
-    this.addLog('Начало процесса вшивания аудиодорожки в видеофайл...');
+    const params: VideoExportParameters = {
+      ...DEFAULT_VIDEO_EXPORT_PARAMS,
+      ...(options?.exportParams || {})
+    };
+
+    this.addLog(`Начало экспорта видео с пресетом: [${params.preset}] (Кодек: ${params.videoCodec}, Разрешение: ${params.resolution}, Проходы: ${params.encodingPasses}x)...`);
     this.notifyProgress('muxing_video', 5, 'Проверка WebAssembly памяти и инициализация FFmpeg...');
 
     // Защита от переполнения памяти WebAssembly (2GB heap limit)
@@ -263,13 +274,92 @@ export class RenderManager {
       this.addLog('Запись сведенного мастер-аудио [audio.wav] в виртуальную ФС...');
       await this.ffmpeg.writeFile('audio_mix.wav', await fetchFile(masterWavBlob));
 
-      this.notifyProgress('muxing_video', 35, 'Выполнение FFmpeg команды муксинга (-c:v copy -c:a aac)...');
-      this.addLog('Запуск FFmpeg: объединение видеопотока, сведенного аудио и оригинальной аудиодорожки...');
-
       const hasTimelineOriginal = options?.timelineHasOriginalAudio ?? true;
+      const isLossless = params.preset === 'lossless_original' || params.videoCodec === 'copy';
+      const ext = params.container || 'mp4';
+      const tempOutputFile = `output.${ext}`;
+
+      // Построение видео-флагов
+      const videoArgs: string[] = [];
+      if (isLossless) {
+        this.addLog('Применен режим "Без потери качества": видеопоток копируется 1-в-1 без пересжатия (-c:v copy).');
+        videoArgs.push('-c:v', 'copy');
+      } else {
+        const codec = params.videoCodec || 'libx264';
+        videoArgs.push('-c:v', codec);
+
+        // Разрешение
+        if (params.resolution && params.resolution !== 'original') {
+          if (params.resolution === '3840x2160') videoArgs.push('-vf', 'scale=3840:2160:force_original_aspect_ratio=decrease,pad=3840:2160:(ow-iw)/2:(oh-ih)/2');
+          else if (params.resolution === '2560x1440') videoArgs.push('-vf', 'scale=2560:1440:force_original_aspect_ratio=decrease,pad=2560:1440:(ow-iw)/2:(oh-ih)/2');
+          else if (params.resolution === '1920x1080') videoArgs.push('-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2');
+          else if (params.resolution === '1280x720') videoArgs.push('-vf', 'scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2');
+          else if (params.resolution === '854x480') videoArgs.push('-vf', 'scale=854:480:force_original_aspect_ratio=decrease,pad=854:480:(ow-iw)/2:(oh-ih)/2');
+          else if (params.resolution === 'custom' && params.customResolutionWidth && params.customResolutionHeight) {
+            videoArgs.push('-vf', `scale=${params.customResolutionWidth}:${params.customResolutionHeight}:force_original_aspect_ratio=decrease`);
+          }
+        }
+
+        // FPS
+        if (params.fps && params.fps !== 'original') {
+          videoArgs.push('-r', String(params.fps));
+        }
+
+        // Битрейт и контроль качества
+        if (params.rateControl === 'crf') {
+          videoArgs.push('-crf', String(params.crf || 18));
+        } else {
+          const br = params.videoBitrateKbps ? `${params.videoBitrateKbps}k` : '12000k';
+          videoArgs.push('-b:v', br);
+          if (params.maxBitrateKbps) {
+            videoArgs.push('-maxrate', `${params.maxBitrateKbps}k`, '-bufsize', `${params.maxBitrateKbps * 2}k`);
+          }
+        }
+
+        // Скорость кодировщика и профиль
+        if (params.encoderSpeedPreset) {
+          videoArgs.push('-preset', params.encoderSpeedPreset);
+        }
+        if (params.encoderProfile && params.encoderProfile !== 'auto') {
+          videoArgs.push('-profile:v', params.encoderProfile);
+        }
+      }
+
+      // Построение аудио-флагов
+      const audioCodec = params.audioCodec === 'copy' ? 'copy' : (params.audioCodec || 'aac');
+      const audioBitrate = params.audioBitrate === 'lossless' ? '320k' : (params.audioBitrate || '320k');
+      const audioArgs = ['-c:a', audioCodec];
+      if (audioCodec !== 'copy') {
+        audioArgs.push('-b:a', audioBitrate);
+      }
+
+      const track1Title = params.track1Title || 'Дубляж / Dubbed Mix';
+      const track2Title = params.track2Title || 'Оригинал / Original Audio';
+
+      // Двухпроходный рендеринг (2-Pass VBR) при включенном режиме и перекодировании
+      if (params.encodingPasses === 2 && !isLossless) {
+        this.notifyProgress('muxing_video', 35, 'Выполнение Прохода 1/2 (2-Pass VBR анализ видеопотока)...');
+        this.addLog('Старт Прохода 1/2 (2-Pass анализ движения и битрейта)...');
+        try {
+          await this.ffmpeg.exec([
+            '-i', 'input_video.mp4',
+            ...videoArgs,
+            '-pass', '1',
+            '-an',
+            '-f', 'null',
+            '/dev/null'
+          ]);
+          this.addLog('Проход 1/2 завершен успешно. Переход к Проходу 2/2...');
+        } catch (pass1Err) {
+          this.addLog(`Предупреждение: 1-й проход завершился с кодом: ${pass1Err}. Продолжаем однопроходным методом.`);
+        }
+      }
+
+      this.notifyProgress('muxing_video', 55, 'Финальный проход кодирования и сборка контейнера...');
+      this.addLog(`Запуск FFmpeg: объединение видеопотока, сведенного аудио и оригинальной аудиодорожки в [${tempOutputFile}]...`);
 
       if (!hasTimelineOriginal) {
-        // Если на таймлайне не было оригинального звука видео, подмешиваем его как фон к голосам дабберов
+        // Подмешивание оригинального фона к голосам
         try {
           this.addLog('Подмешивание оригинального звука видео к сведенным дорожкам дабберов (баланс закадрового озвучания)...');
           await this.ffmpeg.exec([
@@ -279,14 +369,13 @@ export class RenderManager {
             '-map', '0:v:0',
             '-map', '[aout]',
             '-map', '0:a:0?',
-            '-c:v', 'copy',
-            '-c:a', 'aac',
-            '-b:a', '320k',
-            '-metadata:s:a:0', 'title=Закадровый перевод + Фон',
-            '-metadata:s:a:1', 'title=Оригинал (Чистый)',
+            ...videoArgs,
+            ...audioArgs,
+            '-metadata:s:a:0', `title=${track1Title}`,
+            '-metadata:s:a:1', `title=${track2Title}`,
             '-shortest',
-            '-movflags', '+faststart',
-            'output.mp4'
+            ...(params.fastStart ? ['-movflags', '+faststart'] : []),
+            tempOutputFile
           ]);
         } catch (filterErr) {
           this.addLog('Резервный муксинг с сохранением двух аудиодорожек...');
@@ -296,51 +385,55 @@ export class RenderManager {
             '-map', '0:v:0',
             '-map', '1:a:0',
             '-map', '0:a:0?',
-            '-c:v', 'copy',
-            '-c:a', 'aac',
-            '-b:a', '320k',
-            '-metadata:s:a:0', 'title=Дубляж / Dubbed Mix',
-            '-metadata:s:a:1', 'title=Оригинал / Original Audio',
+            ...videoArgs,
+            ...audioArgs,
+            '-metadata:s:a:0', `title=${track1Title}`,
+            '-metadata:s:a:1', `title=${track2Title}`,
             '-shortest',
-            '-movflags', '+faststart',
-            'output.mp4'
+            ...(params.fastStart ? ['-movflags', '+faststart'] : []),
+            tempOutputFile
           ]);
         }
       } else {
-        // На таймлайне уже есть оригинальный звук: дорожка 1 - сведенный мастер-микс, дорожка 2 - чистый оригинал
+        // Дорожка 1: сведенный мастер-микс, дорожка 2: чистый оригинал
         await this.ffmpeg.exec([
           '-i', 'input_video.mp4',
           '-i', 'audio_mix.wav',
           '-map', '0:v:0',
           '-map', '1:a:0',
           '-map', '0:a:0?',
-          '-c:v', 'copy',
-          '-c:a', 'aac',
-          '-b:a', '320k',
-          '-metadata:s:a:0', 'title=Дубляж / Dubbed Mix',
-          '-metadata:s:a:1', 'title=Оригинал / Original Audio',
+          ...videoArgs,
+          ...audioArgs,
+          '-metadata:s:a:0', `title=${track1Title}`,
+          '-metadata:s:a:1', `title=${track2Title}`,
           '-shortest',
-          '-movflags', '+faststart',
-          'output.mp4'
+          ...(params.fastStart ? ['-movflags', '+faststart'] : []),
+          tempOutputFile
         ]);
       }
 
-      this.notifyProgress('muxing_video', 90, 'Чтение готового MP4 файла из виртуальной памяти...');
-      this.addLog('Чтение результата output.mp4...');
+      this.notifyProgress('muxing_video', 90, `Чтение готового ${ext.toUpperCase()} файла из виртуальной памяти...`);
+      this.addLog(`Чтение результата ${tempOutputFile}...`);
 
-      const outputData = await this.ffmpeg.readFile('output.mp4');
+      const outputData = await this.ffmpeg.readFile(tempOutputFile);
       const rawBytes = typeof outputData === 'string'
         ? new TextEncoder().encode(outputData)
         : outputData;
       const pureBuffer = new ArrayBuffer(rawBytes.byteLength);
       new Uint8Array(pureBuffer).set(rawBytes);
-      const outputBlob = new Blob([pureBuffer], { type: 'video/mp4' });
+
+      const mimeType = ext === 'mkv' ? 'video/x-matroska' : ext === 'webm' ? 'video/webm' : 'video/mp4';
+      const outputBlob = new Blob([pureBuffer], { type: mimeType });
 
       // Очистка виртуальной файловой системы для освобождения WASM памяти
       this.addLog('Очистка временных файлов виртуальной ФС...');
-      await this.ffmpeg.deleteFile('input_video.mp4');
-      await this.ffmpeg.deleteFile('audio_mix.wav');
-      await this.ffmpeg.deleteFile('output.mp4');
+      try {
+        await this.ffmpeg.deleteFile('input_video.mp4');
+        await this.ffmpeg.deleteFile('audio_mix.wav');
+        await this.ffmpeg.deleteFile(tempOutputFile);
+      } catch (cleanupErr) {
+        // Игнорируем ошибки очистки
+      }
 
       this.addLog(`Финальное видео успешно собрано: ${Math.round(outputBlob.size / 1024)} КБ!`);
       this.notifyProgress('completed', 100, 'Видео успешно создано!');

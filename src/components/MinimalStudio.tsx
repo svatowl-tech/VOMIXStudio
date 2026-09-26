@@ -75,6 +75,8 @@ import { VoiceoverMixWizardModal } from './VoiceoverMixWizardModal';
 import { ClipCollisionInfo, detectTrackCollisions } from '../utils/collisionDetector';
 import { globalAutoTimingService } from '../services/AutoTimingService';
 import { globalAIPipelineStore } from '../services/AIPipelineStore';
+import { globalRenderPipelineGraphManager } from '../services/RenderPipelineGraphManager';
+import { ExportRoutingModal } from './ExportRoutingModal';
 import { globalStemSeparationService } from '../services/StemSeparationService';
 import { globalAudioAICleanupEngine } from '../services/AudioAICleanupEngine';
 import { toSafeArray, toSafeMap, toSafeSet } from '../utils/safeIterables';
@@ -176,6 +178,7 @@ export const MinimalStudio: React.FC = () => {
   const [showMediaImportModal, setShowMediaImportModal] = useState<boolean>(false);
   const [subtitles, setSubtitles] = useState<SubtitleCue[]>(() => toSafeArray<SubtitleCue>([]));
   const [isWizardOpen, setIsWizardOpen] = useState<boolean>(false);
+  const [isRoutingModalOpen, setIsRoutingModalOpen] = useState<boolean>(false);
   const [detectedCollisions, setDetectedCollisions] = useState<ClipCollisionInfo[]>(() => toSafeArray<ClipCollisionInfo>([]));
 
   // Refs
@@ -1425,6 +1428,11 @@ export const MinimalStudio: React.FC = () => {
       globalAIPipelineStore.setConfigs(preset.aiPipelineConfigs);
     }
 
+    // 5. Применяем нодовую структуру роутинга рендера (Render Pipeline Routing Graph)
+    if (preset.renderPipelineGraph && preset.renderPipelineGraph.nodes?.length > 0) {
+      globalRenderPipelineGraphManager.setGraph(preset.renderPipelineGraph);
+    }
+
     setStatusMessage(`Применен пресет пайплайна: "${preset.name}" (${preset.category})`);
     triggerAutoSave();
   };
@@ -1816,16 +1824,32 @@ export const MinimalStudio: React.FC = () => {
         !t.mute
     );
 
-    const outputFileName = `mixed_${videoFile.name.replace(/\.[^/.]+$/, '')}.mp4`;
+    // Считываем параметры экспорта видео из активного нодового графа (нода output_video или ffmpeg_mux)
+    const activeGraph = globalRenderPipelineGraphManager.getSerializableGraph();
+    const outputVideoNode = toSafeArray(activeGraph.nodes).find(
+      (n) => n.type === 'output_video' || n.type === 'ffmpeg_mux' || n.type === 'ffmpeg_dual_mux' || n.type === 'ffmpeg_single_mux'
+    );
+    const exportParams = outputVideoNode?.parameters;
+    const containerExt = exportParams?.container || 'mp4';
+    const outputFileName = `mixed_${videoFile.name.replace(/\.[^/.]+$/, '')}.${containerExt}`;
+
     const finalVideoBlob = await globalRenderManager.muxAudioIntoVideo(
       videoFile,
       renderResult.wavBlob,
       outputFileName,
-      { timelineHasOriginalAudio }
+      {
+        timelineHasOriginalAudio,
+        exportParams
+      }
     );
 
     if (!finalVideoBlob) {
       throw new Error('FFmpeg WebAssembly не смог сформировать выходной видеофайл.');
+    }
+
+    // Автоматическое скачивание браузером, если включено в параметрах ноды
+    if (exportParams?.autoDownload !== false) {
+      globalRenderManager.downloadBlob(finalVideoBlob, outputFileName);
     }
 
     setExportedVideoBlob(finalVideoBlob);
@@ -2209,7 +2233,30 @@ export const MinimalStudio: React.FC = () => {
             </div>
           </div>
 
-          <div className="mt-6 pt-4 border-t border-slate-800">
+          <div className="mt-6 pt-4 border-t border-slate-800 space-y-2.5">
+            {/* КНОПКА ОТКРЫТИЯ НОДОВОЙ СТРУКТУРЫ РОУТИНГА ОБРАБОТКИ */}
+            <button
+              id="btn-open-routing-graph"
+              type="button"
+              onClick={() => setIsRoutingModalOpen(true)}
+              className="w-full py-2.5 px-3 bg-[#101726] hover:bg-[#162035] text-cyan-300 hover:text-cyan-200 border border-cyan-500/40 hover:border-cyan-400 rounded-xl text-xs font-bold transition-all shadow-md flex items-center justify-between cursor-pointer group"
+              title="Открыть визуальный нодовый редактор роутинга сведения, этапов пост-обработки и нодовых петель"
+            >
+              <div className="flex items-center gap-2">
+                <Sliders size={14} className="text-cyan-400 group-hover:rotate-45 transition-transform" />
+                <span>Настроить роутинг обработки (Нодовый граф)</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-[10px] font-mono">
+                <span className="px-1.5 py-0.5 bg-cyan-950/80 border border-cyan-800 text-cyan-300 rounded">
+                  {globalRenderPipelineGraphManager.getGraph().nodes.filter((n) => n.enabled).length} нод
+                </span>
+                <span className="px-1.5 py-0.5 bg-purple-950/80 border border-purple-800 text-purple-300 rounded">
+                  {globalRenderPipelineGraphManager.getGraph().nodes.filter((n) => n.type === 'feedback_loop' && n.enabled).length} петли
+                </span>
+              </div>
+            </button>
+
+            {/* ГЛАВНАЯ КНОПКА СВЕСТИ И СОХРАНИТЬ ГОТОВОЕ ВИДЕО */}
             <button
               id="btn-export-and-mux"
               onClick={handleExportAndMuxVideo}
@@ -2765,6 +2812,20 @@ export const MinimalStudio: React.FC = () => {
           const col = detectTrackCollisions(updatedTracks);
           setDetectedCollisions(col);
           triggerAutoSave();
+        }}
+      />
+
+      {/* Интерактивный визуальный нодовый редактор роутинга рендера и сведения */}
+      <ExportRoutingModal
+        isOpen={isRoutingModalOpen}
+        onClose={() => setIsRoutingModalOpen(false)}
+        activeCategory={globalRenderPipelineGraphManager.getGraph().category || 'Закадр'}
+        tracks={safeTracksList}
+        vocalBus={vocalBus}
+        master={master}
+        videoFile={videoFile}
+        onRunPipeline={() => {
+          handleExportAndMuxVideo();
         }}
       />
     </div>

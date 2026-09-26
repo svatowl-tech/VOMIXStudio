@@ -582,6 +582,7 @@ export const MVPPipelinePresets: React.FC<MVPPipelinePresetsProps> = ({
 
               <div className="p-2.5 bg-slate-950/80 border border-slate-800 rounded-xl text-[11px] text-slate-400 space-y-1 font-mono">
                 <div className="text-cyan-300 font-bold">Будет сохранено:</div>
+                <div>• Нодовая структура роутинга рендера (все ноды, петли, последовательность сведения)</div>
                 <div>• Матрица маршрутизации нейросетей (этапы, модели DeepFilter/UVR/VoiceFixer, параметры)</div>
                 <div>• Настройки DSP (EQ, Comp, Gate, DeEsser, DeClicker, DePlosive, Auto-Ducker)</div>
                 <div>• Все VST плагины и параметры на дорожках ({totalTrackPlugins} шт.)</div>
