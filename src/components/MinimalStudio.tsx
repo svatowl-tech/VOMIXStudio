@@ -992,12 +992,7 @@ export const MinimalStudio: React.FC = () => {
     const sourceSubtitles = customSubtitles || subtitles;
     const safeSubtitles = toSafeArray<SubtitleCue>(sourceSubtitles);
 
-    if (safeSubtitles.length === 0) {
-      setStatusMessage('Субтитры не загружены. Для авто-тайминга требуется файл субтитров (SRT, ASS, VTT).');
-      return sourceTracks;
-    }
-
-    setStatusMessage('Запуск C++ конвейера авто-тайминга: сопоставление актёров, совмещение по сабам и разведение коллизий...');
+    setStatusMessage('Запуск C++ конвейера авто-тайминга: адаптивное разделение фраз, устранение наездов и разведение коллизий...');
     try {
       const result = globalAutoTimingService.runAutoTimingPipeline(sourceTracks, safeSubtitles);
       setTracks(result.updatedTracks);
@@ -1007,13 +1002,13 @@ export const MinimalStudio: React.FC = () => {
       for (const track of result.updatedTracks) {
         for (const clip of toSafeArray<ClipConfig>(track.clips)) {
           if (clip.buffer && clip.buffer.length > 0) {
-            uploadRawPCMToTrack(
+            await uploadRawPCMToTrack(
               clip.buffer,
               track.id,
               clip.id,
-              clip.offsetSamples / 48000,
-              clip.gain,
-              clip.pan,
+              (clip.offsetSamples || 0) / 48000,
+              clip.gain || 1.0,
+              clip.pan || 0.0,
               true
             );
           }
@@ -1024,7 +1019,9 @@ export const MinimalStudio: React.FC = () => {
       setDetectedCollisions(collisions);
       triggerAutoSave();
 
-      const summary = `⚡ Авто-тайминг: сопоставлено ${result.actorMappings.length} актёров, выровнено ${result.totalPhrasesAligned} фраз, устранено ${result.resolvedCollisionsCount} наездов, сохранено ${result.preservedScriptOverlapsCount} сценарных одновременных реплик.`;
+      const summary = safeSubtitles.length > 0
+        ? `⚡ Авто-тайминг: сопоставлено ${result.actorMappings.length} актёров, выровнено ${result.totalPhrasesAligned} фраз, устранено ${result.resolvedCollisionsCount} наездов, сохранено ${result.preservedScriptOverlapsCount} сценарных одновременных реплик.`
+        : `⚡ Авто-тайминг (VAD): нарезано ${result.totalPhrasesAligned} отдельных реплик, каскадно устранено ${result.resolvedCollisionsCount} наездов между репликами.`;
       setStatusMessage(summary);
       setLoudnessMatchReport(summary);
       return result.updatedTracks;
@@ -1063,9 +1060,11 @@ export const MinimalStudio: React.FC = () => {
         }
       }
 
+      const collisions = detectTrackCollisions(updatedTracks);
+      setDetectedCollisions(collisions);
       triggerAutoSave();
       const summaryProfiles = profiles.map(p => `${p.trackName}: шум ${p.noiseFloorDb}dB / речь ${p.quietestSpeechRmsDb}dB ➔ порог ${p.optimalThresholdDb}dB`).join(' | ');
-      const msg = `✂️ Адаптивное удаление тишины завершено: нарезано ${totalPhrases} фраз. (${summaryProfiles})`;
+      const msg = `✂️ Адаптивное удаление тишины завершено: нарезано ${totalPhrases} фраз, коллизий: ${collisions.length}. (${summaryProfiles})`;
       setStatusMessage(msg);
       setLoudnessMatchReport(msg);
     } catch (err: any) {
@@ -1103,8 +1102,10 @@ export const MinimalStudio: React.FC = () => {
         }
       }
 
+      const collisions = detectTrackCollisions(updatedTracks);
+      setDetectedCollisions(collisions);
       triggerAutoSave();
-      setStatusMessage(`✂️ Дорожка "${target.name}" нарезана на ${phraseCount} реплик (Шум: ${profile.noiseFloorDb} dB, Речь: ${profile.quietestSpeechRmsDb} dB, Порог: ${profile.optimalThresholdDb} dB).`);
+      setStatusMessage(`✂️ Дорожка "${target.name}" нарезана на ${phraseCount} реплик (Шум: ${profile.noiseFloorDb} dB, Речь: ${profile.quietestSpeechRmsDb} dB, Порог: ${profile.optimalThresholdDb} dB). Коллизий: ${collisions.length}.`);
     } catch (err: any) {
       console.error('Ошибка нарезки тишины на дорожке:', err);
       setStatusMessage(`Ошибка удаления тишины: ${err?.message || err}`);
@@ -1299,13 +1300,18 @@ export const MinimalStudio: React.FC = () => {
     setVstWetDry(target, instanceId, wetDry, trackId);
   };
 
-  // --- Применение пресета на весь MVP пайплайн («Закадр», «Рекаст», «Ридап», «Дубляж») ---
+  // --- Применение пресета на весь MVP пайплайн («Закадр», «Рекаст», «Редаб», «Дубляж») ---
   const handleApplyGlobalPreset = (preset: MVPPreset) => {
     systemLogger.info('MVPPreset', `Применение пресета пайплайна: "${preset.name}" (${preset.category})`);
 
     // 1. Применяем DSP и VST цепочки к дорожкам
     setTracks((prevTracks) => {
       const updated = toSafeArray<TrackState>(prevTracks).map((t, idx) => {
+        // Дорожка оригинального звука видео остается неизменной (Flat)
+        if (t.isOriginalAudio || /оригинал|original|видео|video/i.test(t.name)) {
+          return t;
+        }
+
         const custom = toSafeArray(preset.customTrackChains).find((c) => c.trackIndex === idx);
         const newEq = custom?.dsp?.eq
           ? JSON.parse(JSON.stringify(custom.dsp.eq))
@@ -1332,6 +1338,16 @@ export const MinimalStudio: React.FC = () => {
           : preset.trackDspTemplate?.deEsser
           ? JSON.parse(JSON.stringify(preset.trackDspTemplate.deEsser))
           : t.deEsser;
+        const newDeClicker = custom?.dsp?.deClicker
+          ? JSON.parse(JSON.stringify(custom.dsp.deClicker))
+          : preset.trackDspTemplate?.deClicker
+          ? JSON.parse(JSON.stringify(preset.trackDspTemplate.deClicker))
+          : t.deClicker;
+        const newDePlosive = custom?.dsp?.dePlosive
+          ? JSON.parse(JSON.stringify(custom.dsp.dePlosive))
+          : preset.trackDspTemplate?.dePlosive
+          ? JSON.parse(JSON.stringify(preset.trackDspTemplate.dePlosive))
+          : t.dePlosive;
         const newPlugins = custom?.vstPlugins
           ? JSON.parse(JSON.stringify(custom.vstPlugins))
           : preset.trackVstChain
@@ -1345,6 +1361,8 @@ export const MinimalStudio: React.FC = () => {
           autoDucker: newDuck,
           noiseGate: newGate,
           deEsser: newDeEsser,
+          deClicker: newDeClicker,
+          dePlosive: newDePlosive,
           vstPlugins: newPlugins
         };
       });
@@ -1400,6 +1418,11 @@ export const MinimalStudio: React.FC = () => {
       setMaster(newMaster);
       setMasterLimiter(newMaster.limiterEnabled, newMaster.limiterCeilingDb);
       setMasterVstChain(newMasterPlugins);
+    }
+
+    // 4. Применяем матрицу маршрутизации нейросетевой обработки (AI Pipeline Routing Matrix)
+    if (preset.aiPipelineConfigs && Object.keys(preset.aiPipelineConfigs).length > 0) {
+      globalAIPipelineStore.setConfigs(preset.aiPipelineConfigs);
     }
 
     setStatusMessage(`Применен пресет пайплайна: "${preset.name}" (${preset.category})`);
@@ -2228,6 +2251,8 @@ export const MinimalStudio: React.FC = () => {
           subtitles={subtitles}
           onUpdateSubtitles={setSubtitles}
           collisions={detectedCollisions}
+          onRunAutoTiming={handleRunAutoTimingAndResolveCollisions}
+          onStripSilenceAll={handleStripSilenceAllTracks}
         />
       </div>
 
@@ -2719,6 +2744,28 @@ export const MinimalStudio: React.FC = () => {
         onCollisionsDetected={setDetectedCollisions}
         subtitles={subtitles}
         onRunAutoTiming={handleRunAutoTimingAndResolveCollisions}
+        onUpdateAllTracks={async (updatedTracks) => {
+          setTracks(updatedTracks);
+          syncAllTracks(updatedTracks);
+          for (const t of updatedTracks) {
+            for (const c of toSafeArray(t.clips)) {
+              if (c.buffer && c.buffer.length > 0) {
+                await uploadRawPCMToTrack(
+                  c.buffer,
+                  t.id,
+                  c.id,
+                  (c.offsetSamples || 0) / 48000,
+                  c.gain || 1.0,
+                  c.pan || 0.0,
+                  true
+                );
+              }
+            }
+          }
+          const col = detectTrackCollisions(updatedTracks);
+          setDetectedCollisions(col);
+          triggerAutoSave();
+        }}
       />
     </div>
   );

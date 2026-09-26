@@ -206,7 +206,14 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
   });
 
   useEffect(() => {
-    globalAIPipelineStore.setConfigs(trackConfigs);
+    const unsub = globalAIPipelineStore.subscribe(() => {
+      setTrackConfigs({ ...globalAIPipelineStore.getConfigs() });
+    });
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    globalAIPipelineStore.setConfigs(trackConfigs, true);
   }, [trackConfigs]);
   const [isBatchProcessing, setIsBatchProcessing] = useState<boolean>(false);
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number; message: string }>({

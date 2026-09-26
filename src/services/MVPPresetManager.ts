@@ -20,6 +20,7 @@ import { TrackDSP, VocalBusState, MasterState, TrackState } from '../audio/dawEn
 import { VSTPluginInstance } from '../audio/vstTypes';
 import { globalVSTHostEngine } from './VSTHostEngine';
 import { systemLogger } from './SystemLogger';
+import { globalAIPipelineStore, TrackAIConfig } from './AIPipelineStore';
 
 export type MVPPresetCategory = 'Закадр' | 'Рекаст' | 'Редаб' | 'Ридап' | 'Дубляж' | 'Custom';
 
@@ -73,6 +74,9 @@ export interface MVPPreset {
     vstPlugins: VSTPluginInstance[];
     dsp?: TrackDSP;
   }[];
+
+  // Матрица маршрутизации нейросетевой обработки (цепочки AI-моделей, этапы, параметры)
+  aiPipelineConfigs?: Record<number, TrackAIConfig>;
 }
 
 const STORAGE_USER_PRESETS_KEY = 'vomix_mvp_pipeline_presets_v2';
@@ -178,6 +182,59 @@ export const BUILT_IN_MVP_PRESETS: MVPPreset[] = [
       limiterEnabled: true,
       limiterCeilingDb: -0.5,
       vstChain: []
+    },
+    aiPipelineConfigs: {
+      1: {
+        trackId: 1,
+        enabled: true,
+        outputMode: 'replace',
+        status: 'idle',
+        progressPercent: 0,
+        steps: [
+          {
+            id: 'step-zakadr-orig-1',
+            enabled: true,
+            purpose: 'denoise',
+            modelId: 'deepfilternet3',
+            intensity: 45,
+            dereverbAmount: 0,
+            enableLowCut: true,
+            warmthSat: 0,
+            airBandBoost: 0
+          }
+        ]
+      },
+      2: {
+        trackId: 2,
+        enabled: true,
+        outputMode: 'replace',
+        status: 'idle',
+        progressPercent: 0,
+        steps: [
+          {
+            id: 'step-zakadr-voice-1',
+            enabled: true,
+            purpose: 'denoise',
+            modelId: 'deepfilternet3',
+            intensity: 75,
+            dereverbAmount: 0,
+            enableLowCut: true,
+            warmthSat: 0,
+            airBandBoost: 0
+          },
+          {
+            id: 'step-zakadr-voice-2',
+            enabled: true,
+            purpose: 'dereverb',
+            modelId: 'reverb_foxjoy',
+            intensity: 50,
+            dereverbAmount: 50,
+            enableLowCut: false,
+            warmthSat: 0,
+            airBandBoost: 0
+          }
+        ]
+      }
     }
   },
 
@@ -274,6 +331,59 @@ export const BUILT_IN_MVP_PRESETS: MVPPreset[] = [
       limiterEnabled: true,
       limiterCeilingDb: -0.3,
       vstChain: []
+    },
+    aiPipelineConfigs: {
+      1: {
+        trackId: 1,
+        enabled: true,
+        outputMode: 'stems',
+        status: 'idle',
+        progressPercent: 0,
+        steps: [
+          {
+            id: 'step-recast-orig-1',
+            enabled: true,
+            purpose: 'stem_separation',
+            modelId: 'uvr_mdx_voc_ft',
+            intensity: 100,
+            dereverbAmount: 0,
+            enableLowCut: false,
+            warmthSat: 0,
+            airBandBoost: 0
+          }
+        ]
+      },
+      2: {
+        trackId: 2,
+        enabled: true,
+        outputMode: 'replace',
+        status: 'idle',
+        progressPercent: 0,
+        steps: [
+          {
+            id: 'step-recast-voice-1',
+            enabled: true,
+            purpose: 'denoise',
+            modelId: 'deepfilternet3',
+            intensity: 80,
+            dereverbAmount: 0,
+            enableLowCut: true,
+            warmthSat: 0,
+            airBandBoost: 0
+          },
+          {
+            id: 'step-recast-voice-2',
+            enabled: true,
+            purpose: 'spectral_match',
+            modelId: 'spectral_vocal_matcher',
+            intensity: 70,
+            dereverbAmount: 0,
+            enableLowCut: false,
+            warmthSat: 15,
+            airBandBoost: 1.5
+          }
+        ]
+      }
     }
   },
 
@@ -370,6 +480,59 @@ export const BUILT_IN_MVP_PRESETS: MVPPreset[] = [
       limiterEnabled: true,
       limiterCeilingDb: -0.5,
       vstChain: []
+    },
+    aiPipelineConfigs: {
+      1: {
+        trackId: 1,
+        enabled: true,
+        outputMode: 'stems',
+        status: 'idle',
+        progressPercent: 0,
+        steps: [
+          {
+            id: 'step-redub-orig-1',
+            enabled: true,
+            purpose: 'stem_separation',
+            modelId: 'htdemucs_ft',
+            intensity: 100,
+            dereverbAmount: 0,
+            enableLowCut: false,
+            warmthSat: 0,
+            airBandBoost: 0
+          }
+        ]
+      },
+      2: {
+        trackId: 2,
+        enabled: true,
+        outputMode: 'replace',
+        status: 'idle',
+        progressPercent: 0,
+        steps: [
+          {
+            id: 'step-redub-voice-1',
+            enabled: true,
+            purpose: 'denoise',
+            modelId: 'deepfilternet3',
+            intensity: 85,
+            dereverbAmount: 0,
+            enableLowCut: true,
+            warmthSat: 0,
+            airBandBoost: 0
+          },
+          {
+            id: 'step-redub-voice-2',
+            enabled: true,
+            purpose: 'voicefixer',
+            modelId: 'voicefixer_neural',
+            intensity: 75,
+            dereverbAmount: 0,
+            enableLowCut: true,
+            warmthSat: 25,
+            airBandBoost: 2.0
+          }
+        ]
+      }
     }
   },
 
@@ -466,6 +629,59 @@ export const BUILT_IN_MVP_PRESETS: MVPPreset[] = [
       limiterEnabled: true,
       limiterCeilingDb: -1.0,
       vstChain: []
+    },
+    aiPipelineConfigs: {
+      1: {
+        trackId: 1,
+        enabled: true,
+        outputMode: 'stems',
+        status: 'idle',
+        progressPercent: 0,
+        steps: [
+          {
+            id: 'step-dub-orig-1',
+            enabled: true,
+            purpose: 'stem_separation',
+            modelId: 'uvr_mdx_voc_ft',
+            intensity: 100,
+            dereverbAmount: 0,
+            enableLowCut: false,
+            warmthSat: 0,
+            airBandBoost: 0
+          }
+        ]
+      },
+      2: {
+        trackId: 2,
+        enabled: true,
+        outputMode: 'replace',
+        status: 'idle',
+        progressPercent: 0,
+        steps: [
+          {
+            id: 'step-dub-voice-1',
+            enabled: true,
+            purpose: 'voicefixer',
+            modelId: 'voicefixer_neural',
+            intensity: 85,
+            dereverbAmount: 0,
+            enableLowCut: true,
+            warmthSat: 30,
+            airBandBoost: 2.5
+          },
+          {
+            id: 'step-dub-voice-2',
+            enabled: true,
+            purpose: 'spectral_match',
+            modelId: 'spectral_vocal_matcher',
+            intensity: 80,
+            dereverbAmount: 0,
+            enableLowCut: false,
+            warmthSat: 20,
+            airBandBoost: 2.0
+          }
+        ]
+      }
     }
   }
 ];
@@ -520,6 +736,16 @@ export class MVPPresetManager {
     }
   }
 
+  private activeCategory: MVPPresetCategory = 'Закадр';
+  private activeCategoryPresetIds: Record<MVPPresetCategory, string> = {
+    'Закадр': 'preset-zakadr',
+    'Рекаст': 'preset-recast',
+    'Редаб': 'preset-redub',
+    'Ридап': 'preset-redub',
+    'Дубляж': 'preset-dublyazh',
+    'Custom': 'preset-zakadr'
+  };
+
   public getCorePresets(): MVPPreset[] {
     return Array.isArray(BUILT_IN_MVP_PRESETS) ? BUILT_IN_MVP_PRESETS : [];
   }
@@ -530,12 +756,60 @@ export class MVPPresetManager {
     return [...builtIn, ...user];
   }
 
+  public getPresetsByCategory(category: MVPPresetCategory): MVPPreset[] {
+    const normalizedCategory = (category === 'Ридап' ? 'Редаб' : category);
+    return this.getAllPresets().filter((p) => {
+      const pCat = p.category === 'Ридап' ? 'Редаб' : p.category;
+      return pCat === normalizedCategory;
+    });
+  }
+
+  public getActiveCategory(): MVPPresetCategory {
+    return this.activeCategory;
+  }
+
+  public setActiveCategory(category: MVPPresetCategory): void {
+    this.activeCategory = category === 'Ридап' ? 'Редаб' : category;
+    const catPresetId = this.activeCategoryPresetIds[this.activeCategory];
+    if (catPresetId) {
+      this.activePresetId = catPresetId;
+    } else {
+      const firstInCat = this.getPresetsByCategory(this.activeCategory)[0];
+      if (firstInCat) {
+        this.activePresetId = firstInCat.id;
+        this.activeCategoryPresetIds[this.activeCategory] = firstInCat.id;
+      }
+    }
+    this.notify();
+  }
+
+  public getActivePresetForCategory(category: MVPPresetCategory): MVPPreset | undefined {
+    const normalized = category === 'Ридап' ? 'Редаб' : category;
+    const targetId = this.activeCategoryPresetIds[normalized];
+    const catPresets = this.getPresetsByCategory(normalized);
+    return catPresets.find((p) => p.id === targetId) || catPresets[0];
+  }
+
+  public setActivePresetForCategory(category: MVPPresetCategory, presetId: string): void {
+    const normalized = category === 'Ридап' ? 'Редаб' : category;
+    this.activeCategory = normalized;
+    this.activeCategoryPresetIds[normalized] = presetId;
+    this.activePresetId = presetId;
+    this.notify();
+  }
+
   public getActivePresetId(): string {
     return this.activePresetId;
   }
 
   public setActivePresetId(id: string): void {
     this.activePresetId = id;
+    const preset = this.getPresetById(id);
+    if (preset) {
+      const norm = preset.category === 'Ридап' ? 'Редаб' : preset.category;
+      this.activeCategory = norm;
+      this.activeCategoryPresetIds[norm] = id;
+    }
     this.notify();
   }
 
@@ -544,7 +818,69 @@ export class MVPPresetManager {
   }
 
   /**
-   * Снимок текущего состояния всего пайплайна (дорожки, VST плагины, параметры, Vocal Bus, Master)
+   * Перезапись / обновление существующего пресета текущим состоянием студии
+   */
+  public overwritePresetState(
+    presetId: string,
+    tracks: TrackState[],
+    vocalBus: VocalBusState,
+    master: MasterState,
+    referenceTrackId?: number
+  ): MVPPreset | null {
+    const userPreset = this.userPresets.find((p) => p.id === presetId);
+    if (!userPreset) {
+      return null;
+    }
+
+    const refTrack = tracks.find((t) => t.id === referenceTrackId) || tracks[0];
+
+    userPreset.trackDspTemplate = {
+      eq: JSON.parse(JSON.stringify(refTrack.eq)),
+      compressor: JSON.parse(JSON.stringify(refTrack.compressor)),
+      noiseGate: JSON.parse(JSON.stringify(refTrack.noiseGate)),
+      deEsser: JSON.parse(JSON.stringify(refTrack.deEsser)),
+      deClicker: refTrack.deClicker ? JSON.parse(JSON.stringify(refTrack.deClicker)) : undefined,
+      dePlosive: refTrack.dePlosive ? JSON.parse(JSON.stringify(refTrack.dePlosive)) : undefined,
+      autoDucker: JSON.parse(JSON.stringify(refTrack.autoDucker))
+    };
+    userPreset.trackVstChain = refTrack.vstPlugins ? JSON.parse(JSON.stringify(refTrack.vstPlugins)) : [];
+    userPreset.vocalBusSettings = {
+      volumeDb: vocalBus.volumeDb,
+      pan: vocalBus.pan,
+      dsp: JSON.parse(JSON.stringify(vocalBus.dsp)),
+      vstChain: vocalBus.vstPlugins ? JSON.parse(JSON.stringify(vocalBus.vstPlugins)) : []
+    };
+    userPreset.masterSettings = {
+      volumeDb: master.volumeDb,
+      pan: master.pan,
+      limiterEnabled: master.limiterEnabled,
+      limiterCeilingDb: master.limiterCeilingDb,
+      vstChain: master.vstPlugins ? JSON.parse(JSON.stringify(master.vstPlugins)) : []
+    };
+    userPreset.aiPipelineConfigs = globalAIPipelineStore.getSerializableConfigs();
+    userPreset.customTrackChains = tracks.map((t, idx) => ({
+      trackIndex: idx,
+      trackName: t.name,
+      vstPlugins: JSON.parse(JSON.stringify(t.vstPlugins || [])),
+      dsp: {
+        eq: JSON.parse(JSON.stringify(t.eq)),
+        compressor: JSON.parse(JSON.stringify(t.compressor)),
+        noiseGate: JSON.parse(JSON.stringify(t.noiseGate)),
+        deEsser: JSON.parse(JSON.stringify(t.deEsser)),
+        deClicker: t.deClicker ? JSON.parse(JSON.stringify(t.deClicker)) : undefined,
+        dePlosive: t.dePlosive ? JSON.parse(JSON.stringify(t.dePlosive)) : undefined,
+        autoDucker: JSON.parse(JSON.stringify(t.autoDucker))
+      }
+    }));
+
+    this.saveUserPresets();
+    this.notify();
+    systemLogger.info('MVPPreset', `Пресет "${userPreset.name}" успешно обновлен текущим состоянием (включая матрицу нейрообработки).`);
+    return userPreset;
+  }
+
+  /**
+   * Снимок текущего состояния всего пайплайна (дорожки, VST плагины, параметры, Vocal Bus, Master, AI Матрица)
    */
   public captureCurrentStateAsPreset(
     name: string,
@@ -604,7 +940,8 @@ export class MVPPresetManager {
           dePlosive: t.dePlosive ? JSON.parse(JSON.stringify(t.dePlosive)) : undefined,
           autoDucker: JSON.parse(JSON.stringify(t.autoDucker))
         }
-      }))
+      })),
+      aiPipelineConfigs: globalAIPipelineStore.getSerializableConfigs()
     };
 
     this.userPresets.push(newPreset);

@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { TrackState, createNewTrack } from '../audio/dawEngine';
+import { TrackState, createNewTrack, isOriginalTrackName } from '../audio/dawEngine';
 import { EqCurveVisualizer } from './EqCurveVisualizer';
 import { toSafeArray } from '../utils/safeIterables';
+import { globalMVPPresetManager, MVPPreset } from '../services/MVPPresetManager';
 import {
   Sliders,
   Activity,
@@ -18,7 +19,8 @@ import {
   Sparkles,
   Layers,
   Settings,
-  ShieldAlert
+  ShieldAlert,
+  ChevronDown
 } from 'lucide-react';
 
 interface TrackDSPPanelProps {
@@ -37,6 +39,22 @@ export const TrackDSPPanel: React.FC<TrackDSPPanelProps> = ({
   const [activeTab, setActiveTab] = useState<'eq' | 'comp' | 'gate' | 'repair' | 'deesser' | 'ducking'>('eq');
 
   // Preset Handlers
+  const applySubPresetDsp = (preset: MVPPreset) => {
+    if (!preset.trackDspTemplate) return;
+    const tpl = preset.trackDspTemplate;
+    const updated: TrackState = {
+      ...track,
+      eq: tpl.eq ? JSON.parse(JSON.stringify(tpl.eq)) : track.eq,
+      compressor: tpl.compressor ? JSON.parse(JSON.stringify(tpl.compressor)) : track.compressor,
+      noiseGate: tpl.noiseGate ? JSON.parse(JSON.stringify(tpl.noiseGate)) : track.noiseGate,
+      deEsser: tpl.deEsser ? JSON.parse(JSON.stringify(tpl.deEsser)) : track.deEsser,
+      deClicker: tpl.deClicker ? JSON.parse(JSON.stringify(tpl.deClicker)) : track.deClicker,
+      dePlosive: tpl.dePlosive ? JSON.parse(JSON.stringify(tpl.dePlosive)) : track.dePlosive,
+      autoDucker: tpl.autoDucker ? JSON.parse(JSON.stringify(tpl.autoDucker)) : track.autoDucker
+    };
+    onUpdateTrack(updated);
+  };
+
   const applyPreset = (type: 'dialogue' | 'broadcast' | 'music' | 'sfx' | 'flat') => {
     let updated = { ...track };
 
@@ -275,44 +293,82 @@ export const TrackDSPPanel: React.FC<TrackDSPPanelProps> = ({
       </div>
 
       {/* Quick Presets row */}
-      <div className="flex flex-wrap items-center gap-2 bg-slate-950/40 p-2.5 rounded-lg border border-slate-900">
-        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider shrink-0 mr-1">Быстрые пресеты:</span>
-        <button
-          onClick={() => applyPreset('dialogue')}
-          className="px-2.5 py-1 bg-emerald-950/30 hover:bg-emerald-900/40 text-emerald-400 border border-emerald-900/50 rounded-md text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-all"
-        >
-          <Mic size={11} />
-          🎙️ Дубляж / Речь
-        </button>
-        <button
-          onClick={() => applyPreset('broadcast')}
-          className="px-2.5 py-1 bg-cyan-950/30 hover:bg-cyan-900/40 text-cyan-400 border border-cyan-900/50 rounded-md text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-all"
-        >
-          <Radio size={11} />
-          📻 Диктор / Радио
-        </button>
-        <button
-          onClick={() => applyPreset('music')}
-          className="px-2.5 py-1 bg-purple-950/30 hover:bg-purple-900/40 text-purple-400 border border-purple-900/50 rounded-md text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-all"
-        >
-          <Music size={11} />
-          🎵 Музыка (Ducker)
-        </button>
-        <button
-          onClick={() => applyPreset('sfx')}
-          className="px-2.5 py-1 bg-amber-950/30 hover:bg-amber-900/40 text-amber-400 border border-amber-900/50 rounded-md text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-all"
-        >
-          <Zap size={11} />
-          💥 Кино / SFX
-        </button>
-        <button
-          onClick={() => applyPreset('flat')}
-          className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-slate-400 border border-slate-800 rounded-md text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-all ml-auto"
-        >
-          <RotateCcw size={11} />
-          Сброс (Flat)
-        </button>
-      </div>
+      {(() => {
+        const isOriginal = track.isOriginalAudio || isOriginalTrackName(track.name);
+        const isDialogueActive = !isOriginal && !!track.eq?.enabled && !!track.compressor?.enabled;
+        const isFlatActive = !track.eq?.enabled && !track.compressor?.enabled && !track.noiseGate?.enabled;
+
+        return (
+          <div className="flex flex-wrap items-center gap-2 bg-slate-950/40 p-2.5 rounded-lg border border-slate-900">
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider shrink-0 mr-1">
+              Быстрые пресеты:
+            </span>
+            <button
+              onClick={() => applyPreset('dialogue')}
+              className={`px-2.5 py-1 border rounded-md text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-all ${
+                isDialogueActive
+                  ? 'bg-emerald-600 text-white border-emerald-400 shadow-sm shadow-emerald-950/60 ring-1 ring-emerald-400'
+                  : 'bg-emerald-950/30 hover:bg-emerald-900/40 text-emerald-400 border border-emerald-900/50'
+              }`}
+              title="C++ DSP пресет для голоса (EQ, компрессор, гейт, DeClicker, DeEsser) по умолчанию"
+            >
+              <Mic size={11} />
+              🎙️ Дубляж / Речь {isDialogueActive && '(По умолчанию)'}
+            </button>
+            <button
+              onClick={() => applyPreset('broadcast')}
+              className="px-2.5 py-1 bg-cyan-950/30 hover:bg-cyan-900/40 text-cyan-400 border border-cyan-900/50 rounded-md text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-all"
+            >
+              <Radio size={11} />
+              📻 Диктор / Радио
+            </button>
+            <button
+              onClick={() => applyPreset('music')}
+              className="px-2.5 py-1 bg-purple-950/30 hover:bg-purple-900/40 text-purple-400 border border-purple-900/50 rounded-md text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-all"
+            >
+              <Music size={11} />
+              🎵 Музыка (Ducker)
+            </button>
+            <button
+              onClick={() => applyPreset('sfx')}
+              className="px-2.5 py-1 bg-amber-950/30 hover:bg-amber-900/40 text-amber-400 border border-amber-900/50 rounded-md text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-all"
+            >
+              <Zap size={11} />
+              💥 Кино / SFX
+            </button>
+            <button
+              onClick={() => applyPreset('flat')}
+              className={`px-2.5 py-1 border rounded-md text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-all ml-auto ${
+                isFlatActive
+                  ? 'bg-slate-700 text-white border-slate-500'
+                  : 'bg-slate-900 hover:bg-slate-800 text-slate-400 border border-slate-800'
+              }`}
+              title={isOriginal ? 'Оригинал: обработка отключена (Flat)' : 'Сбросить в нейтральный режим'}
+            >
+              <RotateCcw size={11} />
+              {isOriginal ? '🎬 Оригинал (Flat)' : 'Сброс (Flat)'}
+            </button>
+
+            {/* Вариации текущего режима */}
+            <div className="flex flex-wrap items-center gap-1.5 w-full pt-1.5 border-t border-slate-900/80">
+              <span className="text-[10px] font-bold text-cyan-400 uppercase tracking-wider shrink-0 mr-1 flex items-center gap-1">
+                <Sliders size={11} />
+                <span>Вариации ({globalMVPPresetManager.getActiveCategory()}):</span>
+              </span>
+              {globalMVPPresetManager.getSubPresetsForCategory(globalMVPPresetManager.getActiveCategory()).map((subP) => (
+                <button
+                  key={subP.id}
+                  onClick={() => applySubPresetDsp(subP)}
+                  className="px-2 py-0.5 bg-slate-900 hover:bg-cyan-950/40 text-slate-300 hover:text-cyan-200 border border-slate-800 hover:border-cyan-700/50 rounded text-[10px] font-medium transition-all cursor-pointer"
+                  title={`Применить DSP настройки вариации «${subP.name}» к этой дорожке`}
+                >
+                  {subP.subPresetName || subP.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Tab bar */}
       <div className="flex items-center gap-1 border-b border-slate-900 pb-1.5 overflow-x-auto">

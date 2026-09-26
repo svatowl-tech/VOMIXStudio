@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Sparkles,
   Save,
@@ -14,7 +14,11 @@ import {
   X,
   Info,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  Plus,
+  RefreshCw,
+  Layers,
+  FolderOpen
 } from 'lucide-react';
 import {
   globalMVPPresetManager,
@@ -23,6 +27,7 @@ import {
 } from '../services/MVPPresetManager';
 import { TrackState, VocalBusState, MasterState } from '../audio/dawEngine';
 import { toSafeArray } from '../utils/safeIterables';
+import { globalAIPipelineStore } from '../services/AIPipelineStore';
 
 interface MVPPipelinePresetsProps {
   tracks: TrackState[];
@@ -31,39 +36,119 @@ interface MVPPipelinePresetsProps {
   onApplyPreset: (preset: MVPPreset) => void;
 }
 
+const CATEGORIES: { id: MVPPresetCategory; label: string; icon: string; color: string; desc: string }[] = [
+  {
+    id: 'Закадр',
+    label: 'Закадр',
+    icon: 'Mic2',
+    color: '#10b981',
+    desc: 'Запись поверх оригинального звука (авто-дакинг, чистый голос, свободный тайминг)'
+  },
+  {
+    id: 'Рекаст',
+    label: 'Рекаст',
+    icon: 'Zap',
+    color: '#8b5cf6',
+    desc: 'Точный хронометраж фраз, совпадение по краям, озвучка легкой физики'
+  },
+  {
+    id: 'Редаб',
+    label: 'Редаб',
+    icon: 'BookOpen',
+    color: '#06b6d4',
+    desc: 'Липсинг по губам, яркие эмоции, жесткий тайминг, сведение под дубляж'
+  },
+  {
+    id: 'Дубляж',
+    label: 'Дубляж',
+    icon: 'Film',
+    color: '#f59e0b',
+    desc: 'Полное сведение под кадр, 100% повтор эмоций, физики и артикуляции губ'
+  }
+];
+
 export const MVPPipelinePresets: React.FC<MVPPipelinePresetsProps> = ({
   tracks,
   vocalBus,
   master,
   onApplyPreset
 }) => {
-  const [presets, setPresets] = useState<MVPPreset[]>(() => toSafeArray<MVPPreset>(globalMVPPresetManager.getAllPresets()));
-  const [activePresetId, setActivePresetId] = useState<string>(() => globalMVPPresetManager.getActivePresetId());
+  const [activeCategory, setActiveCategoryState] = useState<MVPPresetCategory>(() =>
+    globalMVPPresetManager.getActiveCategory()
+  );
+  const [presets, setPresets] = useState<MVPPreset[]>(() =>
+    toSafeArray<MVPPreset>(globalMVPPresetManager.getAllPresets())
+  );
+  const [activePresetId, setActivePresetId] = useState<string>(() =>
+    globalMVPPresetManager.getActivePresetId()
+  );
+
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [showGuide, setShowGuide] = useState(false);
   const [presetName, setPresetName] = useState('');
-  const [presetCategory, setPresetCategory] = useState<MVPPresetCategory>('Дубляж');
   const [presetDescription, setPresetDescription] = useState('');
   const [notification, setNotification] = useState<string | null>(null);
+
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const unsub = globalMVPPresetManager.subscribe(() => {
       setPresets(toSafeArray<MVPPreset>(globalMVPPresetManager.getAllPresets()));
       setActivePresetId(globalMVPPresetManager.getActivePresetId());
+      setActiveCategoryState(globalMVPPresetManager.getActiveCategory());
     });
     return unsub;
   }, []);
 
+  // Закрытие выпадающего меню по клику вне области
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setIsDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
   const safePresets = toSafeArray<MVPPreset>(presets);
-  const corePresets = safePresets.filter((p) => p && p.isBuiltIn);
-  const userPresets = safePresets.filter((p) => p && !p.isBuiltIn);
-  const activePreset = safePresets.find((p) => p && p.id === activePresetId) || corePresets[0] || safePresets[0];
+  const categoryPresets = safePresets.filter((p) => {
+    const pCat = p.category === 'Ридап' ? 'Редаб' : p.category;
+    return pCat === activeCategory;
+  });
+
+  const activePreset =
+    categoryPresets.find((p) => p.id === activePresetId) ||
+    categoryPresets[0] ||
+    safePresets[0];
+
+  const handleSwitchCategory = (cat: MVPPresetCategory) => {
+    setActiveCategoryState(cat);
+    globalMVPPresetManager.setActiveCategory(cat);
+    const targetPreset = globalMVPPresetManager.getActivePresetForCategory(cat);
+    if (targetPreset) {
+      setActivePresetId(targetPreset.id);
+      onApplyPreset(targetPreset);
+      showNotice(`Режим: "${cat}" — применен вариант: "${targetPreset.name}"`);
+    }
+  };
 
   const handleSelectPreset = (preset: MVPPreset) => {
     setActivePresetId(preset.id);
-    globalMVPPresetManager.setActivePresetId(preset.id);
+    globalMVPPresetManager.setActivePresetForCategory(activeCategory, preset.id);
     onApplyPreset(preset);
+    setIsDropdownOpen(false);
     showNotice(`Применен пресет: "${preset.name}" (${preset.category})`);
+  };
+
+  const handleOpenSaveModal = () => {
+    const userCategoryPresets = categoryPresets.filter((p) => !p.isBuiltIn);
+    const nextIndex = userCategoryPresets.length + 1;
+    setPresetName(`${activeCategory} — Вариант ${nextIndex}`);
+    setPresetDescription(`Состояние плагинов и DSP для режима "${activeCategory}"`);
+    setShowSaveModal(true);
+    setIsDropdownOpen(false);
   };
 
   const handleSaveCurrentPipeline = (e: React.FormEvent) => {
@@ -71,32 +156,46 @@ export const MVPPipelinePresets: React.FC<MVPPipelinePresetsProps> = ({
     if (!presetName.trim()) return;
 
     const newPreset = globalMVPPresetManager.captureCurrentStateAsPreset(
-      presetName,
-      presetCategory,
-      presetDescription,
+      presetName.trim(),
+      activeCategory,
+      presetDescription.trim(),
       tracks,
       vocalBus,
       master
     );
 
     setShowSaveModal(false);
+    setActivePresetId(newPreset.id);
     setPresetName('');
     setPresetDescription('');
-    showNotice(`Пресет "${newPreset.name}" сохранен в памяти!`);
+    showNotice(`✅ Пресет "${newPreset.name}" сохранен в настройках [${activeCategory}]!`);
+  };
+
+  const handleOverwritePreset = (preset: MVPPreset, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (window.confirm(`Перезаписать пресет "${preset.name}" текущими настройками и плагинами студии?`)) {
+      globalMVPPresetManager.overwritePresetState(preset.id, tracks, vocalBus, master);
+      showNotice(`🔄 Пресет "${preset.name}" успешно обновлен текущим состоянием!`);
+    }
   };
 
   const handleDeleteUserPreset = (id: string, name: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (window.confirm(`Удалить пресет "${name}"?`)) {
+    if (window.confirm(`Удалить пресет "${name}" из настроек [${activeCategory}]?`)) {
       globalMVPPresetManager.deleteUserPreset(id);
-      showNotice(`Пресет "${name}" удален.`);
+      // Если был удален активный пресет, переключаемся на базовый
+      const remaining = categoryPresets.filter((p) => p.id !== id);
+      if (remaining[0]) {
+        handleSelectPreset(remaining[0]);
+      }
+      showNotice(`🗑️ Пресет "${name}" удален.`);
     }
   };
 
-  const handleExport = (preset: MVPPreset, e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleExportPreset = (preset: MVPPreset, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
     globalMVPPresetManager.exportPresetToFile(preset);
-    showNotice(`Пресет "${preset.name}" экспортирован.`);
+    showNotice(`📥 Пресет "${preset.name}" экспортирован в файл .vomixpreset.`);
   };
 
   const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -104,12 +203,18 @@ export const MVPPipelinePresets: React.FC<MVPPipelinePresetsProps> = ({
     if (!file) return;
     try {
       const imported = await globalMVPPresetManager.importPresetFromFile(file);
+      // Если пресет принадлежит текущей категории или импортирован как пользовательский
+      if (imported.category !== activeCategory) {
+        imported.category = activeCategory;
+      }
+      setActivePresetId(imported.id);
       onApplyPreset(imported);
-      showNotice(`Импортирован и применен пресет: "${imported.name}"`);
+      showNotice(`📂 Пресет "${imported.name}" импортирован и активирован в [${activeCategory}]!`);
     } catch (err: any) {
-      alert(`Ошибка импорта: ${err.message}`);
+      alert(`Ошибка импорта пресета: ${err.message || err}`);
     }
     e.target.value = '';
+    setIsDropdownOpen(false);
   };
 
   const showNotice = (msg: string) => {
@@ -131,73 +236,51 @@ export const MVPPipelinePresets: React.FC<MVPPipelinePresetsProps> = ({
     }
   };
 
+  // Подсчет активных плагинов и этапов нейросетей в проекте
+  const totalTrackPlugins = tracks.reduce((acc, t) => acc + (t.vstPlugins?.length || 0), 0);
+  const vocalBusPluginsCount = vocalBus.vstPlugins?.length || 0;
+  const masterPluginsCount = master.vstPlugins?.length || 0;
+  const activeCategoryMeta = CATEGORIES.find((c) => c.id === activeCategory) || CATEGORIES[0];
+  const aiConfigs = globalAIPipelineStore.getConfigs();
+  const totalAISteps = Object.values(aiConfigs).reduce(
+    (acc, c) => acc + (c && c.enabled ? toSafeArray(c.steps).filter((s) => s && s.enabled).length : 0),
+    0
+  );
+
   return (
     <div className="bg-[#0f1422] border border-[#1e293b] p-3 rounded-2xl shadow-xl space-y-2.5">
-      {/* Compact Main Bar */}
+      {/* 1. Верхняя панель: 4 Главных режима общих настроек (Закадр, Рекаст, Редаб, Дубляж) */}
       <div className="flex flex-wrap items-center justify-between gap-2.5">
-        {/* Title & Preset Pills */}
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-2 px-2.5 py-1 bg-gradient-to-r from-cyan-600/10 to-emerald-600/10 border border-cyan-500/20 rounded-xl">
-            <Sparkles size={15} className="text-cyan-400 shrink-0" />
-            <span className="text-xs font-bold text-slate-200 whitespace-nowrap">Пресет сведе́ния:</span>
+        {/* Вкладки Режимов сведе́ния */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-slate-900/90 border border-slate-800 rounded-xl text-slate-300 font-bold text-xs shrink-0">
+            <Sparkles size={14} className="text-cyan-400" />
+            <span>Общие настройки:</span>
           </div>
 
-          {/* Built-in Presets Pill Selector */}
-          <div className="flex flex-wrap items-center gap-1.5">
-            {corePresets.map((preset) => {
-              const isActive = activePresetId === preset.id;
-              return (
-                <button
-                  key={preset.id}
-                  onClick={() => handleSelectPreset(preset)}
-                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer border ${
-                    isActive
-                      ? 'bg-gradient-to-r from-cyan-600 to-emerald-600 text-white border-cyan-400 shadow-md shadow-cyan-950/50 font-bold'
-                      : 'bg-slate-900/80 hover:bg-slate-800 text-slate-300 border-slate-800 hover:border-slate-700'
-                  }`}
-                  title={`${preset.name}: ${preset.description} (${preset.targetLufsDb} LUFS)`}
-                >
-                  <span style={{ color: isActive ? '#fff' : preset.color }}>
-                    {getPresetIcon(preset.icon, 13)}
-                  </span>
-                  <span>{preset.name}</span>
-                  <span
-                    className={`text-[9px] px-1 py-0.2 rounded font-mono ${
-                      isActive ? 'bg-black/20 text-cyan-100' : 'bg-slate-800 text-slate-400'
-                    }`}
-                  >
-                    {preset.targetLufsDb} dB
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-
-          {/* User Presets Dropdown if any exist */}
-          {userPresets.length > 0 && (
-            <div className="relative">
-              <select
-                value={userPresets.some((p) => p.id === activePresetId) ? activePresetId : ''}
-                onChange={(e) => {
-                  const selected = userPresets.find((p) => p.id === e.target.value);
-                  if (selected) handleSelectPreset(selected);
-                }}
-                className="px-2.5 py-1.5 bg-slate-900 border border-purple-500/30 rounded-xl text-xs font-semibold text-purple-300 focus:outline-none cursor-pointer"
+          {CATEGORIES.map((cat) => {
+            const isActive = activeCategory === cat.id;
+            return (
+              <button
+                key={cat.id}
+                onClick={() => handleSwitchCategory(cat.id)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer border ${
+                  isActive
+                    ? 'bg-gradient-to-r from-cyan-600 to-emerald-600 text-white border-cyan-400 shadow-md shadow-cyan-950/50 font-bold scale-[1.02]'
+                    : 'bg-slate-900/80 hover:bg-slate-800 text-slate-300 border-slate-800 hover:border-slate-700'
+                }`}
+                title={`${cat.label}: ${cat.desc}`}
               >
-                <option value="" disabled>
-                  Свои пресеты ({userPresets.length})
-                </option>
-                {userPresets.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} ({p.category})
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
+                <span style={{ color: isActive ? '#fff' : cat.color }}>
+                  {getPresetIcon(cat.icon, 13)}
+                </span>
+                <span>{cat.label}</span>
+              </button>
+            );
+          })}
         </div>
 
-        {/* Action Controls (Guide, Import, Save) */}
+        {/* 2. Правые управляющие действия */}
         <div className="flex items-center gap-1.5">
           <button
             onClick={() => setShowGuide(!showGuide)}
@@ -206,50 +289,205 @@ export const MVPPipelinePresets: React.FC<MVPPipelinePresetsProps> = ({
                 ? 'bg-cyan-950/80 text-cyan-300 border-cyan-700/80'
                 : 'bg-slate-900/80 hover:bg-slate-800 border-slate-800 text-slate-400 hover:text-slate-200'
             }`}
-            title="Спецификация стандартов сведе́ния"
+            title="Справка по стандартам и требованиям режимов сведе́ния"
           >
             <Info size={13} className="text-cyan-400" />
-            <span className="hidden sm:inline">Стандарты</span>
+            <span className="hidden sm:inline">Справка</span>
             {showGuide ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
           </button>
 
-          <label className="px-2.5 py-1.5 bg-slate-900/80 hover:bg-slate-800 border border-slate-800 text-slate-300 rounded-xl text-xs font-semibold flex items-center gap-1 cursor-pointer transition-all">
-            <Upload size={13} className="text-cyan-400" />
-            <span className="hidden sm:inline">Импорт</span>
-            <input
-              type="file"
-              accept=".vomixpreset,.json"
-              onChange={handleImportFile}
-              className="hidden"
-            />
-          </label>
-
           <button
-            onClick={() => setShowSaveModal(true)}
-            className="px-3 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 hover:border-emerald-500/50 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
-            title="Сохранить текущие параметры в пользовательский пресет"
+            onClick={handleOpenSaveModal}
+            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-md shadow-emerald-950/60"
+            title={`Сохранить текущее состояние плагинов и настроек в категорию [${activeCategory}]`}
           >
             <Save size={13} />
-            <span className="hidden sm:inline">Сохранить</span>
+            <span>Сохранить состояние</span>
           </button>
         </div>
       </div>
 
-      {/* Active Preset Quick Description Banner */}
+      {/* 3. Внутренняя панель выбранного режима с Выпадающим Меню Пресетов */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5 p-2 bg-slate-950/70 border border-slate-800/80 rounded-xl text-xs">
+        {/* Левая часть: Выпадающее меню пресетов для текущей категории */}
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+            <Sliders size={12} className="text-emerald-400" />
+            Пресеты [{activeCategory}]:
+          </span>
+
+          {/* Интерактивное выпадающее меню пресетов (Dropdown Menu) */}
+          <div className="relative" ref={dropdownRef}>
+            <button
+              onClick={() => setIsDropdownOpen(!isDropdownOpen)}
+              className="px-3 py-1.5 bg-slate-900 hover:bg-slate-850 border border-cyan-500/40 hover:border-cyan-400 text-cyan-200 rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer transition-all shadow-sm"
+              title="Открыть выпадающее меню сохраненных вариантов пресета"
+            >
+              <span className="text-emerald-400">
+                {getPresetIcon(activePreset?.icon || 'Mic2', 13)}
+              </span>
+              <span className="truncate max-w-[180px] sm:max-w-[240px]">
+                {activePreset?.name || 'Пресет по умолчанию'}
+              </span>
+              <span className="text-[10px] px-1.5 py-0.2 bg-cyan-950/80 border border-cyan-800 text-cyan-300 rounded font-mono">
+                {categoryPresets.length} вар.
+              </span>
+              <ChevronDown
+                size={14}
+                className={`text-slate-400 transition-transform ${isDropdownOpen ? 'rotate-180' : ''}`}
+              />
+            </button>
+
+            {/* Выпадающий список пресетов категории */}
+            {isDropdownOpen && (
+              <div className="absolute left-0 top-full mt-1.5 w-80 sm:w-96 bg-[#0f1422] border border-cyan-500/40 rounded-2xl shadow-2xl z-50 p-2 space-y-1 animate-fadeIn">
+                <div className="px-2.5 py-1.5 border-b border-slate-800 flex items-center justify-between text-[11px] font-bold text-slate-400">
+                  <span>Варианты сведе́ния [{activeCategory}]</span>
+                  <span className="text-[10px] text-cyan-400 font-mono">{categoryPresets.length} пресетов</span>
+                </div>
+
+                {/* Список пресетов */}
+                <div className="max-h-60 overflow-y-auto space-y-1 pr-1 scrollbar-thin scrollbar-thumb-slate-800">
+                  {categoryPresets.map((preset) => {
+                    const isSelected = activePreset?.id === preset.id;
+                    const isBuiltIn = !!preset.isBuiltIn;
+
+                    return (
+                      <div
+                        key={preset.id}
+                        onClick={() => handleSelectPreset(preset)}
+                        className={`group p-2 rounded-xl border text-xs flex items-center justify-between gap-2 cursor-pointer transition-all ${
+                          isSelected
+                            ? 'bg-cyan-950/60 border-cyan-500/80 text-white font-bold shadow-inner'
+                            : 'bg-slate-900/60 hover:bg-slate-900 border-slate-800/80 text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span style={{ color: preset.color || '#10b981' }}>
+                            {getPresetIcon(preset.icon || 'Mic2', 14)}
+                          </span>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className="truncate">{preset.name}</span>
+                              {isBuiltIn && (
+                                <span className="text-[9px] px-1 py-0.2 bg-emerald-950/80 border border-emerald-800 text-emerald-300 rounded uppercase font-mono">
+                                  Базовый
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[10px] text-slate-400 truncate max-w-[200px] font-normal">
+                              {preset.description}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Кнопки действий над пресетом */}
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            onClick={(e) => handleExportPreset(preset, e)}
+                            className="p-1 hover:bg-cyan-950/80 text-slate-400 hover:text-cyan-300 rounded transition-all"
+                            title="Экспортировать в файл .vomixpreset"
+                          >
+                            <Download size={12} />
+                          </button>
+
+                          {!isBuiltIn && (
+                            <>
+                              <button
+                                onClick={(e) => handleOverwritePreset(preset, e)}
+                                className="p-1 hover:bg-amber-950/80 text-slate-400 hover:text-amber-300 rounded transition-all"
+                                title="Перезаписать текущим состоянием плагинов и DSP"
+                              >
+                                <RefreshCw size={12} />
+                              </button>
+                              <button
+                                onClick={(e) => handleDeleteUserPreset(preset.id, preset.name, e)}
+                                className="p-1 hover:bg-rose-950/80 text-slate-400 hover:text-rose-400 rounded transition-all"
+                                title="Удалить пресет"
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Нижние действия в меню */}
+                <div className="pt-2 border-t border-slate-800 flex items-center gap-1.5">
+                  <button
+                    onClick={handleOpenSaveModal}
+                    className="flex-1 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 rounded-xl text-xs font-bold flex items-center justify-center gap-1 cursor-pointer transition-all"
+                  >
+                    <Plus size={13} />
+                    <span>Добавить пресет</span>
+                  </button>
+
+                  <label className="py-1.5 px-3 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 rounded-xl text-xs font-semibold flex items-center justify-center gap-1 cursor-pointer transition-all">
+                    <FolderOpen size={13} className="text-cyan-400" />
+                    <span>Импорт</span>
+                    <input
+                      type="file"
+                      accept=".vomixpreset,.json"
+                      onChange={handleImportFile}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Правая часть: Мета-информация о текущем состоянии */}
+        <div className="flex flex-wrap items-center gap-3 text-[11px] font-mono text-slate-400 shrink-0">
+          <div className="flex items-center gap-1.5">
+            <Layers size={13} className="text-cyan-400" />
+            <span>
+              Плагины: <strong className="text-cyan-300">{totalTrackPlugins}</strong> на дорожках /{' '}
+              <strong className="text-purple-300">{vocalBusPluginsCount}</strong> на шине /{' '}
+              <strong className="text-emerald-300">{masterPluginsCount}</strong> на мастере
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5 bg-purple-950/40 px-2 py-0.5 rounded border border-purple-800/40 text-purple-300">
+            <Sparkles size={11} className="text-purple-400" />
+            <span>
+              AI Матрица: <strong>{totalAISteps}</strong> {totalAISteps === 1 ? 'этап' : totalAISteps < 5 ? 'этапа' : 'этапов'}
+            </span>
+          </div>
+
+          <button
+            onClick={() => handleExportPreset(activePreset)}
+            className="px-2 py-1 bg-slate-900 hover:bg-slate-850 text-slate-300 hover:text-white border border-slate-800 rounded-lg text-[10px] font-semibold flex items-center gap-1 cursor-pointer transition-all"
+            title="Экспортировать текущий активный пресет в файл"
+          >
+            <Download size={11} />
+            <span>Экспорт</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Описание текущего режима / пресета */}
       {activePreset && (
-        <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-slate-950/60 border border-slate-800/80 rounded-xl text-[11px] text-slate-300">
+        <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-slate-950/50 border border-slate-800/60 rounded-xl text-[11px] text-slate-300">
           <div className="flex items-center gap-2">
             <span className="font-bold text-cyan-400 font-mono">{activePreset.name}:</span>
-            <span className="text-slate-400 truncate max-w-md sm:max-w-xl">{activePreset.description}</span>
+            <span className="text-slate-400 truncate max-w-md sm:max-w-xl">
+              {activePreset.description || activeCategoryMeta.desc}
+            </span>
           </div>
-          <div className="flex items-center gap-3 text-[10px] font-mono text-slate-400 shrink-0">
-            <span>Цель: <strong className="text-emerald-400">{activePreset.targetLufsDb} LUFS</strong></span>
-            <span>Цепочка VST: <strong className="text-cyan-400">{activePreset.trackVstChain.length}</strong> плагинов</span>
+          <div className="flex items-center gap-2 text-[10px] font-mono text-slate-400 shrink-0">
+            <span>
+              Цель: <strong className="text-emerald-400">{activePreset.targetLufsDb || -18} LUFS</strong>
+            </span>
           </div>
         </div>
       )}
 
-      {/* Specification Guide Collapsible Panel */}
+      {/* Спецификация режимов (Collapsible Guide) */}
       {showGuide && (
         <div className="p-3 bg-slate-950/90 border border-cyan-500/30 rounded-xl text-xs space-y-2 animate-fadeIn">
           <div className="flex items-center justify-between text-cyan-400 font-bold uppercase tracking-wider text-[10px]">
@@ -262,93 +500,34 @@ export const MVPPipelinePresets: React.FC<MVPPipelinePresetsProps> = ({
             </button>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 text-slate-300">
-            <div className="p-2.5 bg-slate-900/80 rounded-lg border border-emerald-500/20 space-y-0.5">
-              <div className="font-bold text-emerald-400 flex items-center gap-1 text-[11px]">
-                <Mic2 size={12} /> 1. Закадр (-16 dB)
+            {CATEGORIES.map((c) => (
+              <div
+                key={c.id}
+                className={`p-2.5 rounded-lg border space-y-0.5 ${
+                  activeCategory === c.id
+                    ? 'bg-slate-900 border-cyan-500/50 shadow-sm'
+                    : 'bg-slate-900/60 border-slate-800'
+                }`}
+              >
+                <div className="font-bold flex items-center gap-1 text-[11px]" style={{ color: c.color }}>
+                  {getPresetIcon(c.icon, 12)} {c.label}
+                </div>
+                <p className="text-slate-400 text-[10px] leading-tight">{c.desc}</p>
               </div>
-              <p className="text-slate-400 text-[10px] leading-tight">
-                Быстрая запись. Чистый голос поверх оригинального звука с авто-дакингом.
-              </p>
-            </div>
-
-            <div className="p-2.5 bg-slate-900/80 rounded-lg border border-purple-500/20 space-y-0.5">
-              <div className="font-bold text-purple-400 flex items-center gap-1 text-[11px]">
-                <Zap size={12} /> 2. Рекаст (-14 dB)
-              </div>
-              <p className="text-slate-400 text-[10px] leading-tight">
-                Точный хронометраж фраз, совпадение по краям, озвучка легкой физики.
-              </p>
-            </div>
-
-            <div className="p-2.5 bg-slate-900/80 rounded-lg border border-cyan-500/20 space-y-0.5">
-              <div className="font-bold text-cyan-400 flex items-center gap-1 text-[11px]">
-                <BookOpen size={12} /> 3. Редаб (-14 dB)
-              </div>
-              <p className="text-slate-400 text-[10px] leading-tight">
-                Липсинг по губам, яркие эмоции, жесткий тайминг.
-              </p>
-            </div>
-
-            <div className="p-2.5 bg-slate-900/80 rounded-lg border border-amber-500/20 space-y-0.5">
-              <div className="font-bold text-amber-400 flex items-center gap-1 text-[11px]">
-                <Film size={12} /> 4. Дубляж (-14 dB)
-              </div>
-              <p className="text-slate-400 text-[10px] leading-tight">
-                Полное сведение под кадр (пространство, фильтры), 100% повтор артикуляции.
-              </p>
-            </div>
+            ))}
           </div>
         </div>
       )}
 
-      {/* User Custom Presets Management list if userPresets exist */}
-      {userPresets.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-800/80">
-          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
-            <Sliders size={11} className="text-purple-400" /> Свои:
-          </span>
-          {userPresets.map((preset) => {
-            const isActive = activePresetId === preset.id;
-            return (
-              <div
-                key={preset.id}
-                onClick={() => handleSelectPreset(preset)}
-                className={`px-2.5 py-1 rounded-lg border text-xs flex items-center gap-1.5 cursor-pointer transition-all ${
-                  isActive
-                    ? 'bg-purple-950/80 border-purple-500 text-purple-200 font-bold'
-                    : 'bg-slate-900/60 hover:bg-slate-900 border-slate-800 text-slate-300'
-                }`}
-              >
-                <span>{preset.name}</span>
-                <button
-                  onClick={(e) => handleExport(preset, e)}
-                  className="p-0.5 text-slate-400 hover:text-cyan-300"
-                  title="Экспорт"
-                >
-                  <Download size={11} />
-                </button>
-                <button
-                  onClick={(e) => handleDeleteUserPreset(preset.id, preset.name, e)}
-                  className="p-0.5 text-slate-400 hover:text-rose-400"
-                  title="Удалить"
-                >
-                  <Trash2 size={11} />
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Toast notification */}
+      {/* Toast-уведомление */}
       {notification && (
-        <div className="p-2 bg-emerald-950/50 border border-emerald-500/30 rounded-xl text-xs text-emerald-300 flex items-center gap-2 animate-fadeIn">
+        <div className="p-2 bg-emerald-950/70 border border-emerald-500/40 rounded-xl text-xs text-emerald-300 flex items-center gap-2 animate-fadeIn shadow-lg">
           <CheckCircle2 size={14} className="text-emerald-400 shrink-0" />
           <span>{notification}</span>
         </div>
       )}
 
-      {/* Save Pipeline Preset Modal */}
+      {/* Модальное окно сохранения состояния в пресет */}
       {showSaveModal && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fadeIn">
           <form
@@ -361,76 +540,57 @@ export const MVPPipelinePresets: React.FC<MVPPipelinePresetsProps> = ({
                   <Save size={18} />
                 </div>
                 <div>
-                  <h3 className="text-sm font-bold text-slate-100">Сохранить пресет пайплайна</h3>
+                  <h3 className="text-sm font-bold text-slate-100">Сохранить состояние в пресет</h3>
                   <p className="text-[11px] text-slate-400">
-                    Запоминает все VST цепочки, параметры и C++ DSP настройки
+                    Категория: <strong className="text-cyan-400">{activeCategory}</strong>
                   </p>
                 </div>
               </div>
               <button
                 type="button"
                 onClick={() => setShowSaveModal(false)}
-                className="text-slate-400 hover:text-slate-200 p-1"
+                className="text-slate-400 hover:text-slate-100 p-1 rounded-lg"
               >
-                <X size={18} />
+                <X size={16} />
               </button>
             </div>
 
             <div className="space-y-3 text-xs">
               <div>
-                <label className="block text-slate-300 font-semibold mb-1">
-                  Название пресета:
-                </label>
+                <label className="block text-slate-300 font-bold mb-1">Название пресета / варианта:</label>
                 <input
                   type="text"
                   required
-                  placeholder="Например: Мой Дубляж для Экшна"
                   value={presetName}
                   onChange={(e) => setPresetName(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-slate-100 focus:outline-none focus:border-cyan-500"
+                  placeholder={`Например: ${activeCategory} — Мой мягкий компрессор`}
+                  className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-slate-100 focus:outline-none focus:border-cyan-400"
                   autoFocus
                 />
               </div>
 
               <div>
-                <label className="block text-slate-300 font-semibold mb-1">
-                  Тип / Категория:
-                </label>
-                <select
-                  value={presetCategory}
-                  onChange={(e) => setPresetCategory(e.target.value as MVPPresetCategory)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-cyan-500"
-                >
-                  <option value="Закадр">Закадр (Voiceover)</option>
-                  <option value="Рекаст">Рекаст (Recast)</option>
-                  <option value="Редаб">Редаб (Redub / Под дубляж)</option>
-                  <option value="Дубляж">Дубляж (Dubbing)</option>
-                  <option value="Custom">Пользовательский (Custom)</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1">
-                  Описание:
-                </label>
+                <label className="block text-slate-300 font-bold mb-1">Описание / заметки:</label>
                 <textarea
-                  rows={3}
-                  placeholder="Краткое описание специфики обработки и тембра..."
                   value={presetDescription}
                   onChange={(e) => setPresetDescription(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200 focus:outline-none focus:border-cyan-500"
+                  rows={2}
+                  placeholder="Особенности цепочки плагинов, настройки эквалайзера и компрессии..."
+                  className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-slate-100 focus:outline-none focus:border-cyan-400 resize-none"
                 />
               </div>
 
-              <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 text-[11px] text-slate-400 space-y-1 font-mono">
-                <div className="text-emerald-400 font-semibold mb-1">Будет сохранено в пресет:</div>
-                <div>• Дорожек дубляжа: {tracks.length} (C++ DSP + VST плагины)</div>
-                <div>• Vocal Bus VST плагинов: {vocalBus.vstPlugins?.length || 0}</div>
-                <div>• Master VST плагинов: {master.vstPlugins?.length || 0}</div>
+              <div className="p-2.5 bg-slate-950/80 border border-slate-800 rounded-xl text-[11px] text-slate-400 space-y-1 font-mono">
+                <div className="text-cyan-300 font-bold">Будет сохранено:</div>
+                <div>• Матрица маршрутизации нейросетей (этапы, модели DeepFilter/UVR/VoiceFixer, параметры)</div>
+                <div>• Настройки DSP (EQ, Comp, Gate, DeEsser, DeClicker, DePlosive, Auto-Ducker)</div>
+                <div>• Все VST плагины и параметры на дорожках ({totalTrackPlugins} шт.)</div>
+                <div>• Master Voiceover Bus ({vocalBusPluginsCount} VST плагинов + DSP)</div>
+                <div>• Master Output ({masterPluginsCount} VST плагинов + Лимитер)</div>
               </div>
             </div>
 
-            <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
               <button
                 type="button"
                 onClick={() => setShowSaveModal(false)}
@@ -440,9 +600,10 @@ export const MVPPipelinePresets: React.FC<MVPPipelinePresetsProps> = ({
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all shadow-md shadow-emerald-950/40 cursor-pointer"
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-lg shadow-emerald-950/50"
               >
-                Сохранить снимок
+                <Save size={14} />
+                <span>Сохранить пресет</span>
               </button>
             </div>
           </form>

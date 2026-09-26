@@ -52,7 +52,8 @@ import {
   FastForward,
   Rewind,
   Clock,
-  Compass
+  Compass,
+  Scissors
 } from 'lucide-react';
 
 export type WizardStage =
@@ -88,6 +89,7 @@ export interface VoiceoverMixWizardModalProps {
   onCollisionsDetected: (collisions: ClipCollisionInfo[]) => void;
   subtitles?: SubtitleCue[];
   onRunAutoTiming?: (tracksToTime?: TrackState[]) => Promise<TrackState[]>;
+  onUpdateAllTracks?: (tracks: TrackState[]) => Promise<void> | void;
 }
 
 export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = ({
@@ -110,7 +112,8 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
   onRunFinalMasterAndMux,
   onCollisionsDetected,
   subtitles = [],
-  onRunAutoTiming
+  onRunAutoTiming,
+  onUpdateAllTracks
 }) => {
   const [stage, setStage] = useState<WizardStage>('idle');
   const [isMinimized, setIsMinimized] = useState<boolean>(false);
@@ -282,6 +285,9 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
       setAcousticProfiles(profiles);
       setTotalStrippedPhrases(totalPhrases);
       setTracks(silenceStrippedTracks);
+      if (onUpdateAllTracks) {
+        await onUpdateAllTracks(silenceStrippedTracks);
+      }
 
       profiles.forEach((p) => {
         addLog(
@@ -317,6 +323,29 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
     }
   };
 
+  // Принудительное удаление тишины и нарезка на фразы прямо из мастера
+  const handleStripSilenceInWizard = async () => {
+    setStatusMessage('Запуск C++ адаптивного Strip Silence: анализ шума/речи и нарезка на фразы...');
+    addLog('✂️ Запуск VAD удаления тишины и разделения на отдельные голосовые фразы...');
+    try {
+      const { updatedTracks: silenceStrippedTracks, profiles, totalPhrases } =
+        globalAutoTimingService.stripSilenceAdaptiveAllTracks(tracks, 48000);
+      setAcousticProfiles(profiles);
+      setTotalStrippedPhrases(totalPhrases);
+      setTracks(silenceStrippedTracks);
+      if (onUpdateAllTracks) {
+        await onUpdateAllTracks(silenceStrippedTracks);
+      }
+      const rechecked = detectTrackCollisions(silenceStrippedTracks);
+      setCollisions(rechecked);
+      onCollisionsDetected(rechecked);
+      addLog(`✅ Удаление тишины завершено: выделено ${totalPhrases} отдельных голосовых реплик, коллизий: ${rechecked.length}.`);
+      setStatusMessage(`Удаление тишины выполнено: нарезано ${totalPhrases} реплик.`);
+    } catch (e: any) {
+      addLog(`❌ Ошибка удаления тишины: ${e?.message || e}`);
+    }
+  };
+
   // Перепроверка коллизий
   const handleRecheckCollisions = () => {
     const rechecked = detectTrackCollisions(tracks);
@@ -348,6 +377,9 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
         setAutoTimingSummary(
           `Синхронизировано ${res.totalPhrasesAligned} фраз, устранено ${res.resolvedCollisionsCount} наездов, сохранено ${res.preservedScriptOverlapsCount} сценарных перекрытий.`
         );
+      }
+      if (onUpdateAllTracks) {
+        await onUpdateAllTracks(updated);
       }
       const rechecked = detectTrackCollisions(updated);
       setCollisions(rechecked);
@@ -453,7 +485,27 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
           </div>
         )}
 
-        <div className="flex gap-2 pt-1">
+        <div className="grid grid-cols-2 gap-1.5 pt-1">
+          <button
+            onClick={handleStripSilenceInWizard}
+            className="py-1.5 bg-slate-800 hover:bg-slate-700 text-emerald-400 text-[11px] font-semibold rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer border border-emerald-900/50"
+            title="Нарезать все дорожки на фразы без тишины"
+          >
+            <Scissors size={12} />
+            Нарезать тишину
+          </button>
+          <button
+            onClick={handleAutoTimingInWizard}
+            disabled={isAutoTimingRunning}
+            className="py-1.5 bg-cyan-950 hover:bg-cyan-900 text-cyan-300 text-[11px] font-semibold rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer border border-cyan-800/60"
+            title="Автоматически развести наезжающие клипы"
+          >
+            <Zap size={12} />
+            Авто-разведение
+          </button>
+        </div>
+
+        <div className="flex gap-2 pt-0.5">
           <button
             onClick={handleRecheckCollisions}
             className="flex-1 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer"
@@ -647,24 +699,41 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
 
                   <div className="flex flex-wrap items-center gap-2 pt-2">
                     <button
+                      onClick={handleStripSilenceInWizard}
+                      className="px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-emerald-900/60 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
+                      title="Выполнить адаптивное VAD удаление тишины и нарезку всех дорожек на отдельные фразы"
+                    >
+                      <Scissors size={14} />
+                      ✂️ Удалить тишину
+                    </button>
+                    <button
                       onClick={handleAutoTimingInWizard}
                       disabled={isAutoTimingRunning}
                       className="px-4 py-2.5 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-lg shadow-cyan-950/40"
                       title="Автоматически сопоставить актёров, совместить фразы по субтитрам и устранить нежелательные наезды"
                     >
                       {isAutoTimingRunning ? <RefreshCw size={14} className="animate-spin" /> : <Zap size={14} />}
-                      {isAutoTimingRunning ? 'Авто-разведение...' : '⚡ Авто-тайминг и разведение по сабам'}
+                      {isAutoTimingRunning ? 'Авто-разведение...' : '⚡ Авто-тайминг и разведение'}
                     </button>
                     <button
-                      onClick={() => setIsMinimized(true)}
-                      className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer"
+                      onClick={async () => {
+                        if (onUpdateAllTracks) {
+                          await onUpdateAllTracks(tracks);
+                        }
+                        if (collisions.length > 0 && onSeek) {
+                          onSeek(collisions[0].overlapStartSec);
+                        }
+                        setIsMinimized(true);
+                      }}
+                      className="px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer"
+                      title="Свернуть окно и перейти к точке первой коллизии на таймлайне"
                     >
                       <Minimize2 size={14} />
-                      Исправить на таймлайне
+                      Посмотреть на таймлайне
                     </button>
                     <button
                       onClick={handleRecheckCollisions}
-                      className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-cyan-300 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer"
+                      className="px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 text-cyan-300 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer"
                     >
                       <RefreshCw size={14} />
                       Перепроверить

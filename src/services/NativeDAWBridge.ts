@@ -2167,8 +2167,8 @@ export class NativeDAWBridge {
   public stripSilenceFallback(
     samples: Float32Array,
     thresholdDb: number = -40.0,
-    minSilenceMs: number = 300.0,
-    paddingMs: number = 50.0,
+    minSilenceMs: number = 250.0,
+    paddingMs: number = 45.0,
     isStereo: boolean = false,
     sampleRate: number = 48000
   ): AudioSegmentResult[] {
@@ -2176,17 +2176,16 @@ export class NativeDAWBridge {
     const totalFrames = Math.floor(samples.length / channels);
     if (totalFrames <= 0) return [];
 
-    let effectiveThresholdDb = thresholdDb;
-    const windowSize = Math.max(64, Math.floor(sampleRate * 0.01)); // 10 ms
-    const minSilenceFrames = Math.floor((minSilenceMs / 1000) * sampleRate);
-    const paddingFrames = Math.floor((paddingMs / 1000) * sampleRate);
-    const numWindows = Math.ceil(totalFrames / windowSize);
+    const durationSec = totalFrames / sampleRate;
 
-    // Первичный расчет RMS энергии по всем окнам 10 мс
+    // 10 мс окна для максимально точной временной локализации начала и конца реплик
+    const windowSize = Math.max(32, Math.floor(sampleRate * 0.010)); // 10 ms
+    const numWindows = Math.ceil(totalFrames / windowSize);
+    if (numWindows <= 0) return [];
+
     const windowRms = new Float32Array(numWindows);
     const windowPeak = new Float32Array(numWindows);
-    let maxOverallPeak = 0;
-    let sumOverallRms = 0;
+    let globalMaxPeak = 0;
 
     for (let w = 0; w < numWindows; w++) {
       const startF = w * windowSize;
@@ -2208,109 +2207,260 @@ export class NativeDAWBridge {
       const rms = count > 0 ? Math.sqrt(sumSq / count) : 0;
       windowRms[w] = rms;
       windowPeak[w] = peak;
-      if (peak > maxOverallPeak) maxOverallPeak = peak;
-      sumOverallRms += rms;
+      if (peak > globalMaxPeak) globalMaxPeak = peak;
     }
 
-    // Если сигнал не пустой, но заданный фиксированный порог слишком строгий/мягкий,
-    // выполняем адаптивную калибровку порога речи
-    if (maxOverallPeak > 0.005) {
-      const sortedRms = Float32Array.from(windowRms).sort();
-      // Оценка шума покоя (10-й процентиль) и речи (90-й процентиль)
-      const p10 = sortedRms[Math.floor(numWindows * 0.1)] || 0.0001;
-      const p90 = sortedRms[Math.floor(numWindows * 0.9)] || 0.01;
-      const p10Db = 20 * Math.log10(Math.max(1e-5, p10));
-      const p90Db = 20 * Math.log10(Math.max(1e-5, p90));
+    if (globalMaxPeak < 0.0005) return [];
 
-      // Если динамический диапазон между тишиной и речью больше 10 dB
-      if (p90Db - p10Db > 10) {
-        // Устанавливаем порог на 40% расстояния между шумом и речью
-        const adaptiveDb = p10Db + (p90Db - p10Db) * 0.35;
-        // Ограничиваем разумными пределами для дикторской речи (-52 dB .. -26 dB)
-        effectiveThresholdDb = Math.max(-52.0, Math.min(-26.0, adaptiveDb));
-      }
-    }
+    // Оценка акустики: уровень шума (p15) и средний уровень речи (p85)
+    const sortedRms = Float32Array.from(windowRms).sort();
+    const p15 = sortedRms[Math.floor(numWindows * 0.15)] || 1e-4;
+    const p85 = sortedRms[Math.floor(numWindows * 0.85)] || 0.01;
+    const noiseFloorDb = 20 * Math.log10(Math.max(1e-5, p15));
+    const speechLevelDb = 20 * Math.log10(Math.max(1e-4, p85));
+    const dynamicRange = speechLevelDb - noiseFloorDb;
 
-    const thresholdAmp = Math.pow(10, effectiveThresholdDb / 20);
-    const peakThresholdAmp = thresholdAmp * 1.4;
-    const isSpeech = new Uint8Array(numWindows);
+    // Внутренняя функция VAD прохода для заданного порога и длительности паузы
+    const runPass = (testThreshDb: number, testMinSilenceMs: number): AudioSegmentResult[] => {
+      // Гарантируем, что порог открытия не опускается в зону фонового шума
+      const safeThreshDb = Math.max(noiseFloorDb + 2.5, Math.min(-18.0, testThreshDb));
+      const threshOpenAmp = Math.pow(10, safeThreshDb / 20);
+      const threshCloseAmp = threshOpenAmp * 0.72; // -2.8 dB гистерезис
 
-    for (let w = 0; w < numWindows; w++) {
-      if (windowRms[w] >= thresholdAmp || windowPeak[w] >= peakThresholdAmp) {
-        isSpeech[w] = 1;
-      }
-    }
+      const minSilenceFrames = Math.floor((testMinSilenceMs / 1000) * sampleRate);
+      const paddingFrames = Math.floor((paddingMs / 1000) * sampleRate);
+      const minSpeechFrames = Math.floor(0.080 * sampleRate); // Мин. длина речи 80 мс
 
-    // Склеивание коротких внутрисловных пауз (короче minSilenceMs)
-    const minSilenceWindows = Math.ceil(minSilenceFrames / windowSize);
-    let lastSpeech = -1;
-    for (let w = 0; w < numWindows; w++) {
-      if (isSpeech[w]) {
-        if (lastSpeech >= 0 && (w - lastSpeech - 1) < minSilenceWindows) {
-          for (let fill = lastSpeech + 1; fill < w; fill++) {
-            isSpeech[fill] = 1;
+      const isSpeech = new Uint8Array(numWindows);
+      let inSpeechState = false;
+
+      for (let w = 0; w < numWindows; w++) {
+        const rms = windowRms[w];
+        const peak = windowPeak[w];
+
+        const open = rms >= threshOpenAmp || (peak >= threshOpenAmp * 2.4 && rms >= threshCloseAmp);
+        const hold = rms >= threshCloseAmp;
+
+        if (!inSpeechState) {
+          if (open) {
+            inSpeechState = true;
+            isSpeech[w] = 1;
+          }
+        } else {
+          if (hold) {
+            isSpeech[w] = 1;
+          } else {
+            inSpeechState = false;
           }
         }
-        lastSpeech = w;
+      }
+
+      // 1. Подавление одиночных импульсных щелчков/шумов (< 30 мс / 3 окон)
+      for (let w = 0; w < numWindows; w++) {
+        if (isSpeech[w]) {
+          let run = 0;
+          while (w + run < numWindows && isSpeech[w + run]) {
+            run++;
+          }
+          if (run < 3) {
+            for (let k = 0; k < run; k++) {
+              isSpeech[w + k] = 0;
+            }
+          }
+          w += run;
+        }
+      }
+
+      // 2. Склеивание только сверхкоротких внутрисловных пауз (до 70 мс / 7 окон)
+      const maxIntraWordGapWindows = Math.min(8, Math.max(3, Math.floor(0.070 * sampleRate / windowSize)));
+      let lastSpeechWindow = -1;
+      for (let w = 0; w < numWindows; w++) {
+        if (isSpeech[w]) {
+          if (lastSpeechWindow >= 0 && (w - lastSpeechWindow - 1) <= maxIntraWordGapWindows) {
+            for (let fill = lastSpeechWindow + 1; fill < w; fill++) {
+              isSpeech[fill] = 1;
+            }
+          }
+          lastSpeechWindow = w;
+        }
+      }
+
+      // 3. Формирование сырых сегментов
+      const minSilenceWindows = Math.max(4, Math.ceil(minSilenceFrames / windowSize));
+      const rawSegments: { startF: number; endF: number }[] = [];
+      let inSeg = false;
+      let segStart = 0;
+      let silenceStreak = 0;
+
+      for (let w = 0; w < numWindows; w++) {
+        if (isSpeech[w]) {
+          if (!inSeg) {
+            inSeg = true;
+            segStart = w * windowSize;
+          }
+          silenceStreak = 0;
+        } else if (inSeg) {
+          silenceStreak++;
+          if (silenceStreak >= minSilenceWindows) {
+            inSeg = false;
+            const segEnd = Math.min(totalFrames, (w - silenceStreak + 1) * windowSize);
+            if (segEnd - segStart >= minSpeechFrames) {
+              rawSegments.push({ startF: segStart, endF: segEnd });
+            }
+          }
+        }
+      }
+
+      if (inSeg) {
+        const segEnd = totalFrames;
+        if (segEnd - segStart >= minSpeechFrames) {
+          rawSegments.push({ startF: segStart, endF: segEnd });
+        }
+      }
+
+      if (rawSegments.length === 0) return [];
+
+      // 4. Добавление безопасного padding
+      const result: AudioSegmentResult[] = [];
+      for (let sIdx = 0; sIdx < rawSegments.length; sIdx++) {
+        const seg = rawSegments[sIdx];
+        const prevSeg = sIdx > 0 ? rawSegments[sIdx - 1] : null;
+        const nextSeg = sIdx < rawSegments.length - 1 ? rawSegments[sIdx + 1] : null;
+
+        const maxBackPad = prevSeg ? Math.max(0, Math.floor((seg.startF - prevSeg.endF) / 2) - 80) : paddingFrames;
+        const maxForwardPad = nextSeg ? Math.max(0, Math.floor((nextSeg.startF - seg.endF) / 2) - 80) : paddingFrames;
+
+        const effectiveStart = Math.max(0, seg.startF - Math.min(paddingFrames, maxBackPad));
+        const effectiveEnd = Math.min(totalFrames, seg.endF + Math.min(paddingFrames, maxForwardPad));
+        const length = effectiveEnd - effectiveStart;
+        if (length <= 0) continue;
+
+        let segMaxPeak = 0;
+        let sumSq = 0;
+        let sampleCount = 0;
+        const stride = Math.max(1, Math.floor(length / 2000));
+
+        for (let f = effectiveStart; f < effectiveEnd; f += stride) {
+          const idx = f * channels;
+          const sL = Math.abs(samples[idx] || 0);
+          const sR = isStereo ? Math.abs(samples[idx + 1] || 0) : sL;
+          if (sL > segMaxPeak) segMaxPeak = sL;
+          if (sR > segMaxPeak) segMaxPeak = sR;
+          sumSq += sL * sL + sR * sR;
+          sampleCount += channels;
+        }
+
+        const rms = sampleCount > 0 ? Math.sqrt(sumSq / sampleCount) : 0;
+
+        result.push({
+          offsetSamples: effectiveStart,
+          lengthSamples: length,
+          durationSec: length / sampleRate,
+          peakLevel: segMaxPeak,
+          rmsLevel: rms
+        });
+      }
+
+      return result;
+    };
+
+    // Проход 1: стандартный вызов с переданными параметрами
+    let segments = runPass(thresholdDb, minSilenceMs);
+
+    // Проход 2: Если на аудио длиннее 2.5 сек найден только 1 сегмент (или 0),
+    // выполняем адаптивное динамическое повышение порога и сокращение паузы
+    if (segments.length <= 1 && durationSec > 2.5) {
+      const candidateDeltas = [4.0, 7.0, 10.0, 13.0, 16.0, 20.0, -3.0];
+      const silenceDurations = [
+        Math.min(220, minSilenceMs),
+        Math.min(180, minSilenceMs),
+        Math.min(150, minSilenceMs),
+        120
+      ];
+
+      outerLoop:
+      for (const silDur of silenceDurations) {
+        for (const delta of candidateDeltas) {
+          const testSegs = runPass(thresholdDb + delta, silDur);
+          if (testSegs.length > 1) {
+            segments = testSegs;
+            break outerLoop;
+          }
+        }
       }
     }
 
-    const rawSegments: { startF: number; endF: number }[] = [];
-    let inSegment = false;
-    let segStart = 0;
+    // Проход 3: Гарантированное разделение по долинному энергетическому профилю (Energy Valley Splitting)
+    // Если аудиофайл длиннее 3 секунд всё ещё представлен единым неделимым блоком:
+    if (segments.length <= 1 && durationSec > 3.0) {
+      const valleySegs: { startF: number; endF: number }[] = [];
+      // Сглаживание RMS (окно ~120 мс = 12 окон)
+      const smoothRadius = 6;
+      const smoothedRms = new Float32Array(numWindows);
 
-    for (let w = 0; w < numWindows; w++) {
-      if (isSpeech[w] && !inSegment) {
-        inSegment = true;
-        segStart = w * windowSize;
-      } else if (!isSpeech[w] && inSegment) {
-        inSegment = false;
-        const segEnd = Math.min(totalFrames, w * windowSize);
-        rawSegments.push({ startF: segStart, endF: segEnd });
-      }
-    }
-    if (inSegment) {
-      rawSegments.push({ startF: segStart, endF: totalFrames });
-    }
-
-    if (rawSegments.length === 0) {
-      return [];
-    }
-
-    const result: AudioSegmentResult[] = [];
-    for (const seg of rawSegments) {
-      const paddedStart = Math.max(0, seg.startF - paddingFrames);
-      const paddedEnd = Math.min(totalFrames, seg.endF + paddingFrames);
-      const length = paddedEnd - paddedStart;
-      if (length <= 0) continue;
-
-      let maxPeak = 0;
-      let sumSq = 0;
-      let sampleCount = 0;
-      const stride = Math.max(1, Math.floor(length / 2000));
-
-      for (let f = paddedStart; f < paddedEnd; f += stride) {
-        const idx = f * channels;
-        const sL = Math.abs(samples[idx] || 0);
-        const sR = isStereo ? Math.abs(samples[idx + 1] || 0) : sL;
-        if (sL > maxPeak) maxPeak = sL;
-        if (sR > maxPeak) maxPeak = sR;
-        sumSq += sL * sL + sR * sR;
-        sampleCount += channels;
+      for (let w = 0; w < numWindows; w++) {
+        let sum = 0;
+        let c = 0;
+        for (let k = Math.max(0, w - smoothRadius); k <= Math.min(numWindows - 1, w + smoothRadius); k++) {
+          sum += windowRms[k];
+          c++;
+        }
+        smoothedRms[w] = c > 0 ? sum / c : 0;
       }
 
-      const rms = sampleCount > 0 ? Math.sqrt(sumSq / sampleCount) : 0;
+      // Порог паузы: уровень ниже -36 dBFS либо на 10 dB ниже медианной речи
+      const valleyThreshAmp = Math.max(
+        Math.pow(10, (noiseFloorDb + 3.0) / 20),
+        Math.min(Math.pow(10, -34.0 / 20), Math.pow(10, (speechLevelDb - 9.0) / 20))
+      );
 
-      result.push({
-        offsetSamples: paddedStart,
-        lengthSamples: length,
-        durationSec: length / sampleRate,
-        peakLevel: maxPeak,
-        rmsLevel: rms
-      });
+      const minValleyWindows = Math.max(12, Math.floor(0.140 * sampleRate / windowSize)); // >= 140 мс тишины
+      let inValley = false;
+      let valleyStartW = 0;
+      let phraseStartF = 0;
+
+      for (let w = 0; w < numWindows; w++) {
+        const isLowEnergy = smoothedRms[w] < valleyThreshAmp;
+
+        if (isLowEnergy && !inValley) {
+          inValley = true;
+          valleyStartW = w;
+        } else if (!isLowEnergy && inValley) {
+          inValley = false;
+          const valleyLenW = w - valleyStartW;
+          if (valleyLenW >= minValleyWindows) {
+            // Найдена естественная пауза в речи! Точка разделения — середина долины
+            const splitF = Math.floor((valleyStartW + valleyLenW / 2) * windowSize);
+            if (splitF - phraseStartF >= Math.floor(0.200 * sampleRate)) {
+              valleySegs.push({
+                startF: phraseStartF,
+                endF: Math.max(phraseStartF, splitF - Math.floor(0.040 * sampleRate))
+              });
+              phraseStartF = Math.min(totalFrames, splitF + Math.floor(0.040 * sampleRate));
+            }
+          }
+        }
+      }
+
+      if (totalFrames - phraseStartF >= Math.floor(0.200 * sampleRate)) {
+        valleySegs.push({ startF: phraseStartF, endF: totalFrames });
+      }
+
+      if (valleySegs.length > 1) {
+        segments = valleySegs.map((v) => {
+          const len = v.endF - v.startF;
+          return {
+            offsetSamples: v.startF,
+            lengthSamples: len,
+            durationSec: len / sampleRate,
+            peakLevel: globalMaxPeak,
+            rmsLevel: p85
+          };
+        });
+      }
     }
 
-    return result;
+    return segments;
   }
 
   /**

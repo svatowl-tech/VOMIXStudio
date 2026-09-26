@@ -63,6 +63,8 @@ export interface TimelineViewProps {
   onSelectCue?: (cue: SubtitleCue) => void;
   // Коллизии для подсветки на таймлайне
   collisions?: ClipCollisionInfo[];
+  onRunAutoTiming?: () => void;
+  onStripSilenceAll?: () => void;
 }
 
 type DragMode =
@@ -396,8 +398,11 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   subtitles: externalSubtitles,
   onUpdateSubtitles: externalOnUpdateSubtitles,
   onSelectCue,
-  collisions = []
+  collisions = [],
+  onRunAutoTiming,
+  onStripSilenceAll
 }) => {
+  const [activeCollisionIdx, setActiveCollisionIdx] = useState<number>(0);
   const sampleRate = 48000;
   const tracksRef = useRef<TrackState[]>(tracks);
   tracksRef.current = tracks;
@@ -837,6 +842,27 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
 
     onSeek(seekTime);
   };
+
+  const handleJumpCollision = useCallback(
+    (direction: number) => {
+      if (!collisions || collisions.length === 0) return;
+      const nextIdx = (activeCollisionIdx + direction + collisions.length) % collisions.length;
+      setActiveCollisionIdx(nextIdx);
+      const targetCol = collisions[nextIdx];
+      if (targetCol) {
+        onSeek(targetCol.overlapStartSec);
+        if (timelineScrollRef.current) {
+          const targetPx = targetCol.overlapStartSec * pxPerSec;
+          const containerWidth = timelineScrollRef.current.clientWidth || 800;
+          timelineScrollRef.current.scrollTo({
+            left: Math.max(0, targetPx - containerWidth / 3),
+            behavior: 'smooth'
+          });
+        }
+      }
+    },
+    [collisions, activeCollisionIdx, onSeek, pxPerSec]
+  );
 
   // ==========================================================================
   // ФУНКЦИОНАЛ СПЛИТА (РАЗРЕЗАНИЕ ДОРОЖЕК / КЛИПОВ)
@@ -2278,6 +2304,60 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       </div>
 
       {/* =====================================================================
+          ПАНЕЛЬ НАВИГАЦИИ И УСТРАНЕНИЯ КОЛЛИЗИЙ (ЕСЛИ ОБНАРУЖЕНЫ НАЕЗДЫ)
+          ===================================================================== */}
+      {(collisions || []).length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2.5 bg-rose-950/40 border border-rose-500/50 p-2.5 rounded-xl text-xs text-rose-200 shadow-lg animate-fadeIn">
+          <div className="flex items-center gap-2">
+            <span className="p-1.5 rounded-lg bg-rose-500/20 text-rose-400 font-bold flex items-center gap-1">
+              <AlertCircle size={14} className="animate-pulse" />
+              Коллизии: {(collisions || []).length} шт.
+            </span>
+            <span className="text-[11px] text-slate-300">
+              Обнаружены наезды дикторских фраз. Используйте авто-тайминг или подвиньте клипы вручную.
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5 ml-auto">
+            <button
+              onClick={() => handleJumpCollision(-1)}
+              className="px-2 py-1 bg-slate-900/80 hover:bg-slate-800 text-rose-300 border border-rose-800/60 rounded-lg text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-all"
+              title="Перейти к предыдущей коллизии"
+            >
+              ◀ Пред.
+            </button>
+            <button
+              onClick={() => handleJumpCollision(1)}
+              className="px-2 py-1 bg-slate-900/80 hover:bg-slate-800 text-rose-300 border border-rose-800/60 rounded-lg text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-all"
+              title="Перейти к следующей коллизии"
+            >
+              След. ▶
+            </button>
+            {onStripSilenceAll && (
+              <button
+                onClick={onStripSilenceAll}
+                className="px-2.5 py-1 bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/60 rounded-lg text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-all shadow-sm"
+                title="Нарезать все дорожки на фразы (удалить тишину)"
+              >
+                <Scissors size={12} />
+                ✂️ Удалить тишину
+              </button>
+            )}
+            {onRunAutoTiming && (
+              <button
+                onClick={onRunAutoTiming}
+                className="px-3 py-1 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white rounded-lg text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-all shadow-md shadow-cyan-950/60"
+                title="Автоматически развести наезжающие клипы"
+              >
+                <Zap size={12} />
+                ⚡ Авто-тайминг
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
           MAIN TIMELINE SCROLLABLE CONTAINER
           ===================================================================== */}
       <div className="flex bg-[#070a12] relative overflow-hidden" onWheel={handleWheel}>
@@ -2401,10 +2481,29 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
           <div style={{ width: `${totalWidthPx}px` }} className="relative flex flex-col">
             {/* 1. Линейка времени (Time Ruler) */}
             <div
-              className="h-7 sticky top-0 z-10 cursor-pointer"
+              className="h-7 sticky top-0 z-10 cursor-pointer relative"
               onClick={(e) => handleSeekByCoord(e.clientX)}
             >
               <canvas ref={rulerCanvasRef} className="block w-full h-full" />
+              {/* Маркеры коллизий на линейке времени */}
+              {(collisions || []).map((col, idx) => {
+                const colLeftPx = col.overlapStartSec * pxPerSec;
+                const colWidthPx = Math.max(8, col.overlapDurationSec * pxPerSec);
+                return (
+                  <div
+                    key={`ruler-col-${idx}`}
+                    style={{ left: `${colLeftPx}px`, width: `${colWidthPx}px` }}
+                    className="absolute top-0 bottom-0 bg-rose-500/80 hover:bg-rose-400 border-x border-rose-300 pointer-events-auto cursor-pointer transition-all z-20 group/rulercol"
+                    title={`Коллизия #${idx + 1}: ${col.trackAName} ↔ ${col.trackBName} (${col.overlapStartSec.toFixed(2)}s). Кликните для перехода.`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSeek(col.overlapStartSec);
+                    }}
+                  >
+                    <div className="absolute top-0 left-0 -translate-y-0.5 w-2 h-2 bg-rose-500 rotate-45 shadow-xs" />
+                  </div>
+                );
+              })}
             </div>
 
             {/* 2. Дорожка ВИДЕОПОТОКА (Filmstrip Lane) */}
@@ -2500,6 +2599,35 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                       backgroundSize: `${pxPerSec}px 100%`
                     }}
                   />
+
+                  {/* 💥 Зоны наездов и коллизий (Hazard Collision Overlays) на дорожке */}
+                  {(collisions || [])
+                    .filter((col) => col && (col.trackAId === track.id || col.trackBId === track.id))
+                    .map((col, cIdx) => {
+                      const colLeftPx = col.overlapStartSec * pxPerSec;
+                      const colWidthPx = Math.max(14, col.overlapDurationSec * pxPerSec);
+                      return (
+                        <div
+                          key={`lane-hazard-${track.id}-${col.id || cIdx}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onSeek(col.overlapStartSec);
+                          }}
+                          style={{
+                            left: `${colLeftPx}px`,
+                            width: `${colWidthPx}px`
+                          }}
+                          className="absolute top-0 bottom-0 z-20 pointer-events-auto cursor-pointer group/hazard"
+                          title={`Наезд (${col.overlapDurationSec.toFixed(2)}с): ${col.trackAName} ↔ ${col.trackBName}. Кликните для перехода к точке коллизии.`}
+                        >
+                          <div className="absolute inset-0 bg-rose-500/25 border-x-2 border-rose-500 group-hover/hazard:bg-rose-500/40 transition-all shadow-[0_0_12px_rgba(244,63,94,0.35)]" />
+                          <div className="absolute top-1 left-1 bg-rose-600/90 text-white text-[9px] font-bold px-1 py-0.5 rounded shadow-sm flex items-center gap-0.5 whitespace-nowrap backdrop-blur-xs">
+                            <AlertCircle size={9} />
+                            <span>-{col.overlapDurationSec.toFixed(2)}s</span>
+                          </div>
+                        </div>
+                      );
+                    })}
 
                   {/* Клипы дорожки (Memoized с глубоким areClipPropsEqual) */}
                   {(track.clips || []).map((clip) => {

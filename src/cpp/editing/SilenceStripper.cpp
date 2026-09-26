@@ -89,8 +89,8 @@ int SilenceStripper::stripSilence(
     SilenceStripperConfig config;
     config.sampleRate = (sampleRate > 8000) ? static_cast<float>(sampleRate) : 48000.0f;
     config.thresholdDb = thresholdDb;
-    config.minSilenceMs = (minSilenceMs >= 0.0f) ? minSilenceMs : 300.0f;
-    config.paddingMs = (paddingMs >= 0.0f) ? paddingMs : 50.0f;
+    config.minSilenceMs = (minSilenceMs >= 0.0f) ? minSilenceMs : 250.0f;
+    config.paddingMs = (paddingMs >= 0.0f) ? paddingMs : 45.0f;
     config.frameSizeMs = 10.0f; // 10 мс блоки анализа
     config.isStereo = isStereo;
 
@@ -101,6 +101,29 @@ int SilenceStripper::stripSilence(
         outSegments,
         static_cast<size_t>(maxSegments)
     );
+
+    // Если на дорожке длиннее 2.5 секунд обнаружен только 1 сегмент (или 0),
+    // выполняем адаптивный мультипроходной поиск порога VAD
+    const size_t channels = isStereo ? 2 : 1;
+    const size_t totalFrames = totalSamples / channels;
+    if (result <= 1 && totalFrames > static_cast<size_t>(config.sampleRate * 2.5f)) {
+        const float candidateDeltas[] = { 3.0f, 6.0f, 9.0f, 12.0f, 15.0f, -3.0f, -6.0f };
+        for (float delta : candidateDeltas) {
+            SilenceStripperConfig altConfig = config;
+            altConfig.thresholdDb = std::max(-56.0f, std::min(-20.0f, config.thresholdDb + delta));
+            size_t altResult = detectSegments(
+                inBuffer,
+                totalSamples,
+                altConfig,
+                outSegments,
+                static_cast<size_t>(maxSegments)
+            );
+            if (altResult > 1) {
+                result = altResult;
+                break;
+            }
+        }
+    }
 
     return static_cast<int>(result);
 }
@@ -126,9 +149,11 @@ size_t SilenceStripper::detectSegments(
     const size_t frameSizeFrames = std::max<size_t>(16, static_cast<size_t>(config.frameSizeMs * 0.001f * sampleRate));
     const size_t minSilenceFrames = static_cast<size_t>(config.minSilenceMs * 0.001f * sampleRate);
     const size_t paddingFrames = static_cast<size_t>(config.paddingMs * 0.001f * sampleRate);
+    const size_t minSpeechFrames = static_cast<size_t>(0.070f * sampleRate); // Мин. длина реплики 70 мс
 
-    // Линейный порог амплитуды из dBFS (например, -40 dBFS = 0.01f)
-    const float thresholdLinear = dbToGain(config.thresholdDb);
+    // Гистерезисный порог VAD: порог открытия и порог удержания речи
+    const float threshOpen = dbToGain(config.thresholdDb);
+    const float threshClose = threshOpen * 0.72f; // -2.8 dB гистерезис
 
     size_t segmentCount = 0;
     bool inSpeech = false;
@@ -139,7 +164,7 @@ size_t SilenceStripper::detectSegments(
     double currentSegmentSumSq = 0.0;
     size_t currentSegmentSampleCount = 0;
 
-    // Линейный проход по PCM блоками по 10 мс без единой аллокации
+    // Линейный проход по PCM блоками по 10 мс без динамических аллокаций
     for (size_t frameOffset = 0; frameOffset < totalFrames; frameOffset += frameSizeFrames) {
         const size_t currentBlockFrames = std::min(frameSizeFrames, totalFrames - frameOffset);
         const size_t currentBlockSamples = currentBlockFrames * channels;
@@ -148,36 +173,41 @@ size_t SilenceStripper::detectSegments(
         // Векторизованный SIMD128 расчет энергии 10 мс блока
         EnergyFrame frameEnergy = calculateFrameEnergySIMD(blockPtr, currentBlockSamples);
 
-        // Условие активности звука (по RMS или по Peak)
-        const bool isSoundActive = (frameEnergy.rms >= thresholdLinear) || (frameEnergy.peak >= thresholdLinear * 1.5f);
+        // Условие открытия и удержания речи с учетом RMS и Peak
+        const bool openSpeech = (frameEnergy.rms >= threshOpen) ||
+                                (frameEnergy.peak >= threshOpen * 2.4f && frameEnergy.rms >= threshClose);
+        const bool holdSpeech = (frameEnergy.rms >= threshClose);
 
-        if (isSoundActive) {
-            if (!inSpeech) {
-                // Засекаем начало новой фразы с защитным отступом назад (paddingMs)
+        if (!inSpeech) {
+            if (openSpeech) {
                 inSpeech = true;
-                currentSegmentStartFrame = (frameOffset >= paddingFrames) ? (frameOffset - paddingFrames) : 0;
+                const size_t minAllowedStart = (segmentCount > 0)
+                    ? (outSegments[segmentCount - 1].offsetSamples + outSegments[segmentCount - 1].lengthSamples)
+                    : 0;
+                const size_t rawStart = (frameOffset >= paddingFrames) ? (frameOffset - paddingFrames) : 0;
+                currentSegmentStartFrame = std::max(minAllowedStart, rawStart);
                 currentSegmentPeak = frameEnergy.peak;
                 currentSegmentSumSq = static_cast<double>(frameEnergy.rms * frameEnergy.rms) * currentBlockSamples;
                 currentSegmentSampleCount = currentBlockSamples;
-            } else {
-                // Накопление метрик текущей активной фразы
+                lastSpeechFrame = frameOffset + currentBlockFrames;
+            }
+        } else {
+            if (holdSpeech) {
                 currentSegmentPeak = std::max(currentSegmentPeak, frameEnergy.peak);
                 currentSegmentSumSq += static_cast<double>(frameEnergy.rms * frameEnergy.rms) * currentBlockSamples;
                 currentSegmentSampleCount += currentBlockSamples;
-            }
-            lastSpeechFrame = frameOffset + currentBlockFrames;
-        } else {
-            if (inSpeech) {
-                // Пауза продолжается. Проверяем превышение минимальной тишины minSilenceMs
-                const size_t silenceDurationFrames = (frameOffset + currentBlockFrames) - lastSpeechFrame;
-                if (silenceDurationFrames >= minSilenceFrames) {
-                    // Фраза завершена, добавляем защитный запас вперед (paddingMs)
+                lastSpeechFrame = frameOffset + currentBlockFrames;
+            } else {
+                // В фазе тишины: проверяем достижение минимальной паузы minSilenceMs
+                const size_t silenceDuration = (frameOffset + currentBlockFrames) - lastSpeechFrame;
+                if (silenceDuration >= minSilenceFrames) {
                     const size_t endFrameWithPad = std::min(totalFrames, lastSpeechFrame + paddingFrames);
-                    const size_t segLengthFrames = (endFrameWithPad > currentSegmentStartFrame) 
-                        ? (endFrameWithPad - currentSegmentStartFrame) 
+                    const size_t segLengthFrames = (endFrameWithPad > currentSegmentStartFrame)
+                        ? (endFrameWithPad - currentSegmentStartFrame)
                         : 0;
 
-                    if (segLengthFrames > 0 && segmentCount < maxSegments) {
+                    // Добавляем сегмент только если он длиннее минимальной реплики (70 мс)
+                    if (segLengthFrames >= minSpeechFrames && segmentCount < maxSegments) {
                         outSegments[segmentCount].offsetSamples = currentSegmentStartFrame;
                         outSegments[segmentCount].lengthSamples = segLengthFrames;
                         outSegments[segmentCount].peakLevel = currentSegmentPeak;
@@ -200,14 +230,14 @@ size_t SilenceStripper::detectSegments(
         }
     }
 
-    // Обработка финального звукового сегмента, если аудио закончилось на фразе
+    // Финальная реплика в конце файла
     if (inSpeech && segmentCount < maxSegments) {
         const size_t endFrameWithPad = std::min(totalFrames, lastSpeechFrame + paddingFrames);
-        const size_t segLengthFrames = (endFrameWithPad > currentSegmentStartFrame) 
-            ? (endFrameWithPad - currentSegmentStartFrame) 
+        const size_t segLengthFrames = (endFrameWithPad > currentSegmentStartFrame)
+            ? (endFrameWithPad - currentSegmentStartFrame)
             : 0;
 
-        if (segLengthFrames > 0) {
+        if (segLengthFrames >= minSpeechFrames) {
             outSegments[segmentCount].offsetSamples = currentSegmentStartFrame;
             outSegments[segmentCount].lengthSamples = segLengthFrames;
             outSegments[segmentCount].peakLevel = currentSegmentPeak;

@@ -25,10 +25,17 @@ export interface ClipCollisionInfo {
   type: 'cross_track_overlap' | 'same_track_overlap';
 }
 
+export function isNonSpeechOrOriginalTrack(track: TrackState | { name: string; isOriginalAudio?: boolean }): boolean {
+  if (!track) return false;
+  if (track.isOriginalAudio) return true;
+  const name = (track.name || '').toLowerCase();
+  return /оригинал|original|видео|video|исходн|музыка|music|фонограмм|m&e|sfx|soundtrack|звук видео/i.test(name);
+}
+
 export function detectTrackCollisions(tracks: TrackState[], sampleRate: number = 48000): ClipCollisionInfo[] {
   const collisions: ClipCollisionInfo[] = [];
 
-  // Собираем все клипы со всех дорожек с вычислением временных интервалов
+  // Собираем все клипы со всех дикторских дорожек с вычислением временных интервалов
   interface FlatClipInfo {
     trackId: number;
     trackName: string;
@@ -40,8 +47,9 @@ export function detectTrackCollisions(tracks: TrackState[], sampleRate: number =
   const allClipsInfo: FlatClipInfo[] = [];
 
   (tracks || []).forEach((track) => {
-    // Пропускаем замутированные дорожки
+    // Пропускаем замутированные дорожки и дорожки оригинального видео/музыки/фонограмм
     if (!track || track.mute) return;
+    if (isNonSpeechOrOriginalTrack(track)) return;
 
     (track.clips || []).forEach((clip) => {
       if (!clip || clip.lengthSamples <= 0) return;
@@ -68,18 +76,9 @@ export function detectTrackCollisions(tracks: TrackState[], sampleRate: number =
       const overlapEnd = Math.min(itemA.endSec, itemB.endSec);
       const overlapDuration = overlapEnd - overlapStart;
 
-      // Порог наезда: более 0.05 сек (50 миллисекунд)
-      if (overlapDuration > 0.05) {
+      // Порог наезда дикторских реплик: более 0.08 сек (80 миллисекунд)
+      if (overlapDuration > 0.08) {
         const isSameTrack = itemA.trackId === itemB.trackId;
-
-        // Игнорируем наезды с фонограммой/музыкой если они на разных треках,
-        // фокус только на дикторских дорожках и наложениях внутри дорожек
-        const isMusicA = itemA.trackName.toLowerCase().includes('музыка') || itemA.trackName.toLowerCase().includes('m&e');
-        const isMusicB = itemB.trackName.toLowerCase().includes('музыка') || itemB.trackName.toLowerCase().includes('m&e');
-
-        if (!isSameTrack && (isMusicA || isMusicB)) {
-          continue;
-        }
 
         collisions.push({
           id: `col_${itemA.clip.id}_${itemB.clip.id}_${Math.round(overlapStart * 100)}`,

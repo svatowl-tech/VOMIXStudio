@@ -237,22 +237,92 @@ export const DEFAULT_TRACK_COLORS = [
   '#eab308', '#2dd4bf', '#818cf8', '#fb923c', '#4ade80'
 ];
 
-export function createNewTrack(id: number, name?: string, color?: string): TrackState {
-  const chosenColor = color || DEFAULT_TRACK_COLORS[(id - 1) % DEFAULT_TRACK_COLORS.length];
+export function isOriginalTrackName(name?: string): boolean {
+  if (!name) return false;
+  return /оригинал|original|видео|video|исходн/i.test(name);
+}
+
+/**
+ * Пресет C++ DSP «Дубляж / Речь» по умолчанию для всех дикторских и актерских дорожек
+ */
+export function getDubbingSpeechPresetDSP(): Pick<
+  TrackState,
+  'eq' | 'compressor' | 'noiseGate' | 'deClicker' | 'dePlosive' | 'deEsser' | 'autoDucker'
+> {
   return {
-    id,
-    name: name || `Dubber ${id}`,
-    volumeDb: 0.0,
-    pan: 0.0,
-    solo: false,
-    mute: false,
-    color: chosenColor,
-    clips: [],
     eq: {
-      lowShelf: { type: 'lowshelf', frequency: 120, gainDb: 0.0, Q: 0.7071, enabled: true },
-      peaking: { type: 'peaking', frequency: 2500, gainDb: 0.0, Q: 1.0, enabled: true },
-      highShelf: { type: 'highshelf', frequency: 8000, gainDb: 0.0, Q: 0.7071, enabled: true },
+      lowShelf: { type: 'lowshelf', frequency: 120, gainDb: -3.0, Q: 0.7071, enabled: true },
+      peaking: { type: 'peaking', frequency: 3200, gainDb: 3.5, Q: 1.2, enabled: true },
+      highShelf: { type: 'highshelf', frequency: 10000, gainDb: 2.0, Q: 0.7071, enabled: true },
       enabled: true
+    },
+    compressor: {
+      thresholdDb: -16,
+      ratio: 3.5,
+      attackMs: 12,
+      releaseMs: 120,
+      makeupGainDb: 2.0,
+      kneeDb: 6,
+      enabled: true,
+      currentGainReductionDb: 0
+    },
+    noiseGate: {
+      thresholdDb: -48.0,
+      attackMs: 2.0,
+      holdMs: 40.0,
+      releaseMs: 120.0,
+      floorDb: -60.0,
+      enabled: true,
+      currentGain: 0
+    },
+    deClicker: {
+      threshold: 0.06,
+      repairWindow: 3,
+      enabled: true,
+      clicksDetected: 0
+    },
+    dePlosive: {
+      thresholdDb: -24.0,
+      frequency: 80.0,
+      attackMs: 2.0,
+      releaseMs: 50.0,
+      enabled: false,
+      currentReduction: 0
+    },
+    deEsser: {
+      thresholdDb: -20.0,
+      frequency: 6200.0,
+      ratio: 4.0,
+      attackMs: 1.0,
+      releaseMs: 45.0,
+      enabled: true,
+      currentGainReductionDb: 0
+    },
+    autoDucker: {
+      thresholdDb: -22,
+      duckDepthDb: -10,
+      attackMs: 20,
+      releaseMs: 250,
+      enabled: false,
+      sourceTrackId: 1,
+      currentDuckingGainDb: 0
+    }
+  };
+}
+
+/**
+ * Нейтральный пресет без обработки для дорожки оригинального звука видео
+ */
+export function getFlatOriginalTrackDSP(): Pick<
+  TrackState,
+  'eq' | 'compressor' | 'noiseGate' | 'deClicker' | 'dePlosive' | 'deEsser' | 'autoDucker'
+> {
+  return {
+    eq: {
+      lowShelf: { type: 'lowshelf', frequency: 120, gainDb: 0.0, Q: 0.7071, enabled: false },
+      peaking: { type: 'peaking', frequency: 2500, gainDb: 0.0, Q: 1.0, enabled: false },
+      highShelf: { type: 'highshelf', frequency: 8000, gainDb: 0.0, Q: 0.7071, enabled: false },
+      enabled: false
     },
     compressor: {
       thresholdDb: -18,
@@ -264,14 +334,14 @@ export function createNewTrack(id: number, name?: string, color?: string): Track
       enabled: false,
       currentGainReductionDb: 0
     },
-    autoDucker: {
-      thresholdDb: -22,
-      duckDepthDb: -10,
-      attackMs: 20,
-      releaseMs: 250,
+    noiseGate: {
+      thresholdDb: -45.0,
+      attackMs: 2.0,
+      holdMs: 30.0,
+      releaseMs: 100.0,
+      floorDb: -60.0,
       enabled: false,
-      sourceTrackId: 1,
-      currentDuckingGainDb: 0
+      currentGain: 0
     },
     deClicker: {
       threshold: 0.08,
@@ -287,15 +357,6 @@ export function createNewTrack(id: number, name?: string, color?: string): Track
       enabled: false,
       currentReduction: 0
     },
-    noiseGate: {
-      thresholdDb: -45.0,
-      attackMs: 2.0,
-      holdMs: 30.0,
-      releaseMs: 100.0,
-      floorDb: -60.0,
-      enabled: false,
-      currentGain: 0
-    },
     deEsser: {
       thresholdDb: -22.0,
       frequency: 6000.0,
@@ -305,6 +366,45 @@ export function createNewTrack(id: number, name?: string, color?: string): Track
       enabled: false,
       currentGainReductionDb: 0
     },
+    autoDucker: {
+      thresholdDb: -22,
+      duckDepthDb: -10,
+      attackMs: 20,
+      releaseMs: 250,
+      enabled: false,
+      sourceTrackId: 1,
+      currentDuckingGainDb: 0
+    }
+  };
+}
+
+export function applyDubbingSpeechPreset(track: TrackState): TrackState {
+  if (track.isOriginalAudio || isOriginalTrackName(track.name)) {
+    return track;
+  }
+  return {
+    ...track,
+    ...getDubbingSpeechPresetDSP()
+  };
+}
+
+export function createNewTrack(id: number, name?: string, color?: string, isOriginalAudio?: boolean): TrackState {
+  const chosenColor = color || DEFAULT_TRACK_COLORS[(id - 1) % DEFAULT_TRACK_COLORS.length];
+  const trackName = name || `Dubber ${id}`;
+  const isOriginal = isOriginalAudio ?? isOriginalTrackName(trackName);
+  const dsp = isOriginal ? getFlatOriginalTrackDSP() : getDubbingSpeechPresetDSP();
+
+  return {
+    id,
+    name: trackName,
+    volumeDb: 0.0,
+    pan: 0.0,
+    solo: false,
+    mute: false,
+    color: chosenColor,
+    isOriginalAudio: isOriginal,
+    clips: [],
+    ...dsp,
     vstPlugins: [],
     peakL: 0,
     peakR: 0
@@ -312,17 +412,27 @@ export function createNewTrack(id: number, name?: string, color?: string): Track
 }
 
 export function populateTrackDSPDefaults(track: Partial<TrackState> & { id: number; name: string }): TrackState {
-  const d = createNewTrack(track.id, track.name, track.color);
+  const isOriginal = track.isOriginalAudio ?? isOriginalTrackName(track.name);
+  const d = createNewTrack(track.id, track.name, track.color, isOriginal);
+
+  // Для дорожек дубляжа гарантируем активный пресет «Дубляж / Речь» по умолчанию
+  const baseEq = isOriginal ? d.eq : { ...d.eq, enabled: true };
+  const baseComp = isOriginal ? d.compressor : { ...d.compressor, enabled: true };
+  const baseGate = isOriginal ? d.noiseGate : { ...d.noiseGate, enabled: true };
+  const baseDeEsser = isOriginal ? d.deEsser : { ...d.deEsser, enabled: true };
+  const baseDeClicker = isOriginal ? d.deClicker : { ...d.deClicker, enabled: true };
+
   return {
     ...d,
     ...track,
-    eq: { ...d.eq, ...track.eq },
-    compressor: { ...d.compressor, ...track.compressor },
+    isOriginalAudio: isOriginal,
+    eq: track.eq ? { ...baseEq, ...track.eq } : baseEq,
+    compressor: track.compressor ? { ...baseComp, ...track.compressor } : baseComp,
     autoDucker: { ...d.autoDucker, ...track.autoDucker },
-    deClicker: track.deClicker || d.deClicker,
+    deClicker: track.deClicker ? { ...baseDeClicker, ...track.deClicker } : baseDeClicker,
     dePlosive: track.dePlosive || d.dePlosive,
-    noiseGate: track.noiseGate || d.noiseGate,
-    deEsser: track.deEsser || d.deEsser,
+    noiseGate: track.noiseGate ? { ...baseGate, ...track.noiseGate } : baseGate,
+    deEsser: track.deEsser ? { ...baseDeEsser, ...track.deEsser } : baseDeEsser,
     vstPlugins: track.vstPlugins || d.vstPlugins || []
   } as TrackState;
 }

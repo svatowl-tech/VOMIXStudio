@@ -552,6 +552,8 @@ export class AutoTimingService {
           `[AutoTiming] Дорожка "${track.name}" успешно сегментирована на ${segments.length} реплик (Шум: ${profile.noiseFloorDb} dB, Тихая речь: ${profile.quietestSpeechRmsDb} dB, Порог: ${profile.optimalThresholdDb} dB).`
         );
 
+        const baseOffsetSamples = firstClip.offsetSamples || 0;
+
         return segments.map((seg, idx) => {
           const startFrame = seg.offsetSamples;
           const frameLen = seg.lengthSamples;
@@ -564,7 +566,7 @@ export class AutoTimingService {
           return {
             id: Date.now() + idx + Math.floor(Math.random() * 1000),
             name: `${track.name} [Фраза #${idx + 1}]`,
-            offsetSamples: startFrame,
+            offsetSamples: baseOffsetSamples + startFrame,
             lengthSamples: frameLen,
             gain: 1.0,
             pan: 0,
@@ -604,6 +606,7 @@ export class AutoTimingService {
     const totalFrames = sourceClip.lengthSamples || Math.floor(buffer.length / 2);
     const isStereo = buffer.length >= totalFrames * 1.5;
     const channels = isStereo ? 2 : 1;
+    const baseOffsetSamples = sourceClip.offsetSamples || 0;
 
     let segments = globalNativeDAWBridge.stripSilenceNative(
       buffer,
@@ -614,7 +617,11 @@ export class AutoTimingService {
       sampleRate
     );
 
-    if (!segments || segments.length === 0) {
+    const durationSec = totalFrames / sampleRate;
+
+    // Если C++ вернул 0 или 1 цельный кусок на аудио длиннее 2.5 сек,
+    // используем адаптивный fallback VAD
+    if ((!segments || segments.length <= 1) && durationSec > 2.5) {
       segments = globalNativeDAWBridge.stripSilenceFallback(
         buffer,
         thresholdDb,
@@ -637,7 +644,7 @@ export class AutoTimingService {
       return {
         id: Date.now() + idx + Math.floor(Math.random() * 1000),
         name: `${track.name} [Фраза #${idx + 1}]`,
-        offsetSamples: startFrame,
+        offsetSamples: baseOffsetSamples + startFrame,
         lengthSamples: frameLen,
         gain: 1.0,
         pan: 0,
@@ -665,6 +672,8 @@ export class AutoTimingService {
    * 1. Сопоставление актёров и дорожек.
    * 2. Выстраивание начала каждой фразы по началу субтитра.
    * 3. Проверка и устранение коллизий (с сохранением сценарных перекрытий).
+   * 4. Если субтитры отсутствуют — выполняет адаптивную нарезку тишины и каскадное
+   *    разведение перекрытий между дорожками дублеров!
    */
   public runAutoTimingPipeline(
     tracks: TrackState[],
@@ -680,15 +689,95 @@ export class AutoTimingService {
       clips: [...toSafeArray<ClipConfig>(t.clips)]
     }));
 
+    // ЕСЛИ СУБТИТРЫ НЕ ЗАГРУЖЕНЫ:
+    // Автоматически нарезаем все дорожки на фразы (VAD Strip Silence)
+    // и каскадно разводим наезды между дорожками дикторов!
     if (safeSubtitles.length === 0) {
+      logs.push('[AutoTiming] Субтитры не загружены: запуск адаптивного разделения фраз и разведения коллизий между дорожками...');
+      
+      let totalSlicedPhrases = 0;
+      workingTracks = workingTracks.map((t) => {
+        if (t.isOriginalAudio || /оригинал|original|видео|video/i.test(t.name)) {
+          return t;
+        }
+        const res = this.stripSilenceAdaptiveFromTrack(t, sampleRate);
+        totalSlicedPhrases += res.phraseCount;
+        return res.updatedTrack;
+      });
+
+      // Каскадный ресолвер коллизий между всеми фразами всех дорожек дубляжа
+      interface DubberPhrase {
+        trackId: number;
+        clip: ClipConfig;
+        startSec: number;
+        endSec: number;
+        durationSec: number;
+      }
+
+      const allPhrases: DubberPhrase[] = [];
+      workingTracks.forEach((t) => {
+        if (t.isOriginalAudio || /оригинал|original|видео|video/i.test(t.name)) return;
+        toSafeArray(t.clips).forEach((c) => {
+          const startSec = (c.offsetSamples || 0) / sampleRate;
+          const durSec = (c.lengthSamples || 0) / sampleRate;
+          allPhrases.push({
+            trackId: t.id,
+            clip: c,
+            startSec,
+            endSec: startSec + durSec,
+            durationSec: durSec
+          });
+        });
+      });
+
+      allPhrases.sort((a, b) => a.startSec - b.startSec);
+      let resolvedCount = 0;
+
+      for (let pass = 0; pass < 10; pass++) {
+        let changed = false;
+        for (let i = 0; i < allPhrases.length; i++) {
+          for (let j = i + 1; j < allPhrases.length; j++) {
+            const pA = allPhrases[i];
+            const pB = allPhrases[j];
+
+            if (pB.startSec >= pA.endSec + minSeparationSec) {
+              break;
+            }
+
+            // Наезд между репликами: сдвигаем pB вперед
+            const requiredStart = pA.endSec + minSeparationSec;
+            if (pB.startSec < requiredStart) {
+              pB.startSec = Number(requiredStart.toFixed(3));
+              pB.endSec = Number((pB.startSec + pB.durationSec).toFixed(3));
+              pB.clip.offsetSamples = Math.round(pB.startSec * sampleRate);
+              resolvedCount++;
+              changed = true;
+            }
+          }
+        }
+        if (!changed) break;
+        allPhrases.sort((a, b) => a.startSec - b.startSec);
+      }
+
+      // Применяем смещения клипов обратно к дорожкам
+      workingTracks = workingTracks.map((t) => {
+        const trackClips = allPhrases.filter((p) => p.trackId === t.id).map((p) => p.clip);
+        if (trackClips.length > 0) {
+          return { ...t, clips: trackClips };
+        }
+        return t;
+      });
+
+      logs.push(`[AutoTiming] Успешно нарезано ${totalSlicedPhrases} фраз, устранено ${resolvedCount} наездов между репликами.`);
+
       return {
         updatedTracks: workingTracks,
         actorMappings: [],
-        totalPhrasesAligned: 0,
-        resolvedCollisionsCount: 0,
+        totalPhrasesAligned: totalSlicedPhrases,
+        resolvedCollisionsCount: resolvedCount,
         preservedScriptOverlapsCount: 0,
         alignmentDetails: [],
-        logs: ['[AutoTiming] Предупреждение: Субтитры не загружены. Тайминг не изменён.']
+        logs
       };
     }
 
