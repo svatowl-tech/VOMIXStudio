@@ -782,6 +782,10 @@ export class MVPPresetManager {
     });
   }
 
+  public getSubPresetsForCategory(category: MVPPresetCategory): MVPPreset[] {
+    return this.getPresetsByCategory(category);
+  }
+
   public getActiveCategory(): MVPPresetCategory {
     return this.activeCategory;
   }
