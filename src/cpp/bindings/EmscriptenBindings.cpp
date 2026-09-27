@@ -759,11 +759,21 @@ EMSCRIPTEN_BINDINGS(daw_core_module) {
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+#include <emscripten/heap.h>
 #else
 #define EMSCRIPTEN_KEEPALIVE
 #endif
 
 extern "C" {
+
+EMSCRIPTEN_KEEPALIVE
+size_t getAvailableWasmMemory() {
+#ifdef __EMSCRIPTEN__
+    return emscripten_get_heap_size();
+#else
+    return 2147483648ULL;
+#endif
+}
 
 EMSCRIPTEN_KEEPALIVE
 uintptr_t createMixerInstance(float sampleRate) {
