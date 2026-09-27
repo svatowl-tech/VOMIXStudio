@@ -933,16 +933,17 @@ export function autoAlignTrackClips(
   sampleRate: number = 48000
 ): ClipConfig[] {
   if (!clips || clips.length === 0) return [];
-  const minGapSamples = Math.round(sampleRate * 0.08); // 80 мс / 3840 сэмплов
+  const minGapSamples = Math.round(sampleRate * 0.08); // 80 мс / 3840 фреймов при 48 кГц
+  const maxDriftToleranceFrames = Math.round(sampleRate * 0.5); // ±0.5с (24 000 фреймов)
   const safeSubtitles = (subtitles || []).slice().sort((a, b) => a.startSec - b.startSec);
 
   // Сортируем клипы по времени начала
   const sortedClips = clips
     .map((c) => {
-      const isStereo = c.buffer ? c.buffer.length >= c.lengthSamples * 2 : false;
+      const isStereo = c.buffer ? c.buffer.length >= (c.lengthSamples || 1) * 2 : false;
       const channels = isStereo ? 2 : 1;
-      const maxFrames = c.buffer ? Math.floor(c.buffer.length / channels) : (c.lengthSamples || 0);
-      const validLen = typeof c.lengthSamples === 'number' && c.lengthSamples > 0 ? Math.min(maxFrames, c.lengthSamples) : maxFrames;
+      const maxBufferFrames = c.buffer ? Math.floor(c.buffer.length / channels) : (c.lengthSamples || 0);
+      const validLen = typeof c.lengthSamples === 'number' && c.lengthSamples > 0 ? Math.min(maxBufferFrames, c.lengthSamples) : maxBufferFrames;
 
       return {
         ...c,
@@ -969,18 +970,25 @@ export function autoAlignTrackClips(
     const matchedCue = safeSubtitles[i] || safeSubtitles.find((sc) => Math.abs(sc.startSec * sampleRate - offset) < sampleRate * 2.0);
 
     if (matchedCue) {
-      const cueStartSamples = Math.max(0, Math.round(matchedCue.startSec * sampleRate));
-      const cueDurationSamples = Math.max(1, Math.round((matchedCue.endSec - matchedCue.startSec) * sampleRate));
+      const cueStartFrames = Math.max(0, Math.round(matchedCue.startSec * sampleRate));
+      const cueDurationFrames = Math.max(1, Math.round((matchedCue.endSec - matchedCue.startSec) * sampleRate));
 
-      offset = cueStartSamples;
-      const stretchRatio = cueDurationSamples / baseLength;
+      // Якорная выравнивающая привязка по субтитру:
+      // Если смещение фраз отличается от якоря более чем на ±0.5с (24 000 фреймов), принудительно возвращаем якорь
+      if (Math.abs(offset - cueStartFrames) > maxDriftToleranceFrames) {
+        offset = cueStartFrames;
+      } else {
+        offset = cueStartFrames; // Строгое якорное приваждение
+      }
+
+      const stretchRatio = cueDurationFrames / baseLength;
 
       // 2. Лимиты WSOLA Time-Stretch:
       // Если фраза актера длиннее оригинальной паузы более чем на 25%, не растягивать её до бесконечности,
       // а сохранять коэффициент 1.0 с предупреждением в log.
-      if (baseLength > cueDurationSamples * 1.25) {
+      if (baseLength > cueDurationFrames * 1.25) {
         console.warn(
-          `[AutoTiming WSOLA] Фраза «${clip.name}» (длина ${(baseLength / sampleRate).toFixed(2)}с) длиннее оригинального субтитра #${matchedCue.index} (${(cueDurationSamples / sampleRate).toFixed(2)}с) более чем на 25%. Сохранение коэффициента 1.0x.`
+          `[AutoTiming WSOLA] Фраза «${clip.name}» (длина ${(baseLength / sampleRate).toFixed(2)}с) длиннее оригинального субтитра #${matchedCue.index} (${(cueDurationFrames / sampleRate).toFixed(2)}с) более чем на 25%. Сохранение коэффициента 1.0x.`
         );
         targetLength = baseLength;
       } else {
@@ -1010,7 +1018,7 @@ export function autoAlignTrackClips(
       const nextClip = sortedClips[i + 1];
       const nextOffset = Math.max(0, nextClip.offsetSamples);
       if (offset + targetLength + minGapSamples > nextOffset) {
-        targetLength = Math.max(100, nextOffset - minGapSamples - offset);
+        targetLength = Math.max(minGapSamples, nextOffset - minGapSamples - offset);
       }
     }
 

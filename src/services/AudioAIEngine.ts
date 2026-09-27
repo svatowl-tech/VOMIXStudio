@@ -5,7 +5,8 @@
  * Клиентский пайплайн детекции речи и сопоставления сценариев:
  * 1. Silero VAD (ONNX Runtime Web / C++ DSP Energy Analyzer) - детекция голоса и пауз.
  * 2. C++ Fast Levenshtein String Similarity - лексическое сравнение реплик.
- * 3. Smart Subtitle Alignment - сопоставление распознанной речи со сценарием (SRT/ASS).
+ * 3. Anchor-Based Smart Subtitle Alignment - якорное сопоставление речи со сценарием
+ *    с жестким допуском дрейфа ±0.5с (24 000 фреймов при 48 кГц) для предотвращения эффекта домино.
  * ============================================================================
  */
 
@@ -18,8 +19,8 @@ import { globalNativeDAWBridge } from './NativeDAWBridge';
 
 export interface SpeechSegment {
   id: number;
-  startSample: number;
-  endSample: number;
+  startSample: number; // В ФРЕЙМАХ целевой частоты дискретизации (48000)
+  endSample: number;   // В ФРЕЙМАХ целевой частоты дискретизации (48000)
   startSec: number;
   endSec: number;
   durationSec: number;
@@ -154,7 +155,7 @@ export class AudioAIEngine {
 
   /**
    * Потоковая детекция активности голоса (Voice Activity Detection)
-   * Все математические расчеты формант, энергии и ZCR выполняются в C++ ядре.
+   * Все математические расчеты выполняются в C++ ядре в рамках фреймов.
    */
   public async processVAD(
     audioBuffer: Float32Array,
@@ -197,8 +198,8 @@ export class AudioAIEngine {
 
         return nativeSegments.map((seg, idx) => ({
           id: idx + 1,
-          startSample: Math.floor((seg.offsetSamples / 16000) * inputSampleRate),
-          endSample: Math.floor(((seg.offsetSamples + seg.lengthSamples) / 16000) * inputSampleRate),
+          startSample: Math.max(0, Math.floor((seg.offsetSamples / 16000) * inputSampleRate)),
+          endSample: Math.max(1, Math.floor(((seg.offsetSamples + seg.lengthSamples) / 16000) * inputSampleRate)),
           startSec: seg.offsetSamples / 16000,
           endSec: (seg.offsetSamples + seg.lengthSamples) / 16000,
           durationSec: seg.durationSec,
@@ -256,7 +257,6 @@ export class AudioAIEngine {
           speechProb = this.calculateEnergyVoiceProbability(chunk);
         }
       } else {
-        // Расчет энергии и вероятности голоса ИСКЛЮЧИТЕЛЬНО на C++
         speechProb = this.calculateEnergyVoiceProbability(chunk);
       }
 
@@ -289,8 +289,8 @@ export class AudioAIEngine {
 
               segments.push({
                 id: segments.length + 1,
-                startSample: Math.floor((speechStartSample / 16000) * inputSampleRate),
-                endSample: Math.floor((speechEndSample / 16000) * inputSampleRate),
+                startSample: Math.max(0, Math.floor((speechStartSample / 16000) * inputSampleRate)),
+                endSample: Math.max(1, Math.floor((speechEndSample / 16000) * inputSampleRate)),
                 startSec,
                 endSec,
                 durationSec: endSec - startSec,
@@ -316,8 +316,8 @@ export class AudioAIEngine {
         const endSec = speechEndSample / 16000;
         segments.push({
           id: segments.length + 1,
-          startSample: Math.floor((speechStartSample / 16000) * inputSampleRate),
-          endSample: Math.floor((speechEndSample / 16000) * inputSampleRate),
+          startSample: Math.max(0, Math.floor((speechStartSample / 16000) * inputSampleRate)),
+          endSample: Math.max(1, Math.floor((speechEndSample / 16000) * inputSampleRate)),
           startSec,
           endSec,
           durationSec: endSec - startSec,
@@ -331,7 +331,6 @@ export class AudioAIEngine {
 
   /**
    * Вызов C++ SIMD128 детектора спектральной энергии и ZCR (SpeechEnergyDetector)
-   * Полностью исключает математические расчеты на JS.
    */
   private calculateEnergyVoiceProbability(chunk: Float32Array): number {
     const stats = globalNativeDAWBridge.calculateFrameEnergyStats(chunk);
@@ -390,8 +389,8 @@ export class AudioAIEngine {
       if (rawText) {
         lines.push({
           index: lineIndex,
-          startSec,
-          endSec,
+          startSec: Math.max(0, startSec),
+          endSec: Math.max(0, endSec),
           text: rawText
         });
       }
@@ -417,8 +416,8 @@ export class AudioAIEngine {
       if (isEventsSection && line.startsWith('Dialogue:')) {
         const parts = line.substring(9).split(',');
         if (parts.length >= 9) {
-          const startSec = this.assTimeToSeconds(parts[1].trim());
-          const endSec = this.assTimeToSeconds(parts[2].trim());
+          const startSec = Math.max(0, this.assTimeToSeconds(parts[1].trim()));
+          const endSec = Math.max(0, this.assTimeToSeconds(parts[2].trim()));
           const speaker = parts[4].trim() || undefined;
           const text = parts.slice(9).join(',').replace(/\{[^}]*\}/g, '').trim();
 
@@ -465,12 +464,13 @@ export class AudioAIEngine {
   }
 
   // ==========================================================================
-  // 4. СМАРТ-ВЫРАВНИВАНИЕ (SMART ALIGNMENT ALGORITHM)
+  // 4. СМАРТ-ВЫРАВНИВАНИЕ (ANCHOR-BASED ALIGNMENT ALGORITHM)
   // ==========================================================================
 
   /**
    * Смарт-выравнивание распознанных сегментов речи (ASR) с загруженным сценарием (SRT/ASS).
-   * Сравнение строк и расчет схожести выполняется ИСКЛЮЧИТЕЛЬНО на C++ через fastStringSimilarity().
+   * Абсолютный якорь: Каждая фраза сценария привязана к scriptLine.startSec.
+   * Допуск локального дрейфа VAD: Максимум ±0.5 сек (24 000 фреймов при 48 кГц).
    */
   public alignSpeechWithScript(
     scriptLines: SubtitleLine[],
@@ -488,8 +488,8 @@ export class AudioAIEngine {
         lineIndex: line.index,
         scriptText: line.text,
         recognizedText: '',
-        expectedStartSec: line.startSec,
-        expectedEndSec: line.endSec,
+        expectedStartSec: Math.max(0, line.startSec),
+        expectedEndSec: Math.max(0, line.endSec),
         actualStartSec: 0,
         actualEndSec: 0,
         timeDriftSec: 0,
@@ -500,7 +500,8 @@ export class AudioAIEngine {
 
     for (let i = 0; i < scriptLines.length; i++) {
       const scriptLine = scriptLines[i];
-      const targetMidTime = (scriptLine.startSec + scriptLine.endSec) / 2;
+      const anchorStartSec = Math.max(0, scriptLine.startSec);
+      const targetMidTime = (anchorStartSec + scriptLine.endSec) / 2;
 
       let bestSegment: SpeechSegment | null = null;
       let minTimeDiff = Infinity;
@@ -518,7 +519,7 @@ export class AudioAIEngine {
       let recText = '';
       if (recognizedPhrases && recognizedPhrases.length > 0) {
         const matchedAsr = recognizedPhrases.find(
-          (p) => Math.abs(p.startSec - (bestSegment ? bestSegment.startSec : scriptLine.startSec)) < 2.0
+          (p) => Math.abs(p.startSec - (bestSegment ? bestSegment.startSec : anchorStartSec)) < 2.0
         );
         if (matchedAsr) recText = matchedAsr.text;
       }
@@ -528,31 +529,30 @@ export class AudioAIEngine {
       }
 
       if (bestSegment && minTimeDiff < 5.0) {
-        let timeDrift = bestSegment.startSec - scriptLine.startSec;
+        let rawDrift = bestSegment.startSec - anchorStartSec;
         let actStart = bestSegment.startSec;
         let actEnd = bestSegment.endSec;
-        let status: 'matched' | 'drifted' = Math.abs(timeDrift) > 0.6 ? 'drifted' : 'matched';
+        let status: 'matched' | 'drifted' = Math.abs(rawDrift) > 0.3 ? 'drifted' : 'matched';
 
-        // Ограничение максимального сдвига фразы (time drift): реплика не может смещаться более чем на ±0.75 сек
-        if (Math.abs(timeDrift) > 0.75) {
-          actStart = scriptLine.startSec;
+        // Якорный лимит дрейфа: реплика актера не может смещаться от якоря субтитра более чем на ±0.5 сек (24 000 фреймов)
+        if (Math.abs(rawDrift) > 0.5) {
+          actStart = anchorStartSec;
           actEnd = scriptLine.endSec;
-          timeDrift = 0;
+          rawDrift = 0;
           status = 'matched';
         }
 
-        // Расчет схожести строк выполняется СТРОГО через C++ ядро
         const similarity = recText ? this.calculateStringSimilarity(scriptLine.text, recText) : 0.85;
 
         alignedResults.push({
           lineIndex: scriptLine.index,
           scriptText: scriptLine.text,
           recognizedText: recText,
-          expectedStartSec: scriptLine.startSec,
+          expectedStartSec: anchorStartSec,
           expectedEndSec: scriptLine.endSec,
           actualStartSec: actStart,
           actualEndSec: actEnd,
-          timeDriftSec: timeDrift,
+          timeDriftSec: rawDrift,
           similarityScore: similarity,
           status
         });
@@ -561,7 +561,7 @@ export class AudioAIEngine {
           lineIndex: scriptLine.index,
           scriptText: scriptLine.text,
           recognizedText: '',
-          expectedStartSec: scriptLine.startSec,
+          expectedStartSec: anchorStartSec,
           expectedEndSec: scriptLine.endSec,
           actualStartSec: 0,
           actualEndSec: 0,

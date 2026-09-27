@@ -11,7 +11,10 @@
  * 2. ВСЯ математическая обработка звука (кубический ресэмплинг Catmull-Rom в 48 000 Гц,
  *    расчет True Peak, EBU R128 RMS, цифровой гейн и выравнивание уровней громкости)
  *    выполняется ИСКЛЮЧИТЕЛЬНО на C++ в WebAssembly с аппаратным SIMD128.
- * 3. При недоступности C++ WebAssembly ядра выбрасывается фатальная ошибка.
+ * 3. Жесткая стандартизация Frame vs Sample (Stereo Stride):
+ *    - 1 фрейм стерео = 2 сэмпла (L+R).
+ *    - totalFrames = Math.floor(buffer.length / 2).
+ *    - Все длины и смещения приводятся к фреймам для предотвращения 2x дрейфа.
  * ============================================================================
  */
 
@@ -73,6 +76,7 @@ export class MediaNormalizer {
    * - Передает сырой Float32Array PCM поток в C++ WebAssembly.
    * - Векторный ресэмплинг Catmull-Rom в 48 000 Гц выполняется СТРОГО через
    *   globalNativeDAWBridge.resampleCatmullRom().
+   * - Возвращает interleaved стерео буфер с точным кратным шагом stride = 2.
    */
   public static async unifyAudioBuffer(
     fileOrBlob: File | Blob,
@@ -159,12 +163,17 @@ export class MediaNormalizer {
         inSampleRate,
         2
       );
-      
-      // Подсказка GC: очищаем промежуточные буферы ПОСЛЕ завершения работы C++ ядра
+
+      // Очистка промежуточных ссылок
       rawInputPcm = null;
       decodedBuffer = null;
       (arrayBuffer as any) = null;
-      
+
+      // Гарантируем кратность длины выходного массива размеру стерео фрейма (2 float)
+      if (resampled.length % 2 !== 0) {
+        return resampled.subarray(0, resampled.length - 1);
+      }
+
       return resampled;
     } catch (err: any) {
       const msg = `[C++ MediaNormalizer] Ошибка обработки аудио при ресэмплинге в C++ ядре: ${err?.message || err}`;
@@ -182,7 +191,6 @@ export class MediaNormalizer {
     videoFile: File,
     targetSr: number = MediaNormalizer.TARGET_SAMPLE_RATE
   ): Promise<Float32Array> {
-    // Автоматически ожидаем инициализацию C++ WebAssembly ядра
     await globalNativeDAWBridge.initWasmEngine().catch((err) => {
       systemLogger.warn('MediaNormalizer', 'Предупреждение при прогреве C++ WebAssembly:', err);
     });
@@ -276,7 +284,6 @@ export class MediaNormalizer {
     const numFrames = Math.floor(buffer.length / channels);
 
     try {
-      // Вызов C++ аналитики через WebAssembly мост
       const stats = globalNativeDAWBridge.calculateLoudnessStats(
         buffer,
         channels,
@@ -306,8 +313,6 @@ export class MediaNormalizer {
    * ==========================================================================
    * 4. АВТОМАТИЧЕСКОЕ ВЫРАВНИВАНИЕ ГРОМКОСТИ ДОРОЖЕК (Auto-Match Loudness)
    * ==========================================================================
-   * Анализ громкости и выравнивание по стандарту EBU R128 с Peak Guard защитой
-   * выполняется ИСКЛЮЧИТЕЛЬНО на C++ в WebAssembly ядре.
    */
   public static autoMatchTrackVolumes(
     tracks: TrackState[],
@@ -337,8 +342,6 @@ export class MediaNormalizer {
 
     const factor = Math.pow(10, gainDb / 20);
 
-    // Если буфер огромный (более 1 млн сэмплов), применяем коэффициент прямо в JS
-    // для избежания тройного копирования в кучу WASM и обратно, что приводит к "Array buffer allocation failed"
     if (buffer.length > 1000000) {
       if (inPlace) {
         for (let i = 0; i < buffer.length; i++) {
@@ -359,21 +362,6 @@ export class MediaNormalizer {
           }
           return buffer;
         }
-      }
-    }
-
-    if (!globalNativeDAWBridge.isReady) {
-      if (inPlace) {
-        for (let i = 0; i < buffer.length; i++) {
-          buffer[i] *= factor;
-        }
-        return buffer;
-      } else {
-        const result = new Float32Array(buffer.length);
-        for (let i = 0; i < buffer.length; i++) {
-          result[i] = buffer[i] * factor;
-        }
-        return result;
       }
     }
 

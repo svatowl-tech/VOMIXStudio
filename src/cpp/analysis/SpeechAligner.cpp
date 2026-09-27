@@ -106,7 +106,6 @@ size_t FastLevenshtein::distanceCodepoints(const std::vector<uint32_t>& v1, cons
     if (len1 == 0) return len2;
     if (len2 == 0) return len1;
 
-    // Гарантируем, что len2 <= len1 для минимального размера вектора dp
     const std::vector<uint32_t>& s1 = (len1 >= len2) ? v1 : v2;
     const std::vector<uint32_t>& s2 = (len1 >= len2) ? v2 : v1;
     const size_t m = s1.size();
@@ -171,7 +170,6 @@ FrameEnergyStats SpeechEnergyDetector::calculateFrameStats(const float* samples,
     size_t zcrCount = 0;
 
 #if USE_WASM_SIMD
-    // Векторизованный подсчет суммы квадратов и поиск пика через SIMD128
     v128_t sumVec = wasm_f32x4_splat(0.0f);
     v128_t maxVec = wasm_f32x4_splat(0.0f);
 
@@ -191,7 +189,6 @@ FrameEnergyStats SpeechEnergyDetector::calculateFrameStats(const float* samples,
     sumSquares = sumArr[0] + sumArr[1] + sumArr[2] + sumArr[3];
     peakVal = std::max({maxArr[0], maxArr[1], maxArr[2], maxArr[3]});
 
-    // Обработка остаточных сэмплов
     for (size_t i = simdLimit; i < length; ++i) {
         float val = samples[i];
         sumSquares += val * val;
@@ -205,7 +202,6 @@ FrameEnergyStats SpeechEnergyDetector::calculateFrameStats(const float* samples,
     }
 #endif
 
-    // Подсчет Zero-Crossing Rate (ZCR) - пересечений нулевой оси
     for (size_t i = 1; i < length; ++i) {
         float prev = samples[i - 1];
         float curr = samples[i];
@@ -218,7 +214,6 @@ FrameEnergyStats SpeechEnergyDetector::calculateFrameStats(const float* samples,
     stats.zcrRatio = static_cast<float>(zcrCount) / static_cast<float>(length);
     stats.peak = peakVal;
 
-    // Речевые характеристики: RMS выше шумового порога и ZCR в речевом диапазоне (4%..45%)
     if (stats.rms > 0.015f && stats.zcrRatio > 0.04f && stats.zcrRatio < 0.45f) {
         stats.voiceProbability = std::min(0.98f, 0.5f + stats.rms * 15.0f);
     } else {
@@ -242,7 +237,6 @@ std::vector<SpeechSegment> SpeechEnergyDetector::detectSegments(
     if (!audio || totalSamples == 0) return segments;
 
     const float actualSr = (sampleRate > 1000.0f) ? sampleRate : 16000.0f;
-    // Окно анализа ~32 мс (512 сэмплов при 16 кГц, 1536 при 48 кГц)
     const size_t windowSize = std::max(static_cast<size_t>(64), static_cast<size_t>(actualSr * 0.032f));
     const size_t numChunks = totalSamples / windowSize;
 
@@ -281,7 +275,6 @@ std::vector<SpeechSegment> SpeechEnergyDetector::detectSegments(
                     silenceStartSample = chunkOffset;
                 }
 
-                // Закрытие сегмента при превышении порога паузы
                 if (chunkOffset - silenceStartSample >= minSilenceSamples) {
                     size_t speechEndSample = std::min(totalSamples, silenceStartSample + speechPadSamples);
                     size_t durationSamples = (speechEndSample > speechStartSample) ? (speechEndSample - speechStartSample) : 0;
@@ -311,7 +304,6 @@ std::vector<SpeechSegment> SpeechEnergyDetector::detectSegments(
         }
     }
 
-    // Проверка последнего незакрытого сегмента
     if (isSpeaking) {
         size_t speechEndSample = totalSamples;
         size_t durationSamples = (speechEndSample > speechStartSample) ? (speechEndSample - speechStartSample) : 0;
@@ -337,7 +329,7 @@ std::vector<SpeechSegment> SpeechEnergyDetector::detectSegments(
 }
 
 // ============================================================================
-// 3. SmartAligner - Реализация
+// 3. SmartAligner - Реализация с Anchor-Based Align (ограничение дрейфа ±0.5с)
 // ============================================================================
 
 std::vector<AlignedPhrase> SmartAligner::align(
@@ -352,7 +344,6 @@ std::vector<AlignedPhrase> SmartAligner::align(
         return alignedResults;
     }
 
-    // Если нет ни речевых сегментов, ни транскрипции - все строки маркируются как 'missing'
     if (speechSegments.empty() && transcriptionSegments.empty()) {
         for (const auto& line : scriptLines) {
             AlignedPhrase phrase;
@@ -371,11 +362,10 @@ std::vector<AlignedPhrase> SmartAligner::align(
         return alignedResults;
     }
 
-    // Выравнивание строк сценария по времени и тексту
     for (const auto& scriptLine : scriptLines) {
         const float targetMidTime = (scriptLine.startSec + scriptLine.endSec) * 0.5f;
 
-        // 1. Поиск лучшего совпадения среди распознанных фраз ASR (по тексту и времени)
+        // 1. Поиск лучшего совпадения среди распознанных фраз ASR
         const TranscriptionSegment* bestAsr = nullptr;
         float bestTextScore = -1.0f;
         float minAsrTimeDiff = 1e9f;
@@ -386,7 +376,6 @@ std::vector<AlignedPhrase> SmartAligner::align(
 
             if (timeDiff < 8.0f) {
                 float sim = FastLevenshtein::similarity(scriptLine.text, asr.text);
-                // Комбинированный скор: текст (70%) + временная близость (30%)
                 float combinedScore = sim * 0.7f + std::max(0.0f, (8.0f - timeDiff) / 8.0f) * 0.3f;
 
                 if (combinedScore > bestTextScore) {
@@ -397,7 +386,7 @@ std::vector<AlignedPhrase> SmartAligner::align(
             }
         }
 
-        // 2. Поиск ближайшего VAD сегмента речи (по временной оси)
+        // 2. Поиск ближайшего VAD сегмента речи
         const SpeechSegment* bestVad = nullptr;
         float minVadTimeDiff = 1e9f;
 
@@ -411,7 +400,7 @@ std::vector<AlignedPhrase> SmartAligner::align(
             }
         }
 
-        // 3. Формирование сопоставленной реплики
+        // 3. Формирование сопоставленной реплики с привязкой к якорю (Anchor-based)
         AlignedPhrase result;
         result.lineIndex = scriptLine.index;
         result.scriptText = scriptLine.text;
@@ -420,20 +409,36 @@ std::vector<AlignedPhrase> SmartAligner::align(
 
         if (bestAsr && bestTextScore > 0.35f && minAsrTimeDiff < 6.0f) {
             result.recognizedText = bestAsr->text;
-            result.actualStartSec = bestAsr->startSec;
-            result.actualEndSec = bestAsr->endSec;
-            result.timeDriftSec = bestAsr->startSec - scriptLine.startSec;
+            float rawDrift = bestAsr->startSec - scriptLine.startSec;
+            if (std::abs(rawDrift) > 0.5f) {
+                result.actualStartSec = scriptLine.startSec;
+                result.actualEndSec = scriptLine.endSec;
+                result.timeDriftSec = 0.0f;
+                result.status = "matched";
+            } else {
+                result.actualStartSec = bestAsr->startSec;
+                result.actualEndSec = bestAsr->endSec;
+                result.timeDriftSec = rawDrift;
+                result.status = (std::abs(rawDrift) > 0.3f) ? "drifted" : "matched";
+            }
             result.similarityScore = FastLevenshtein::similarity(scriptLine.text, bestAsr->text);
-            result.status = (std::abs(result.timeDriftSec) > 0.6f) ? "drifted" : "matched";
         } else if (bestVad && minVadTimeDiff < 5.0f) {
             std::ostringstream ss;
             ss << "[Голосовой сегмент " << std::fixed << std::setprecision(1) << bestVad->durationSec << "с]";
             result.recognizedText = ss.str();
-            result.actualStartSec = bestVad->startSec;
-            result.actualEndSec = bestVad->endSec;
-            result.timeDriftSec = bestVad->startSec - scriptLine.startSec;
+            float rawDrift = bestVad->startSec - scriptLine.startSec;
+            if (std::abs(rawDrift) > 0.5f) {
+                result.actualStartSec = scriptLine.startSec;
+                result.actualEndSec = scriptLine.endSec;
+                result.timeDriftSec = 0.0f;
+                result.status = "matched";
+            } else {
+                result.actualStartSec = bestVad->startSec;
+                result.actualEndSec = bestVad->endSec;
+                result.timeDriftSec = rawDrift;
+                result.status = (std::abs(rawDrift) > 0.3f) ? "drifted" : "matched";
+            }
             result.similarityScore = 0.85f;
-            result.status = (std::abs(result.timeDriftSec) > 0.6f) ? "drifted" : "matched";
         } else {
             result.recognizedText = "";
             result.actualStartSec = 0.0f;

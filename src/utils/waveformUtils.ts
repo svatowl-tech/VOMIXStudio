@@ -4,6 +4,10 @@
  * ============================================================================
  * Утилиты для быстрого расчета пиков формы волны (LOD / Min-Max Decimation),
  * форматирования таймкодов SMPTE (HH:MM:SS:FF) и адаптивной шкалы времени.
+ *
+ * Стандартизация Frame vs Sample (Stereo Stride):
+ * - stride = isStereo ? 2 : 1
+ * - totalFrames = Math.floor(buffer.length / stride)
  * ============================================================================
  */
 
@@ -18,6 +22,11 @@ const peakCache = new WeakMap<Float32Array, Map<string, WaveformPeaks>>();
 /**
  * Быстрое извлечение экстремумов (Min/Max Peaks) с поддержкой стерео-буферов и кэшированием.
  * Использует блочную децимацию для отрисовки за O(pixels).
+ * @param buffer Float32Array PCM аудиопоток
+ * @param targetPixels Ширина контейнера отрисовки в пикселях
+ * @param startSample Смещение в ФРЕЙМАХ
+ * @param lengthSamples Длина диапазона в ФРЕЙМАХ
+ * @param isStereo Флаг 2-канального стерео сигнала (stride = 2)
  */
 export function extractPeaks(
   buffer: Float32Array,
@@ -31,9 +40,10 @@ export function extractPeaks(
   }
 
   const stride = isStereo ? 2 : 1;
-  const maxAvailableFrames = Math.floor((buffer.length - startSample * stride) / stride);
+  const safeStartFrame = Math.max(0, Math.floor(startSample));
+  const maxAvailableFrames = Math.max(0, Math.floor((buffer.length - safeStartFrame * stride) / stride));
   const totalFrames = lengthSamples !== undefined
-    ? Math.min(lengthSamples, maxAvailableFrames)
+    ? Math.min(Math.max(0, Math.floor(lengthSamples)), maxAvailableFrames)
     : maxAvailableFrames;
 
   if (totalFrames <= 0) {
@@ -43,7 +53,7 @@ export function extractPeaks(
   const numBuckets = Math.max(1, Math.min(targetPixels, totalFrames));
   
   // Проверяем кэш пиков для данного буфера
-  const cacheKey = `${startSample}_${totalFrames}_${numBuckets}`;
+  const cacheKey = `${safeStartFrame}_${totalFrames}_${numBuckets}_${isStereo}`;
   let bufferMap = peakCache.get(buffer);
   if (!bufferMap) {
     bufferMap = new Map();
@@ -59,13 +69,12 @@ export function extractPeaks(
   const maxPeaks = new Float32Array(numBuckets);
 
   for (let px = 0; px < numBuckets; px++) {
-    const bucketStartFrame = Math.floor(startSample + px * framesPerPixel);
-    const bucketEndFrame = Math.floor(startSample + (px + 1) * framesPerPixel);
+    const bucketStartFrame = Math.floor(safeStartFrame + px * framesPerPixel);
+    const bucketEndFrame = Math.floor(safeStartFrame + (px + 1) * framesPerPixel);
 
     let min = 1.0;
     let max = -1.0;
 
-    // Быстрый поиск экстремумов: максимум 64 точки на пиксель
     const bucketFrameCount = Math.max(1, bucketEndFrame - bucketStartFrame);
     const stepFrames = Math.max(1, Math.floor(bucketFrameCount / 64));
 
@@ -92,7 +101,6 @@ export function extractPeaks(
   }
 
   const result: WaveformPeaks = { minPeaks, maxPeaks };
-  // Ограничиваем размер кэша
   if (bufferMap.size > 200) {
     bufferMap.clear();
   }
