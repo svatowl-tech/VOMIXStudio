@@ -87,6 +87,9 @@ export interface MVPPreset {
 
   // Нодовая структура роутинга рендера и сведения (Render Pipeline Graph)
   renderPipelineGraph?: RenderPipelineGraph;
+
+  // Дополнительное имя под-пресета (если используется)
+  subPresetName?: string;
 }
 
 const STORAGE_USER_PRESETS_KEY = 'vomix_mvp_pipeline_presets_v2';
