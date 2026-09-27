@@ -1244,7 +1244,7 @@ export class NativeDAWBridge {
     }
 
     if (customDurationSec && customDurationSec > 0) {
-      maxFrames = Math.max(maxFrames, Math.floor(customDurationSec * sampleRate));
+      maxFrames = Math.floor(customDurationSec * sampleRate);
     }
     if (maxFrames === 0) maxFrames = sampleRate * 2;
 

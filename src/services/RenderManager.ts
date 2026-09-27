@@ -9,7 +9,7 @@
  * 3. Экспорт мультитрековых стемов (Dialogues.wav, Music.wav, SFX.wav, Bass.wav).
  * 4. Видео-муксинг и вшивание аудиодорожки через @ffmpeg/ffmpeg WebAssembly.
  * 5. Защита от переполнения памяти и поддержка SharedArrayBuffer / Single-Thread fallback.
- * 6. Локальный вспомогательный метод скачивания Blob (чистый DOM URL.createObjectURL).
+ * 6. Локальный вспомогательный метод скачивания Blob через централизованный BlobUrlRegistry.
  * ============================================================================
  */
 
@@ -25,6 +25,9 @@ import {
 } from './NativeDAWBridge';
 import { systemLogger } from './SystemLogger';
 import { VideoExportParameters, DEFAULT_VIDEO_EXPORT_PARAMS } from './RenderPipelineGraphManager';
+import { BlobUrlRegistry } from '../utils/BlobUrlRegistry';
+
+export { BlobUrlRegistry };
 
 export interface RenderProgressInfo {
   stage: 'idle' | 'rendering_audio' | 'stems' | 'loading_ffmpeg' | 'muxing_video' | 'completed' | 'error';
@@ -69,18 +72,18 @@ export class RenderManager {
   }
 
   /**
-   * Вспомогательный локальный метод для скачивания Blob в браузере (чистый DOM URL.createObjectURL без генерации аудио)
+   * Вспомогательный метод скачивания Blob в браузере с интеграцией BlobUrlRegistry
    */
   public downloadBlob(blob: Blob, filename: string): void {
     try {
-      const url = URL.createObjectURL(blob);
+      const url = BlobUrlRegistry.create(blob);
       const link = document.createElement('a');
       link.href = url;
       link.download = filename;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      setTimeout(() => URL.revokeObjectURL(url), 8000);
+      setTimeout(() => BlobUrlRegistry.revoke(url), 8000);
     } catch (err) {
       systemLogger.error('RenderManager', `Ошибка скачивания файла ${filename}:`, err);
     }
@@ -225,11 +228,6 @@ export class RenderManager {
 
   /**
    * Видео-муксинг и экспорт: вшивание сведенного WAV аудио в видеофайл с гибкой настройкой качества
-   * Поддерживает:
-   * 1. Пресет "Без потери качества" (Direct Stream Copy, -c:v copy).
-   * 2. Перекодирование с контролем битрейта (VBR/CBR/CRF), разрешения (4K, 1080p, 720p), FPS.
-   * 3. Однопроходный (1-Pass) и Двухпроходный (2-Pass) рендеринг.
-   * 4. Настройку битрейта аудио (320k, 256k, 192k) и метаданных дорожек.
    */
   public async muxAudioIntoVideo(
     sourceVideoFile: File,
@@ -359,7 +357,6 @@ export class RenderManager {
       this.addLog(`Запуск FFmpeg: объединение видеопотока, сведенного аудио и оригинальной аудиодорожки в [${tempOutputFile}]...`);
 
       if (!hasTimelineOriginal) {
-        // Подмешивание оригинального фона к голосам
         try {
           this.addLog('Подмешивание оригинального звука видео к сведенным дорожкам дабберов (баланс закадрового озвучания)...');
           await this.ffmpeg.exec([
@@ -395,7 +392,6 @@ export class RenderManager {
           ]);
         }
       } else {
-        // Дорожка 1: сведенный мастер-микс, дорожка 2: чистый оригинал
         await this.ffmpeg.exec([
           '-i', 'input_video.mp4',
           '-i', 'audio_mix.wav',

@@ -542,6 +542,8 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   const rulerCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const playheadRef = useRef<HTMLDivElement | null>(null);
   const minimapPlayheadRef = useRef<HTMLDivElement | null>(null);
+  const minimapCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const minimapViewportRef = useRef<HTMLDivElement | null>(null);
   const timeDisplayRef = useRef<HTMLSpanElement | null>(null);
 
   // Паттерн "Uncontrolled Playhead": хранение точного времени в ref без триггера ре-рендеров React
@@ -570,13 +572,32 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     minimapWidth: 800
   });
 
-  // Отслеживание прокрутки и размера видимой области мультитрека для миникарты
+  // Отслеживание прокрутки и размера видимой области мультитрека для миникарты (без частых setState)
   useEffect(() => {
     const el = timelineScrollRef.current;
     if (!el) return;
 
     const handleScroll = () => {
-      setScrollState({ scrollLeft: el.scrollLeft, clientWidth: el.clientWidth });
+      const sLeft = el.scrollLeft;
+      const cWidth = el.clientWidth;
+
+      setScrollState((prev) => {
+        if (Math.abs(prev.scrollLeft - sLeft) < 10 && Math.abs(prev.clientWidth - cWidth) < 10) {
+          return prev;
+        }
+        return { scrollLeft: sLeft, clientWidth: cWidth };
+      });
+
+      // Прямое обновление стилей рамки вьюпорта на миникарте без React re-render
+      if (minimapViewportRef.current && effectiveDurationSecRef.current > 0 && pxPerSecRef.current > 0) {
+        const vStartSec = Math.max(0, sLeft / pxPerSecRef.current);
+        const vDurSec = Math.min(effectiveDurationSecRef.current, cWidth / pxPerSecRef.current);
+        const leftPct = Math.max(0, Math.min(99, (vStartSec / effectiveDurationSecRef.current) * 100));
+        const widthPct = Math.max(1.5, Math.min(100 - leftPct, (vDurSec / effectiveDurationSecRef.current) * 100));
+
+        minimapViewportRef.current.style.left = `${leftPct}%`;
+        minimapViewportRef.current.style.width = `${widthPct}%`;
+      }
     };
 
     handleScroll();
@@ -621,6 +642,102 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   }, [tracks, subtitles, totalTimeSec, videoDuration, sampleRate]);
 
   const totalWidthPx = Math.max(900, Math.floor(effectiveDurationSec * pxPerSec));
+
+  // Мемоизация расчета коллизий для O(1) поиска наложений без перерасчетов при воспроизведении
+  const collidingClipIdsSet = useMemo(() => {
+    const set = new Set<number>();
+    (collisions || []).forEach((c) => {
+      if (c) {
+        if (c.clipAId) set.add(c.clipAId);
+        if (c.clipBId) set.add(c.clipBId);
+      }
+    });
+    return set;
+  }, [collisions]);
+
+  // Вычисление видимого временного окна для ВИРТУАЛИЗАЦИИ клипов и субтитров
+  const viewportStartSec = useMemo(() => {
+    return Math.max(0, (scrollState.scrollLeft - 300) / (pxPerSec || 60));
+  }, [scrollState.scrollLeft, pxPerSec]);
+
+  const viewportEndSec = useMemo(() => {
+    return (scrollState.scrollLeft + scrollState.clientWidth + 300) / (pxPerSec || 60);
+  }, [scrollState.scrollLeft, scrollState.clientWidth, pxPerSec]);
+
+  // Единый отрисовщик статичного Canvas для Overview Minimap (без генерации сотен DOM-элементов)
+  const renderMinimapCanvas = useCallback(() => {
+    const canvas = minimapCanvasRef.current;
+    if (!canvas) return;
+
+    const width = minimapRef.current?.clientWidth || 800;
+    const height = 48;
+    const dpr = window.devicePixelRatio || 1;
+
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, width, height);
+
+    // Темный фон миникарты
+    ctx.fillStyle = '#050811';
+    ctx.fillRect(0, 0, width, height);
+
+    if (effectiveDurationSec <= 0) return;
+
+    // 1. Слой субтитров (верхняя микродарожка)
+    ctx.fillStyle = 'rgba(168, 85, 247, 0.85)';
+    (subtitles || []).forEach((cue) => {
+      if (!cue) return;
+      const x = (cue.startSec / effectiveDurationSec) * width;
+      const w = Math.max(2, ((cue.endSec - cue.startSec) / effectiveDurationSec) * width);
+      ctx.fillRect(x, 2, w, 4);
+    });
+
+    // 2. Слой видеоряда (фиолетовая полоса)
+    if (videoDuration > 0) {
+      ctx.fillStyle = 'rgba(126, 34, 206, 0.5)';
+      const w = Math.min(width, (videoDuration / effectiveDurationSec) * width);
+      ctx.fillRect(0, 8, w, 3);
+    }
+
+    // 3. Слой аудиодорожек и клипов
+    const trackList = (tracks || []).slice(0, 8);
+    const trackCount = Math.max(1, trackList.length);
+    const trackH = Math.min(6, Math.max(2, Math.floor(32 / trackCount)));
+
+    trackList.forEach((track, idx) => {
+      if (!track) return;
+      const topY = 13 + idx * (trackH + 1);
+      const color = track.color || '#10b981';
+
+      (track.clips || []).forEach((clip) => {
+        if (!clip || clip.lengthSamples <= 0) return;
+        const startSec = (clip.offsetSamples || 0) / sampleRate;
+        const durSec = (clip.lengthSamples || 0) / sampleRate;
+        const x = (startSec / effectiveDurationSec) * width;
+        const w = Math.max(2, (durSec / effectiveDurationSec) * width);
+
+        ctx.fillStyle = color;
+        ctx.fillRect(x, topY, w, trackH);
+      });
+    });
+
+    // 4. Слой подсветок коллизий и наездов
+    ctx.fillStyle = 'rgba(244, 63, 94, 0.9)';
+    (collisions || []).forEach((col) => {
+      if (!col) return;
+      const x = (col.overlapStartSec / effectiveDurationSec) * width;
+      ctx.fillRect(x, 0, 2, height);
+    });
+  }, [tracks, subtitles, videoDuration, effectiveDurationSec, collisions, sampleRate]);
+
+  useEffect(() => {
+    renderMinimapCanvas();
+  }, [renderMinimapCanvas]);
 
   // ==========================================================================
   // UNCONTROLLED PLAYHEAD & 60+ FPS REQUEST ANIMATION FRAME
@@ -1224,19 +1341,56 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     const baseLength = clip.originalLengthSamples || clip.lengthSamples;
 
     const isStereo = clip.buffer.length >= clip.lengthSamples * 2;
-    const newRatio = targetLengthSamples / baseLength;
+    const channels = isStereo ? 2 : 1;
+    const maxBufferFrames = baseBuffer ? Math.floor(baseBuffer.length / channels) : baseLength;
+
+    let requestedLength = Math.max(Math.round(sampleRate * 0.05), targetLengthSamples);
+    const rawRatio = requestedLength / baseLength;
+    let clampedRatio = rawRatio;
+
+    // 2. Лимиты WSOLA Time-Stretch:
+    // Запретить растяжение более чем на 1.25x (замедление) и сжатие менее чем на 0.80x (ускорение).
+    // Если фраза актера длиннее оригинальной паузы более чем на 25%, не растягивать её до бесконечности,
+    // а сохранять коэффициент 1.0 с предупреждением в log.
+    if (baseLength > requestedLength * 1.25) {
+      console.warn(
+        `[TimelineView WSOLA] Фраза «${clip.name}» (длина ${(baseLength / sampleRate).toFixed(2)}с) длиннее целевой паузы (${(requestedLength / sampleRate).toFixed(2)}с) более чем на 25%. Сохранение коэффициента 1.0x.`
+      );
+      clampedRatio = 1.0;
+      requestedLength = baseLength;
+    } else {
+      clampedRatio = Math.min(1.25, Math.max(0.80, rawRatio));
+      requestedLength = Math.round(baseLength * clampedRatio);
+    }
+
+    // 1. Защита от наложения (Collision Guard)
+    const minGapSamples = Math.round(sampleRate * 0.08); // 3840 сэмплов / 80 мс
+    const nextClip = track.clips
+      .filter((c) => c.id !== clipId && c.offsetSamples > clip.offsetSamples)
+      .sort((a, b) => a.offsetSamples - b.offsetSamples)[0];
+
+    if (nextClip) {
+      const nextOffset = Math.max(0, nextClip.offsetSamples);
+      if (clip.offsetSamples + requestedLength + minGapSamples > nextOffset) {
+        requestedLength = Math.max(Math.round(sampleRate * 0.05), nextOffset - minGapSamples - clip.offsetSamples);
+        clampedRatio = Math.min(1.25, Math.max(0.80, requestedLength / baseLength));
+      }
+    }
+
+    // 3. Проверка границ клипа (Clip Boundaries Verification)
+    const finalLength = Math.min(maxBufferFrames, Math.max(Math.round(sampleRate * 0.05), requestedLength));
 
     try {
       // Выполняем нативный WSOLA алгоритм прямо через C++ модуль NativeDAWBridge
-      const stretchedBuffer = globalNativeDAWBridge.processWSOLA(baseBuffer, newRatio, isStereo);
+      const stretchedBuffer = globalNativeDAWBridge.processWSOLA(baseBuffer, clampedRatio, isStereo);
 
       const updatedClip: ClipConfig = {
         ...clip,
-        lengthSamples: targetLengthSamples,
+        lengthSamples: finalLength,
         buffer: stretchedBuffer,
         originalBuffer: baseBuffer,
         originalLengthSamples: baseLength,
-        timeStretchRatio: Math.round(newRatio * 100) / 100
+        timeStretchRatio: Math.round(clampedRatio * 100) / 100
       };
 
       const newClips = track.clips.map((c) => (c.id === clipId ? updatedClip : c));
@@ -1247,7 +1401,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       handleSyncTrackClips(trackId, newClips);
       handleSyncAllTracks(newTracks);
 
-      showNotice(`✓ C++ WSOLA: x${(Math.round(newRatio * 100) / 100).toFixed(2)}`, 'info');
+      showNotice(`✓ C++ WSOLA: x${(Math.round(clampedRatio * 100) / 100).toFixed(2)}`, 'info');
     } catch (err) {
       handleNativeError(err, 'растяжения времени WSOLA (processWSOLA)');
     }
@@ -1305,24 +1459,59 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       const clip = toSafeArray<ClipConfig>(track?.clips).find((c) => c.id === selectedClipId);
       if (clip && onUpdateTrack) {
         const cueDurationSec = Math.max(0.2, targetCue.endSec - targetCue.startSec);
-        const targetLengthSamples = Math.round(cueDurationSec * sampleRate);
-        const targetOffsetSamples = Math.round(targetCue.startSec * sampleRate);
+        let targetLengthSamples = Math.round(cueDurationSec * sampleRate);
+        let targetOffsetSamples = Math.max(0, Math.round(targetCue.startSec * sampleRate));
 
         const baseBuffer = clip.originalBuffer || clip.buffer;
         const baseLength = clip.originalLengthSamples || clip.lengthSamples;
         const isStereo = clip.buffer.length >= clip.lengthSamples * 2;
-        const newRatio = targetLengthSamples / baseLength;
+        const channels = isStereo ? 2 : 1;
+        const maxBufferFrames = baseBuffer ? Math.floor(baseBuffer.length / channels) : baseLength;
 
-        const stretchedBuffer = globalNativeDAWBridge.processWSOLA(baseBuffer, newRatio, isStereo);
+        const rawRatio = targetLengthSamples / baseLength;
+        let clampedRatio = rawRatio;
+
+        // 2. Лимиты WSOLA Time-Stretch:
+        // Если фраза актера длиннее оригинальной паузы более чем на 25%, не растягивать её до бесконечности,
+        // а сохранять коэффициент 1.0 с предупреждением в log.
+        if (baseLength > targetLengthSamples * 1.25) {
+          console.warn(
+            `[TimelineView AutoTiming] Фраза «${clip.name}» (длина ${(baseLength / sampleRate).toFixed(2)}с) длиннее субтитра #${targetCue.index} (${(targetLengthSamples / sampleRate).toFixed(2)}с) более чем на 25%. Сохранение коэффициента 1.0x.`
+          );
+          clampedRatio = 1.0;
+          targetLengthSamples = baseLength;
+        } else {
+          clampedRatio = Math.min(1.25, Math.max(0.80, rawRatio));
+          targetLengthSamples = Math.round(baseLength * clampedRatio);
+        }
+
+        // 1. Защита от наложения (Collision Guard):
+        const minGapSamples = Math.round(sampleRate * 0.08); // 3840 сэмплов / 80 мс
+        const otherClips = (track.clips || [])
+          .filter((c) => c.id !== clip.id)
+          .sort((a, b) => a.offsetSamples - b.offsetSamples);
+
+        for (const other of otherClips) {
+          if (other.offsetSamples > targetOffsetSamples && targetOffsetSamples + targetLengthSamples + minGapSamples > other.offsetSamples) {
+            targetLengthSamples = Math.max(Math.round(sampleRate * 0.05), other.offsetSamples - minGapSamples - targetOffsetSamples);
+            clampedRatio = Math.min(1.25, Math.max(0.80, targetLengthSamples / baseLength));
+          }
+        }
+
+        // 3. Проверка границ клипа (Clip Boundaries Verification)
+        targetOffsetSamples = Math.max(0, targetOffsetSamples);
+        const finalLength = Math.min(maxBufferFrames, Math.max(Math.round(sampleRate * 0.05), targetLengthSamples));
+
+        const stretchedBuffer = globalNativeDAWBridge.processWSOLA(baseBuffer, clampedRatio, isStereo);
 
         const updatedClip: ClipConfig = {
           ...clip,
           offsetSamples: targetOffsetSamples,
-          lengthSamples: targetLengthSamples,
+          lengthSamples: finalLength,
           buffer: stretchedBuffer,
           originalBuffer: baseBuffer,
           originalLengthSamples: baseLength,
-          timeStretchRatio: Math.round(newRatio * 100) / 100
+          timeStretchRatio: Math.round(clampedRatio * 100) / 100
         };
 
         const newClips = track.clips.map((c) => (c.id === clip.id ? updatedClip : c));
@@ -1334,7 +1523,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
         handleSyncAllTracks(newTracks);
 
         showNotice(
-          `Фраза «${clip.name}» синхронизирована с субтитром #${targetCue.index} [${targetCue.startSec.toFixed(1)}s - ${targetCue.endSec.toFixed(1)}s]`,
+          `Фраза «${clip.name}» синхронизирована с субтитром #${targetCue.index} [${targetCue.startSec.toFixed(1)}s - ${targetCue.endSec.toFixed(1)}s] (WSOLA x${(Math.round(clampedRatio * 100) / 100).toFixed(2)})`,
           'success'
         );
         break;
@@ -2180,88 +2369,30 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
           onClick={handleMinimapBackgroundClick}
           className="relative h-12 w-full bg-[#050811] rounded-xl border border-slate-800/80 overflow-hidden cursor-pointer shadow-inner group"
         >
-          {/* 1. Subtitle layer on minimap (top micro row) */}
-          <div className="absolute top-0.5 inset-x-0 h-2 flex items-center pointer-events-none">
-            {(subtitles || []).map((cue) => {
-              const leftPct = (cue.startSec / effectiveDurationSec) * 100;
-              const widthPct = Math.max(0.4, ((cue.endSec - cue.startSec) / effectiveDurationSec) * 100);
-              return (
-                <div
-                  key={`minimap-cue-${cue.index}`}
-                  style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
-                  className="absolute h-1.5 rounded-full bg-purple-500/80 shadow-xs"
-                  title={`#${cue.index} [${cue.speaker || 'Диктор'}]: ${cue.text}`}
-                />
-              );
-            })}
-          </div>
+          {/* 1. Статичный холст Canvas со всеми дорожками, клипами, субтитрами и коллизиями (Zero DOM nodes) */}
+          <canvas ref={minimapCanvasRef} className="block w-full h-full pointer-events-none" />
 
-          {/* 2. Tracks layer on minimap */}
-          <div className="absolute top-3 inset-x-0 bottom-1 flex flex-col justify-evenly pointer-events-none px-0.5">
-            {/* Video track mini-lane */}
-            {videoDuration > 0 && (
-              <div
-                style={{ width: `${Math.min(100, (videoDuration / effectiveDurationSec) * 100)}%` }}
-                className="h-1 bg-purple-900/60 rounded-full"
-              />
-            )}
-
-            {/* Audio tracks mini-lanes */}
-            {(tracks || []).slice(0, 8).map((track) => (
-              <div key={`minimap-track-${track.id}`} className="relative h-1 w-full">
-                {(track.clips || []).map((clip) => {
-                  const clipStartSec = (clip.offsetSamples || 0) / sampleRate;
-                  const clipDurSec = (clip.lengthSamples || 0) / sampleRate;
-                  const leftPct = (clipStartSec / effectiveDurationSec) * 100;
-                  const widthPct = Math.max(0.3, (clipDurSec / effectiveDurationSec) * 100);
-                  return (
-                    <div
-                      key={`minimap-clip-${clip.id}`}
-                      style={{
-                        left: `${leftPct}%`,
-                        width: `${widthPct}%`,
-                        backgroundColor: track.color || '#10b981'
-                      }}
-                      className="absolute h-1 rounded-xs opacity-85"
-                    />
-                  );
-                })}
-              </div>
-            ))}
-          </div>
-
-          {/* 3. Collisions warning markers */}
-          {(collisions || []).map((col, idx) => {
-            const leftPct = (col.overlapStartSec / effectiveDurationSec) * 100;
-            return (
-              <div
-                key={`minimap-collision-${idx}`}
-                style={{ left: `${leftPct}%` }}
-                className="absolute top-0 bottom-0 w-1 bg-rose-500/90 shadow-sm shadow-rose-500 animate-pulse pointer-events-none"
-              />
-            );
-          })}
-
-          {/* 4. Playhead line on Minimap (Uncontrolled direct DOM update) */}
+          {/* 2. Линия плейхеда на миникарте */}
           <div
             ref={minimapPlayheadRef}
             style={{
-              left: `${Math.max(0, Math.min(100, (currentTimeSecRef.current / effectiveDurationSec) * 100))}%`
+              left: `${Math.max(0, Math.min(100, (currentTimeSecRef.current / (effectiveDurationSec || 1)) * 100))}%`
             }}
             className="absolute top-0 bottom-0 w-0.5 bg-amber-400 z-30 shadow-md shadow-amber-400 pointer-events-none will-change-[left]"
           >
             <div className="w-2 h-2 -ml-[3px] bg-amber-400 rotate-45 rounded-xs" />
           </div>
 
-          {/* 5. Viewport Frame / Rectangle (Квадрат-рамка видимого окна таймлайна) */}
+          {/* 3. Рамка видимой области вьюпорта с прямолинейным DOM-позиционированием */}
           {(() => {
-            const viewportStartSec = Math.max(0, scrollState.scrollLeft / pxPerSec);
-            const viewportDurationSec = Math.min(effectiveDurationSec, scrollState.clientWidth / pxPerSec);
-            const leftPct = Math.max(0, Math.min(99, (viewportStartSec / effectiveDurationSec) * 100));
-            const widthPct = Math.max(1.5, Math.min(100 - leftPct, (viewportDurationSec / effectiveDurationSec) * 100));
+            const vStartSec = Math.max(0, scrollState.scrollLeft / (pxPerSec || 60));
+            const vDurSec = Math.min(effectiveDurationSec, scrollState.clientWidth / (pxPerSec || 60));
+            const leftPct = Math.max(0, Math.min(99, (vStartSec / (effectiveDurationSec || 1)) * 100));
+            const widthPct = Math.max(1.5, Math.min(100 - leftPct, (vDurSec / (effectiveDurationSec || 1)) * 100));
 
             return (
               <div
+                ref={minimapViewportRef}
                 style={{
                   left: `${leftPct}%`,
                   width: `${widthPct}%`
@@ -2273,7 +2404,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                     : 'border-cyan-400/90 bg-cyan-500/15 hover:border-cyan-300 hover:bg-cyan-500/20 shadow-md shadow-cyan-950/40 cursor-grab'
                 }`}
               >
-                {/* Left resize handle (Zoom) */}
+                {/* Левый ресайзер (Zoom) */}
                 <div
                   onMouseDown={(e) => handleMinimapViewportMouseDown(e, 'resize-left')}
                   className="absolute left-0 top-0 bottom-0 w-2.5 bg-cyan-400/80 hover:bg-cyan-300 cursor-ew-resize flex items-center justify-center rounded-l"
@@ -2282,14 +2413,14 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                   <div className="w-0.5 h-3 bg-slate-950 rounded-full" />
                 </div>
 
-                {/* Center view label */}
+                {/* Подпись видимого диапазона */}
                 <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity">
                   <span className="text-[9px] font-mono font-bold text-cyan-200 bg-slate-950/80 px-1.5 py-0.2 rounded border border-cyan-500/30">
-                    {formatCompactTime(viewportStartSec)} - {formatCompactTime(viewportStartSec + viewportDurationSec)}
+                    {formatCompactTime(vStartSec)} - {formatCompactTime(vStartSec + vDurSec)}
                   </span>
                 </div>
 
-                {/* Right resize handle (Zoom) */}
+                {/* Правый ресайзер (Zoom) */}
                 <div
                   onMouseDown={(e) => handleMinimapViewportMouseDown(e, 'resize-right')}
                   className="absolute right-0 top-0 bottom-0 w-2.5 bg-cyan-400/80 hover:bg-cyan-300 cursor-ew-resize flex items-center justify-center rounded-r"
@@ -2563,8 +2694,13 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                 }}
               />
 
-              {/* Блоки субтитров (Memoized) */}
+              {/* Блоки субтитров (Memoized + Virtualized) */}
               {(subtitles || []).map((cue) => {
+                if (!cue) return null;
+                // Виртуализация: не монтируем DOM субтитра если он вылез за границы видимой области
+                if (cue.endSec < viewportStartSec || cue.startSec > viewportEndSec) {
+                  return null;
+                }
                 const isSelected = selectedCueIndex === cue.index;
                 return (
                   <SubtitleCueItem
@@ -2629,12 +2765,19 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                       );
                     })}
 
-                  {/* Клипы дорожки (Memoized с глубоким areClipPropsEqual) */}
+                  {/* Клипы дорожки (Memoized + Virtualized) */}
                   {(track.clips || []).map((clip) => {
+                    if (!clip || clip.lengthSamples <= 0) return null;
+                    const clipStartSec = (clip.offsetSamples || 0) / sampleRate;
+                    const clipEndSec = clipStartSec + ((clip.lengthSamples || 0) / sampleRate);
+
+                    // Виртуализация: если клип полностью вылезает за пределы видимого вьюпорта, НЕ монтируем Canvas и DOM
+                    if (clipEndSec < viewportStartSec || clipStartSec > viewportEndSec) {
+                      return null;
+                    }
+
                     const isSelected = selectedClipId === clip.id;
-                    const isColliding = (collisions || []).some(
-                      (c) => c && (c.clipAId === clip.id || c.clipBId === clip.id)
-                    );
+                    const isColliding = collidingClipIdsSet.has(clip.id);
 
                     return (
                       <TimelineClipItem

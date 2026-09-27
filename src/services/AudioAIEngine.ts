@@ -528,10 +528,21 @@ export class AudioAIEngine {
       }
 
       if (bestSegment && minTimeDiff < 5.0) {
-        const timeDrift = bestSegment.startSec - scriptLine.startSec;
+        let timeDrift = bestSegment.startSec - scriptLine.startSec;
+        let actStart = bestSegment.startSec;
+        let actEnd = bestSegment.endSec;
+        let status: 'matched' | 'drifted' = Math.abs(timeDrift) > 0.6 ? 'drifted' : 'matched';
+
+        // Ограничение максимального сдвига фразы (time drift): реплика не может смещаться более чем на ±0.75 сек
+        if (Math.abs(timeDrift) > 0.75) {
+          actStart = scriptLine.startSec;
+          actEnd = scriptLine.endSec;
+          timeDrift = 0;
+          status = 'matched';
+        }
+
         // Расчет схожести строк выполняется СТРОГО через C++ ядро
         const similarity = recText ? this.calculateStringSimilarity(scriptLine.text, recText) : 0.85;
-        const status: 'matched' | 'drifted' = Math.abs(timeDrift) > 0.6 ? 'drifted' : 'matched';
 
         alignedResults.push({
           lineIndex: scriptLine.index,
@@ -539,8 +550,8 @@ export class AudioAIEngine {
           recognizedText: recText,
           expectedStartSec: scriptLine.startSec,
           expectedEndSec: scriptLine.endSec,
-          actualStartSec: bestSegment.startSec,
-          actualEndSec: bestSegment.endSec,
+          actualStartSec: actStart,
+          actualEndSec: actEnd,
           timeDriftSec: timeDrift,
           similarityScore: similarity,
           status

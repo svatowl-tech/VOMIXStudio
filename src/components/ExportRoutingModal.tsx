@@ -1557,114 +1557,976 @@ export const ExportRoutingModal: React.FC<ExportRoutingModalProps> = ({
                     </div>
                   )}
 
-                  {/* Нода Сохранения на диск (WAV / MP3) */}
-                  {(selectedNode.type === 'disk_save_wav' || selectedNode.type === 'disk_save_mp3') && (
-                    <div className="space-y-3 p-3 bg-emerald-950/20 border border-emerald-500/30 rounded-xl text-xs">
-                      <div className="flex items-center gap-1.5 text-emerald-300 font-bold">
-                        <HardDrive size={14} />
-                        <span>Авто-сброс на жесткий диск</span>
+                  {/* 1. Вход: Видео */}
+                  {selectedNode.type === 'input_video' && (
+                    <div className="space-y-3 p-3 bg-slate-900 border border-slate-800 rounded-xl text-xs">
+                      <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedNode.parameters.extractAudio !== false}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'extractAudio', e.target.checked)}
+                          className="accent-cyan-500 rounded"
+                        />
+                        <span>Извлекать оригинальную звуковую дорожку из видео</span>
+                      </label>
+                      <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedNode.parameters.keepOriginalTrackInMux !== false}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'keepOriginalTrackInMux', e.target.checked)}
+                          className="accent-cyan-500 rounded"
+                        />
+                        <span>Сохранять оригинал как вторую дорожку в финальном MP4</span>
+                      </label>
+                    </div>
+                  )}
+
+                  {/* 2. Вход: Дорожки */}
+                  {selectedNode.type === 'input_tracks' && (
+                    <div className="space-y-3 p-3 bg-slate-900 border border-slate-800 rounded-xl text-xs">
+                      <div>
+                        <label className="block text-slate-400 text-[11px] mb-1">Режим загрузки дорожек:</label>
+                        <select
+                          value={selectedNode.parameters.trackCount || 'auto'}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'trackCount', e.target.value)}
+                          className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none"
+                        >
+                          <option value="auto">Автоматически все дорожки проекта</option>
+                          <option value="1">Только Дорожка 1 (Solo)</option>
+                          <option value="2">Первые 2 дорожки</option>
+                          <option value="4">Первые 4 дорожки</option>
+                        </select>
                       </div>
                       <div>
-                        <label className="block text-slate-400 text-[11px] mb-1">Шаблон имени файла:</label>
+                        <label className="block text-slate-400 text-[11px] mb-1">Частота дискретизации вокала:</label>
+                        <select
+                          value={selectedNode.parameters.sampleRate || 48000}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'sampleRate', parseInt(e.target.value))}
+                          className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none"
+                        >
+                          <option value={48000}>48 000 Hz (Broadcast standard)</option>
+                          <option value={44100}>44 100 Hz (CD)</option>
+                          <option value={96000}>96 000 Hz (Hi-Res Studio)</option>
+                        </select>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 3. Вход: Субтитры */}
+                  {selectedNode.type === 'input_subtitles' && (
+                    <div className="space-y-3 p-3 bg-slate-900 border border-slate-800 rounded-xl text-xs">
+                      <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
                         <input
-                          type="text"
-                          value={selectedNode.parameters.fileNamePattern || 'export_mix.wav'}
-                          onChange={(e) => handleUpdateParam(selectedNode.id, 'fileNamePattern', e.target.value)}
-                          className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none"
+                          type="checkbox"
+                          checked={selectedNode.parameters.parseSubtitles !== false}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'parseSubtitles', e.target.checked)}
+                          className="accent-purple-500 rounded"
+                        />
+                        <span>Парсить файлы субтитров (.srt / .vtt / .ass)</span>
+                      </label>
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Смещение синхронизации (Sync Offset):</span>
+                          <strong className="text-purple-400 font-mono">
+                            {selectedNode.parameters.syncOffsetMs || 0} ms
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="-2000"
+                          max="2000"
+                          step="10"
+                          value={selectedNode.parameters.syncOffsetMs || 0}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'syncOffsetMs', parseInt(e.target.value))}
+                          className="w-full accent-purple-500 cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 4. C++ Strip Silence */}
+                  {selectedNode.type === 'strip_silence' && (
+                    <div className="space-y-3 p-3 bg-slate-900 border border-slate-800 rounded-xl text-xs">
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Порог тишины (Threshold):</span>
+                          <strong className="text-pink-400 font-mono">
+                            {selectedNode.parameters.thresholdDb ?? -42} dBFS
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="-60"
+                          max="-12"
+                          step="1"
+                          value={selectedNode.parameters.thresholdDb ?? -42}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'thresholdDb', parseInt(e.target.value))}
+                          className="w-full accent-pink-500 cursor-pointer"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Мин. длительность паузы (Min Silence):</span>
+                          <strong className="text-pink-400 font-mono">
+                            {selectedNode.parameters.minSilenceMs ?? 250} ms
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="50"
+                          max="1000"
+                          step="10"
+                          value={selectedNode.parameters.minSilenceMs ?? 250}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'minSilenceMs', parseInt(e.target.value))}
+                          className="w-full accent-pink-500 cursor-pointer"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Защитный отступ краев (Padding):</span>
+                          <strong className="text-pink-400 font-mono">
+                            {selectedNode.parameters.paddingMs ?? 50} ms
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="200"
+                          step="5"
+                          value={selectedNode.parameters.paddingMs ?? 50}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'paddingMs', parseInt(e.target.value))}
+                          className="w-full accent-pink-500 cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 5. Auto Timing / WSOLA */}
+                  {selectedNode.type === 'auto_timing' && (
+                    <div className="space-y-3 p-3 bg-slate-900 border border-slate-800 rounded-xl text-xs">
+                      <div>
+                        <label className="block text-slate-400 text-[11px] mb-1">Алгоритм Time-Stretch:</label>
+                        <select
+                          value={selectedNode.parameters.algorithm || 'WSOLA'}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'algorithm', e.target.value)}
+                          className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none"
+                        >
+                          <option value="WSOLA">WSOLA C++ (Сохранение тембра и формант)</option>
+                          <option value="Phase Vocoder">Phase Vocoder (Высокая плавность)</option>
+                          <option value="Rubberband C++">Rubberband DSP (Артикуляция)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Макс. коэффициент растяжения (Max Stretch):</span>
+                          <strong className="text-amber-400 font-mono">
+                            {selectedNode.parameters.maxStretchFactor ?? 1.25}x
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="1.0"
+                          max="2.0"
+                          step="0.05"
+                          value={selectedNode.parameters.maxStretchFactor ?? 1.25}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'maxStretchFactor', parseFloat(e.target.value))}
+                          className="w-full accent-amber-500 cursor-pointer"
                         />
                       </div>
                       <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
                         <input
                           type="checkbox"
-                          checked={!!selectedNode.parameters.autoDownload}
-                          onChange={(e) => handleUpdateParam(selectedNode.id, 'autoDownload', e.target.checked)}
-                          className="accent-emerald-500 rounded"
+                          checked={selectedNode.parameters.alignToOriginal !== false}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'alignToOriginal', e.target.checked)}
+                          className="accent-amber-500 rounded"
                         />
-                        <span>Автоматически скачивать браузером</span>
+                        <span>Привязывать начальные точки фраз к оригиналу</span>
                       </label>
                     </div>
                   )}
 
-                  {/* Нода Отшивания (Mute / Isolator) */}
-                  {selectedNode.type === 'track_isolator_mute' && (
-                    <div className="space-y-3 p-3 bg-rose-950/20 border border-rose-500/30 rounded-xl text-xs">
-                      <div>
-                        <label className="block text-slate-400 text-[11px] mb-1">Режим отшивания:</label>
-                        <select
-                          value={selectedNode.parameters.mode || 'mute_when_active'}
-                          onChange={(e) => handleUpdateParam(selectedNode.id, 'mode', e.target.value)}
-                          className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none"
-                        >
-                          <option value="mute_when_active">Mute при наличии сигнала триггера</option>
-                          <option value="isolate_only">Изолировать только эту дорожку</option>
-                          <option value="bypass_subchain">Байпас всей последующей ветки</option>
-                        </select>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Нода Петли (Feedback Loop) */}
-                  {selectedNode.type === 'feedback_loop' && (
-                    <div className="space-y-3 p-3 bg-rose-950/20 border border-rose-500/30 rounded-xl text-xs">
+                  {/* 6. Loudness Norm (EBU R128) */}
+                  {selectedNode.type === 'loudness_norm' && (
+                    <div className="space-y-3 p-3 bg-slate-900 border border-slate-800 rounded-xl text-xs">
                       <div>
                         <div className="flex justify-between text-slate-300 mb-1">
-                          <span>Количество проходов (Loop Passes):</span>
-                          <strong className="text-rose-400 font-mono">
-                            {selectedNode.parameters.iterations || 2}x
+                          <span>Целевой RMS / LUFS:</span>
+                          <strong className="text-blue-400 font-mono">
+                            {selectedNode.parameters.targetRmsDb ?? -18.0} dBFS
                           </strong>
                         </div>
                         <input
                           type="range"
-                          min="1"
-                          max="4"
-                          step="1"
-                          value={selectedNode.parameters.iterations || 2}
-                          onChange={(e) =>
-                            handleUpdateParam(selectedNode.id, 'iterations', parseInt(e.target.value))
-                          }
-                          className="w-full accent-rose-500 cursor-pointer"
+                          min="-30.0"
+                          max="-10.0"
+                          step="0.5"
+                          value={selectedNode.parameters.targetRmsDb ?? -18.0}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'targetRmsDb', parseFloat(e.target.value))}
+                          className="w-full accent-blue-500 cursor-pointer"
                         />
                       </div>
-
                       <div>
-                        <label className="block text-slate-400 text-[11px] mb-1">Условие выхода из петли:</label>
-                        <select
-                          value={selectedNode.parameters.condition || 'target_lufs_reached'}
-                          onChange={(e) => handleUpdateParam(selectedNode.id, 'condition', e.target.value)}
-                          className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none"
-                        >
-                          <option value="target_lufs_reached">Достижение целевого уровня LUFS</option>
-                          <option value="fixed_iterations">Фиксированное число проходов</option>
-                          <option value="delta_minimized">Минимизация дельты громкости</option>
-                        </select>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>True Peak Потолок:</span>
+                          <strong className="text-blue-400 font-mono">
+                            {selectedNode.parameters.truePeakMaxDb ?? -1.0} dBFS
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="-6.0"
+                          max="-0.1"
+                          step="0.1"
+                          value={selectedNode.parameters.truePeakMaxDb ?? -1.0}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'truePeakMaxDb', parseFloat(e.target.value))}
+                          className="w-full accent-blue-500 cursor-pointer"
+                        />
                       </div>
                     </div>
                   )}
 
-                  {/* Параметры Сплиттера / Разветвителя */}
-                  {selectedNode.type === 'node_branch_split' && (
-                    <div className="space-y-2 p-3 bg-slate-900 border border-slate-800 rounded-xl text-xs">
-                      <div className="text-slate-300 font-semibold">Число параллельных веток:</div>
-                      <div className="text-[11px] text-slate-400">
-                        Нода автоматически дублирует входящий сигнал на 3 независимых выхода (Direct, FX/AI, Sidechain).
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Параметры FFmpeg WASM Muxer */}
-                  {(selectedNode.type === 'ffmpeg_mux' || selectedNode.type === 'ffmpeg_dual_mux') && (
+                  {/* 7. Phase Aligner */}
+                  {selectedNode.type === 'phase_aligner' && (
                     <div className="space-y-3 p-3 bg-slate-900 border border-slate-800 rounded-xl text-xs">
+                      <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedNode.parameters.autoPhaseInvert !== false}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'autoPhaseInvert', e.target.checked)}
+                          className="accent-cyan-500 rounded"
+                        />
+                        <span>Автоматический поиск противофазы и инверсия</span>
+                      </label>
+                      <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedNode.parameters.monoCheck !== false}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'monoCheck', e.target.checked)}
+                          className="accent-cyan-500 rounded"
+                        />
+                        <span>Генерировать выходы моно-совместимости</span>
+                      </label>
+                    </div>
+                  )}
+
+                  {/* 8. Neural Matrix (AI) */}
+                  {selectedNode.type === 'neural_matrix' && (
+                    <div className="space-y-3 p-3 bg-purple-950/20 border border-purple-500/30 rounded-xl text-xs">
+                      <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={!!selectedNode.parameters.runDenoise}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'runDenoise', e.target.checked)}
+                          className="accent-purple-500 rounded"
+                        />
+                        <span>Включить SOTA AI Денойзер</span>
+                      </label>
+                      <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={!!selectedNode.parameters.runSpectralMatch}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'runSpectralMatch', e.target.checked)}
+                          className="accent-purple-500 rounded"
+                        />
+                        <span>Включить Spectral Matching реставрацию</span>
+                      </label>
+                      <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={!!selectedNode.parameters.runStemSeparation}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'runStemSeparation', e.target.checked)}
+                          className="accent-purple-500 rounded"
+                        />
+                        <span>Автоматическая сепарация стемов M&E</span>
+                      </label>
+                    </div>
+                  )}
+
+                  {/* 9. Spectral Denoise AI */}
+                  {selectedNode.type === 'spectral_denoise_ai' && (
+                    <div className="space-y-3 p-3 bg-purple-950/20 border border-purple-500/30 rounded-xl text-xs">
                       <div>
-                        <label className="block text-slate-400 text-[11px] mb-1">Битрейт аудио (AAC):</label>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Интенсивность AI шумогашения:</span>
+                          <strong className="text-purple-400 font-mono">
+                            {selectedNode.parameters.intensityPercent ?? 80}%
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          step="5"
+                          value={selectedNode.parameters.intensityPercent ?? 80}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'intensityPercent', parseInt(e.target.value))}
+                          className="w-full accent-purple-500 cursor-pointer"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>ФВЧ фильтр низов (Low Cut):</span>
+                          <strong className="text-purple-400 font-mono">
+                            {selectedNode.parameters.lowCutHz ?? 80} Hz
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="20"
+                          max="200"
+                          step="5"
+                          value={selectedNode.parameters.lowCutHz ?? 80}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'lowCutHz', parseInt(e.target.value))}
+                          className="w-full accent-purple-500 cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 10. Stem Separation UVR */}
+                  {selectedNode.type === 'stem_sep_uvr' && (
+                    <div className="space-y-3 p-3 bg-purple-950/20 border border-purple-500/30 rounded-xl text-xs">
+                      <div>
+                        <label className="block text-slate-400 text-[11px] mb-1">Нейромодель сепарации:</label>
                         <select
-                          value={selectedNode.parameters.audioBitrate || '320k'}
-                          onChange={(e) => handleUpdateParam(selectedNode.id, 'audioBitrate', e.target.value)}
+                          value={selectedNode.parameters.model || 'uvr_mdx_voc_ft'}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'model', e.target.value)}
                           className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none"
                         >
-                          <option value="320k">320 kbps (Студийное качество)</option>
-                          <option value="256k">256 kbps (Стандарт вещания)</option>
-                          <option value="192k">192 kbps (Оптимальный)</option>
+                          <option value="uvr_mdx_voc_ft">UVR MDX-Net Vocal FT (Чистый вокал)</option>
+                          <option value="demucs_v4">Demucs v4 Hybrid (Вокал + Музыка + Эффекты)</option>
+                          <option value="htdemucs_ft">HTDemucs FT (Высокое разделение M&E)</option>
                         </select>
+                      </div>
+                      <div>
+                        <label className="block text-slate-400 text-[11px] mb-1">Каналы вывода:</label>
+                        <select
+                          value={selectedNode.parameters.outputFormat || 'stereo'}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'outputFormat', e.target.value)}
+                          className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none"
+                        >
+                          <option value="stereo">Стерео (Stereo 2ch)</option>
+                          <option value="mono">Моно (Mono 1ch)</option>
+                        </select>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 11. VoiceFixer Harmonics */}
+                  {selectedNode.type === 'voicefixer_harmonics' && (
+                    <div className="space-y-3 p-3 bg-pink-950/20 border border-pink-500/30 rounded-xl text-xs">
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Усиление Air-Band (Высокие частоты):</span>
+                          <strong className="text-pink-400 font-mono">
+                            +{selectedNode.parameters.airBandBoostDb ?? 2.0} dB
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="0.0"
+                          max="6.0"
+                          step="0.5"
+                          value={selectedNode.parameters.airBandBoostDb ?? 2.0}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'airBandBoostDb', parseFloat(e.target.value))}
+                          className="w-full accent-pink-500 cursor-pointer"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Аналоговая сатурация (Warmth):</span>
+                          <strong className="text-pink-400 font-mono">
+                            {selectedNode.parameters.warmthSat ?? 20}%
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          step="5"
+                          value={selectedNode.parameters.warmthSat ?? 20}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'warmthSat', parseInt(e.target.value))}
+                          className="w-full accent-pink-500 cursor-pointer"
+                        />
+                      </div>
+                      <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedNode.parameters.declip !== false}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'declip', e.target.checked)}
+                          className="accent-pink-500 rounded"
+                        />
+                        <span>Авто-восстановление заклиппированного звука (De-Clip)</span>
+                      </label>
+                    </div>
+                  )}
+
+                  {/* 12. De-Reverb DSP */}
+                  {selectedNode.type === 'de_reverb_dsp' && (
+                    <div className="space-y-3 p-3 bg-blue-950/20 border border-blue-500/30 rounded-xl text-xs">
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Процент подавления реверберации:</span>
+                          <strong className="text-blue-400 font-mono">
+                            {selectedNode.parameters.reductionPercent ?? 60}%
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          step="5"
+                          value={selectedNode.parameters.reductionPercent ?? 60}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'reductionPercent', parseInt(e.target.value))}
+                          className="w-full accent-blue-500 cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 13. Track DSP Rack */}
+                  {selectedNode.type === 'track_dsp' && (
+                    <div className="space-y-3 p-3 bg-emerald-950/20 border border-emerald-500/30 rounded-xl text-xs">
+                      <div className="text-slate-300 font-bold mb-1">Модули C++ DSP рэка:</div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={selectedNode.parameters.eq !== false}
+                            onChange={(e) => handleUpdateParam(selectedNode.id, 'eq', e.target.checked)}
+                            className="accent-emerald-500 rounded"
+                          />
+                          <span>3-Band EQ</span>
+                        </label>
+                        <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={selectedNode.parameters.compressor !== false}
+                            onChange={(e) => handleUpdateParam(selectedNode.id, 'compressor', e.target.checked)}
+                            className="accent-emerald-500 rounded"
+                          />
+                          <span>Compressor</span>
+                        </label>
+                        <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={selectedNode.parameters.deEsser !== false}
+                            onChange={(e) => handleUpdateParam(selectedNode.id, 'deEsser', e.target.checked)}
+                            className="accent-emerald-500 rounded"
+                          />
+                          <span>De-Esser</span>
+                        </label>
+                        <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={selectedNode.parameters.noiseGate !== false}
+                            onChange={(e) => handleUpdateParam(selectedNode.id, 'noiseGate', e.target.checked)}
+                            className="accent-emerald-500 rounded"
+                          />
+                          <span>Noise Gate</span>
+                        </label>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 14. Auto Ducking */}
+                  {selectedNode.type === 'auto_ducking' && (
+                    <div className="space-y-3 p-3 bg-teal-950/20 border border-teal-500/30 rounded-xl text-xs">
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Глубина приглушения фона (Ducking Depth):</span>
+                          <strong className="text-teal-400 font-mono">
+                            {selectedNode.parameters.duckingDepthDb ?? -14.0} dB
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="-24.0"
+                          max="-3.0"
+                          step="0.5"
+                          value={selectedNode.parameters.duckingDepthDb ?? -14.0}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'duckingDepthDb', parseFloat(e.target.value))}
+                          className="w-full accent-teal-500 cursor-pointer"
+                        />
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-slate-400 text-[10px] mb-1">Attack (мс):</label>
+                          <input
+                            type="number"
+                            value={selectedNode.parameters.attackMs ?? 20}
+                            onChange={(e) => handleUpdateParam(selectedNode.id, 'attackMs', parseInt(e.target.value))}
+                            className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-slate-200 text-xs"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-slate-400 text-[10px] mb-1">Release (мс):</label>
+                          <input
+                            type="number"
+                            value={selectedNode.parameters.releaseMs ?? 300}
+                            onChange={(e) => handleUpdateParam(selectedNode.id, 'releaseMs', parseInt(e.target.value))}
+                            className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-slate-200 text-xs"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 15. Track VST */}
+                  {selectedNode.type === 'track_vst' && (
+                    <div className="space-y-3 p-3 bg-indigo-950/20 border border-indigo-500/30 rounded-xl text-xs">
+                      <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={!!selectedNode.parameters.bypassAll}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'bypassAll', e.target.checked)}
+                          className="accent-indigo-500 rounded"
+                        />
+                        <span>Байпас всех VST-плагинов</span>
+                      </label>
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Баланс Wet / Dry VST:</span>
+                          <strong className="text-indigo-400 font-mono">
+                            {selectedNode.parameters.renderWetDry ?? 100}%
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          step="5"
+                          value={selectedNode.parameters.renderWetDry ?? 100}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'renderWetDry', parseInt(e.target.value))}
+                          className="w-full accent-indigo-500 cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 16. Vocal Bus */}
+                  {selectedNode.type === 'vocal_bus' && (
+                    <div className="space-y-3 p-3 bg-purple-950/20 border border-purple-500/30 rounded-xl text-xs">
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Усиление Шины Вокала (Bus Gain):</span>
+                          <strong className="text-purple-400 font-mono">
+                            {(selectedNode.parameters.busGainDb ?? 0) >= 0 ? '+' : ''}
+                            {(selectedNode.parameters.busGainDb ?? 0).toFixed(1)} dB
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="-12.0"
+                          max="12.0"
+                          step="0.5"
+                          value={selectedNode.parameters.busGainDb ?? 0.0}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'busGainDb', parseFloat(e.target.value))}
+                          className="w-full accent-purple-500 cursor-pointer"
+                        />
+                      </div>
+                      <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedNode.parameters.busDspEnabled !== false}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'busDspEnabled', e.target.checked)}
+                          className="accent-purple-500 rounded"
+                        />
+                        <span>Включить шинную компрессию и сатурацию</span>
+                      </label>
+                    </div>
+                  )}
+
+                  {/* 17. Loudness Auto-Align */}
+                  {selectedNode.type === 'loudness_align' && (
+                    <div className="space-y-3 p-3 bg-orange-950/20 border border-orange-500/30 rounded-xl text-xs">
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Целевая разница громкости над фоном ($\Delta$):</span>
+                          <strong className="text-orange-400 font-mono">
+                            +{(selectedNode.parameters.targetDeltaDb ?? 4.0).toFixed(1)} dB
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="2.0"
+                          max="8.0"
+                          step="0.1"
+                          value={selectedNode.parameters.targetDeltaDb ?? 4.0}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'targetDeltaDb', parseFloat(e.target.value))}
+                          className="w-full accent-orange-500 cursor-pointer"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Допустимая погрешность (Tolerance):</span>
+                          <strong className="text-orange-400 font-mono">
+                            $\pm${(selectedNode.parameters.toleranceDb ?? 0.5).toFixed(1)} dB
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="0.1"
+                          max="2.0"
+                          step="0.1"
+                          value={selectedNode.parameters.toleranceDb ?? 0.5}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'toleranceDb', parseFloat(e.target.value))}
+                          className="w-full accent-orange-500 cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 18. Transient Shaper */}
+                  {selectedNode.type === 'transient_shaper' && (
+                    <div className="space-y-3 p-3 bg-yellow-950/20 border border-yellow-500/30 rounded-xl text-xs">
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Атака согласных (Attack Gain):</span>
+                          <strong className="text-yellow-400 font-mono">
+                            +{(selectedNode.parameters.attackGainDb ?? 3.0).toFixed(1)} dB
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="-6.0"
+                          max="12.0"
+                          step="0.5"
+                          value={selectedNode.parameters.attackGainDb ?? 3.0}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'attackGainDb', parseFloat(e.target.value))}
+                          className="w-full accent-yellow-500 cursor-pointer"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Сустейн гласных (Sustain Gain):</span>
+                          <strong className="text-yellow-400 font-mono">
+                            {(selectedNode.parameters.sustainGainDb ?? -1.0).toFixed(1)} dB
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="-12.0"
+                          max="6.0"
+                          step="0.5"
+                          value={selectedNode.parameters.sustainGainDb ?? -1.0}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'sustainGainDb', parseFloat(e.target.value))}
+                          className="w-full accent-yellow-500 cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 19. Master Limiter */}
+                  {selectedNode.type === 'master_limiter' && (
+                    <div className="space-y-3 p-3 bg-cyan-950/20 border border-cyan-500/30 rounded-xl text-xs">
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Потолок пиков (Ceiling):</span>
+                          <strong className="text-cyan-400 font-mono">
+                            {(selectedNode.parameters.ceilingDb ?? -0.5).toFixed(1)} dBFS
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="-3.0"
+                          max="-0.1"
+                          step="0.1"
+                          value={selectedNode.parameters.ceilingDb ?? -0.5}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'ceilingDb', parseFloat(e.target.value))}
+                          className="w-full accent-cyan-500 cursor-pointer"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Release Time:</span>
+                          <strong className="text-cyan-400 font-mono">
+                            {selectedNode.parameters.releaseMs ?? 100} ms
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="10"
+                          max="500"
+                          step="10"
+                          value={selectedNode.parameters.releaseMs ?? 100}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'releaseMs', parseInt(e.target.value))}
+                          className="w-full accent-cyan-500 cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 20. Node Mixer Merge */}
+                  {selectedNode.type === 'node_mixer_merge' && (
+                    <div className="space-y-3 p-3 bg-emerald-950/20 border border-emerald-500/30 rounded-xl text-xs">
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Уровень Входа A (Голос):</span>
+                          <strong className="text-emerald-400 font-mono">
+                            {(selectedNode.parameters.gainA ?? 0) >= 0 ? '+' : ''}
+                            {(selectedNode.parameters.gainA ?? 0).toFixed(1)} dB
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="-12.0"
+                          max="12.0"
+                          step="0.5"
+                          value={selectedNode.parameters.gainA ?? 0}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'gainA', parseFloat(e.target.value))}
+                          className="w-full accent-emerald-500 cursor-pointer"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Уровень Входа B (FX/AI):</span>
+                          <strong className="text-emerald-400 font-mono">
+                            {(selectedNode.parameters.gainB ?? 0) >= 0 ? '+' : ''}
+                            {(selectedNode.parameters.gainB ?? 0).toFixed(1)} dB
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="-12.0"
+                          max="12.0"
+                          step="0.5"
+                          value={selectedNode.parameters.gainB ?? 0}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'gainB', parseFloat(e.target.value))}
+                          className="w-full accent-emerald-500 cursor-pointer"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Уровень Входа C (Фон):</span>
+                          <strong className="text-emerald-400 font-mono">
+                            {(selectedNode.parameters.gainC ?? 0) >= 0 ? '+' : ''}
+                            {(selectedNode.parameters.gainC ?? 0).toFixed(1)} dB
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="-12.0"
+                          max="12.0"
+                          step="0.5"
+                          value={selectedNode.parameters.gainC ?? 0}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'gainC', parseFloat(e.target.value))}
+                          className="w-full accent-emerald-500 cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 21. Sidechain Ducker Router */}
+                  {selectedNode.type === 'sidechain_ducker_router' && (
+                    <div className="space-y-3 p-3 bg-yellow-950/20 border border-yellow-500/30 rounded-xl text-xs">
+                      <div>
+                        <label className="block text-slate-400 text-[11px] mb-1">Цель управления Sidechain:</label>
+                        <select
+                          value={selectedNode.parameters.routingTarget || 'vocal_bus'}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'routingTarget', e.target.value)}
+                          className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none"
+                        >
+                          <option value="vocal_bus">Шина Вокала (Vocal Bus)</option>
+                          <option value="master_limiter">Мастер-Лимитер (Master Limiter)</option>
+                          <option value="track_dsp">Рэк Дорожек (Track DSP)</option>
+                        </select>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 22. LUFS Target Gate */}
+                  {selectedNode.type === 'lufs_target_gate' && (
+                    <div className="space-y-3 p-3 bg-emerald-950/20 border border-emerald-500/30 rounded-xl text-xs">
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Целевой уровень LUFS:</span>
+                          <strong className="text-emerald-400 font-mono">
+                            {selectedNode.parameters.targetLufs ?? -18.0} LUFS
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="-30.0"
+                          max="-10.0"
+                          step="0.5"
+                          value={selectedNode.parameters.targetLufs ?? -18.0}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'targetLufs', parseFloat(e.target.value))}
+                          className="w-full accent-emerald-500 cursor-pointer"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Допустимое окно (Tolerance):</span>
+                          <strong className="text-emerald-400 font-mono">
+                            $\pm${selectedNode.parameters.toleranceLufs ?? 1.0} LUFS
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="0.2"
+                          max="3.0"
+                          step="0.1"
+                          value={selectedNode.parameters.toleranceLufs ?? 1.0}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'toleranceLufs', parseFloat(e.target.value))}
+                          className="w-full accent-emerald-500 cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 23. Step Cache */}
+                  {selectedNode.type === 'step_cache' && (
+                    <div className="space-y-3 p-3 bg-yellow-950/20 border border-yellow-500/30 rounded-xl text-xs">
+                      <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedNode.parameters.memoryCache !== false}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'memoryCache', e.target.checked)}
+                          className="accent-yellow-500 rounded"
+                        />
+                        <span>Кэшировать промежуточный буфер в RAM</span>
+                      </label>
+                      <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={!!selectedNode.parameters.autoSaveWav}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'autoSaveWav', e.target.checked)}
+                          className="accent-yellow-500 rounded"
+                        />
+                        <span>Автоматически дампнуть WAV на диск при ошибке</span>
+                      </label>
+                    </div>
+                  )}
+
+                  {/* 24. Stems Splitter Disk */}
+                  {selectedNode.type === 'stems_splitter_disk' && (
+                    <div className="space-y-3 p-3 bg-cyan-950/20 border border-cyan-500/30 rounded-xl text-xs">
+                      <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedNode.parameters.saveAsZip !== false}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'saveAsZip', e.target.checked)}
+                          className="accent-cyan-500 rounded"
+                        />
+                        <span>Упаковать стемы в ZIP-архив</span>
+                      </label>
+                      <div>
+                        <label className="block text-slate-400 text-[11px] mb-1">Разрядность WAV стемов:</label>
+                        <select
+                          value={selectedNode.parameters.bitDepth || 24}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'bitDepth', parseInt(e.target.value))}
+                          className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none"
+                        >
+                          <option value={16}>16-bit PCM</option>
+                          <option value={24}>24-bit Broadcast PCM</option>
+                          <option value={32}>32-bit Float</option>
+                        </select>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 25. Master Render */}
+                  {selectedNode.type === 'master_render' && (
+                    <div className="space-y-3 p-3 bg-emerald-950/20 border border-emerald-500/30 rounded-xl text-xs">
+                      <div>
+                        <label className="block text-slate-400 text-[11px] mb-1">Частота дискретизации мастеринга:</label>
+                        <select
+                          value={selectedNode.parameters.sampleRate || 48000}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'sampleRate', parseInt(e.target.value))}
+                          className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none"
+                        >
+                          <option value={48000}>48 000 Hz (Cinema / TV)</option>
+                          <option value={44100}>44 100 Hz (Music CD)</option>
+                          <option value={96000}>96 000 Hz (Master Studio)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-slate-400 text-[11px] mb-1">Разрядность мастера (Bit Depth):</label>
+                        <select
+                          value={selectedNode.parameters.bitDepth || 24}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'bitDepth', parseInt(e.target.value))}
+                          className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none"
+                        >
+                          <option value={24}>24-bit PCM (Broadcast Standard)</option>
+                          <option value={16}>16-bit PCM</option>
+                          <option value={32}>32-bit Float</option>
+                        </select>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 26. Stem Export */}
+                  {selectedNode.type === 'stem_export' && (
+                    <div className="space-y-3 p-3 bg-sky-950/20 border border-sky-500/30 rounded-xl text-xs">
+                      <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedNode.parameters.exportDialogues !== false}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'exportDialogues', e.target.checked)}
+                          className="accent-sky-500 rounded"
+                        />
+                        <span>Экспортировать стем Dialogues / Vocals</span>
+                      </label>
+                      <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedNode.parameters.exportME !== false}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'exportME', e.target.checked)}
+                          className="accent-sky-500 rounded"
+                        />
+                        <span>Экспортировать стем M&E (Music & Effects)</span>
+                      </label>
+                      <label className="flex items-center gap-2 text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedNode.parameters.exportOriginal !== false}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'exportOriginal', e.target.checked)}
+                          className="accent-sky-500 rounded"
+                        />
+                        <span>Экспортировать стем Original Video Audio</span>
+                      </label>
+                    </div>
+                  )}
+
+                  {/* 27. Subtitles Burner */}
+                  {selectedNode.type === 'subtitles_burner' && (
+                    <div className="space-y-3 p-3 bg-pink-950/20 border border-pink-500/30 rounded-xl text-xs">
+                      <div>
+                        <div className="flex justify-between text-slate-300 mb-1">
+                          <span>Размер шрифта субтитров:</span>
+                          <strong className="text-pink-400 font-mono">
+                            {selectedNode.parameters.fontSize || 24} px
+                          </strong>
+                        </div>
+                        <input
+                          type="range"
+                          min="14"
+                          max="48"
+                          step="1"
+                          value={selectedNode.parameters.fontSize || 24}
+                          onChange={(e) => handleUpdateParam(selectedNode.id, 'fontSize', parseInt(e.target.value))}
+                          className="w-full accent-pink-500 cursor-pointer"
+                        />
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-slate-400 text-[10px] mb-1">Цвет текста:</label>
+                          <input
+                            type="text"
+                            value={selectedNode.parameters.fontColor || '#ffffff'}
+                            onChange={(e) => handleUpdateParam(selectedNode.id, 'fontColor', e.target.value)}
+                            className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-slate-200 font-mono text-xs"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-slate-400 text-[10px] mb-1">Цвет обводки:</label>
+                          <input
+                            type="text"
+                            value={selectedNode.parameters.outlineColor || '#000000'}
+                            onChange={(e) => handleUpdateParam(selectedNode.id, 'outlineColor', e.target.value)}
+                            className="w-full px-2 py-1 bg-slate-950 border border-slate-700 rounded text-slate-200 font-mono text-xs"
+                          />
+                        </div>
                       </div>
                     </div>
                   )}

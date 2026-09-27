@@ -59,7 +59,8 @@ export default function App() {
     updateVstParameter,
     setVstBypass,
     setVstWetDry,
-    performLoudnessMatching
+    performLoudnessMatching,
+    garbageCollectWasm
   } = useAudioEngine();
 
   // Локальное UI-состояние параметров треков и мастера с фильтрацией валидности
@@ -115,6 +116,16 @@ export default function App() {
       clipped: Boolean(masterMeter.clipped)
     }));
   }, [masterMeter]);
+
+  // Периодическая принудительная чистка неиспользуемой памяти WebAssembly и отставших клипов
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (isInitialized) {
+        garbageCollectWasm(tracks);
+      }
+    }, 25000); // Каждые 25 секунд
+    return () => clearInterval(interval);
+  }, [isInitialized, tracks, garbageCollectWasm]);
 
   const handleUpdateTrack = (updatedTrack: TrackState) => {
     if (!updatedTrack) return;

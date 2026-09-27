@@ -23,6 +23,7 @@ import {
   NativeDAWBridge,
   WavBitDepth
 } from './NativeDAWBridge';
+import { ClipConfig } from '../audio/dawEngine';
 
 /**
  * Метаданные дорожки в файле конфигурации project.json
@@ -903,6 +904,128 @@ export class ProjectManager {
   public isRunningInFallbackMode(): boolean {
     return this.isFallbackMode;
   }
+
+  /**
+   * Автоматическое выравнивание и подгонка клипов дорожки (Auto-Timing / Auto-Alignment)
+   * Требования:
+   * 1. Collision Guard: Минимальный зазор между фразами не менее 80 мс / 3840 сэмплов при 48 кГц.
+   * 2. WSOLA Limits: Лимит сжатия/растяжения [0.80x, 1.25x]. Если актиёрская фраза > 25% длиннее
+   *    оригинальной паузы, сохраняется коэффициент 1.0x с предупреждением в log.
+   * 3. Clip Boundaries: offsetSamples >= 0, lengthSamples <= buffer.length.
+   */
+  public autoAlignTrackClips(
+    clips: ClipConfig[],
+    subtitles: SubtitleCue[] = [],
+    sampleRate: number = 48000
+  ): ClipConfig[] {
+    return autoAlignTrackClips(clips, subtitles, sampleRate);
+  }
 }
 
 export const globalProjectManager = new ProjectManager();
+
+/**
+ * Вспомогательная функция автоматического выравнивания с проверкой коллизий и лимитов WSOLA
+ */
+export function autoAlignTrackClips(
+  clips: ClipConfig[],
+  subtitles: SubtitleCue[] = [],
+  sampleRate: number = 48000
+): ClipConfig[] {
+  if (!clips || clips.length === 0) return [];
+  const minGapSamples = Math.round(sampleRate * 0.08); // 80 мс / 3840 сэмплов
+  const safeSubtitles = (subtitles || []).slice().sort((a, b) => a.startSec - b.startSec);
+
+  // Сортируем клипы по времени начала
+  const sortedClips = clips
+    .map((c) => {
+      const isStereo = c.buffer ? c.buffer.length >= c.lengthSamples * 2 : false;
+      const channels = isStereo ? 2 : 1;
+      const maxFrames = c.buffer ? Math.floor(c.buffer.length / channels) : (c.lengthSamples || 0);
+      const validLen = typeof c.lengthSamples === 'number' && c.lengthSamples > 0 ? Math.min(maxFrames, c.lengthSamples) : maxFrames;
+
+      return {
+        ...c,
+        offsetSamples: Math.max(0, typeof c.offsetSamples === 'number' && !isNaN(c.offsetSamples) ? Math.round(c.offsetSamples) : 0),
+        lengthSamples: Math.max(1, validLen)
+      };
+    })
+    .sort((a, b) => a.offsetSamples - b.offsetSamples);
+
+  const alignedClips: ClipConfig[] = [];
+
+  for (let i = 0; i < sortedClips.length; i++) {
+    const clip = sortedClips[i];
+    const isStereo = clip.buffer ? clip.buffer.length >= clip.lengthSamples * 2 : false;
+    const channels = isStereo ? 2 : 1;
+    const maxBufferFrames = clip.buffer ? Math.floor(clip.buffer.length / channels) : clip.lengthSamples;
+
+    let offset = Math.max(0, clip.offsetSamples);
+    let baseLength = clip.originalLengthSamples || clip.lengthSamples;
+    baseLength = Math.min(maxBufferFrames, Math.max(1, baseLength));
+    let targetLength = baseLength;
+
+    // Сопоставляем с соответствующим субтитром
+    const matchedCue = safeSubtitles[i] || safeSubtitles.find((sc) => Math.abs(sc.startSec * sampleRate - offset) < sampleRate * 2.0);
+
+    if (matchedCue) {
+      const cueStartSamples = Math.max(0, Math.round(matchedCue.startSec * sampleRate));
+      const cueDurationSamples = Math.max(1, Math.round((matchedCue.endSec - matchedCue.startSec) * sampleRate));
+
+      offset = cueStartSamples;
+      const stretchRatio = cueDurationSamples / baseLength;
+
+      // 2. Лимиты WSOLA Time-Stretch:
+      // Если фраза актера длиннее оригинальной паузы более чем на 25%, не растягивать её до бесконечности,
+      // а сохранять коэффициент 1.0 с предупреждением в log.
+      if (baseLength > cueDurationSamples * 1.25) {
+        console.warn(
+          `[AutoTiming WSOLA] Фраза «${clip.name}» (длина ${(baseLength / sampleRate).toFixed(2)}с) длиннее оригинального субтитра #${matchedCue.index} (${(cueDurationSamples / sampleRate).toFixed(2)}с) более чем на 25%. Сохранение коэффициента 1.0x.`
+        );
+        targetLength = baseLength;
+      } else {
+        const clampedRatio = Math.min(1.25, Math.max(0.80, stretchRatio));
+        targetLength = Math.round(baseLength * clampedRatio);
+      }
+    }
+
+    // 3. Проверка границ клипа (Clip Boundaries Verification)
+    offset = Math.max(0, offset);
+    targetLength = Math.min(maxBufferFrames, Math.max(1, targetLength));
+
+    // 1. Защита от наложения (Collision Guard)
+    // Проверка относительно предыдущего выровненного клипа
+    if (alignedClips.length > 0) {
+      const prevClip = alignedClips[alignedClips.length - 1];
+      const prevEnd = prevClip.offsetSamples + prevClip.lengthSamples;
+      const minAllowedStart = prevEnd + minGapSamples;
+
+      if (offset < minAllowedStart) {
+        offset = minAllowedStart;
+      }
+    }
+
+    // Проверка относительно следующего клипа на дорожке
+    if (i < sortedClips.length - 1) {
+      const nextClip = sortedClips[i + 1];
+      const nextOffset = Math.max(0, nextClip.offsetSamples);
+      if (offset + targetLength + minGapSamples > nextOffset) {
+        targetLength = Math.max(100, nextOffset - minGapSamples - offset);
+      }
+    }
+
+    // Итоговая санитаризация границ
+    offset = Math.max(0, offset);
+    targetLength = Math.min(maxBufferFrames, Math.max(1, targetLength));
+
+    alignedClips.push({
+      ...clip,
+      offsetSamples: offset,
+      lengthSamples: targetLength,
+      fadeInSamples: Math.min(clip.fadeInSamples || 0, Math.floor(targetLength / 2)),
+      fadeOutSamples: Math.min(clip.fadeOutSamples || 0, Math.floor(targetLength / 2))
+    });
+  }
+
+  return alignedClips;
+}

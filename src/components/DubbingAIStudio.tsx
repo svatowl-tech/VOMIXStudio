@@ -69,6 +69,7 @@ import { globalStemSeparationService } from '../services/StemSeparationService';
 import { TrackState } from '../audio/dawEngine';
 import { formatSMPTE } from '../utils/waveformUtils';
 import { toSafeArray } from '../utils/safeIterables';
+import { BlobUrlRegistry } from '../utils/BlobUrlRegistry';
 import {
   globalAIPipelineStore,
   AIPurposeType,
@@ -317,6 +318,16 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
     });
     return () => unsub();
   }, []);
+
+  // Автоматическая очистка всех превью Blob URL при смене данных или размонтировании вкладок ИИ-Студии
+  useEffect(() => {
+    return () => {
+      if (cleanedAudioUrl) BlobUrlRegistry.revoke(cleanedAudioUrl);
+      if (originalAudioUrl) BlobUrlRegistry.revoke(originalAudioUrl);
+      if (sepResult?.vocalsWavUrl) BlobUrlRegistry.revoke(sepResult.vocalsWavUrl);
+      if (sepResult?.karaokeWavUrl) BlobUrlRegistry.revoke(sepResult.karaokeWavUrl);
+    };
+  }, [cleanedAudioUrl, originalAudioUrl, sepResult]);
 
   // --- INSTALLED MODELS ONLY FOR MVP INTERFACE ---
   const installedModels = useMemo(() => {
@@ -704,11 +715,15 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
 
       if (!currentPcm) throw new Error('Не удалось сформировать итоговый PCM поток.');
 
-      // Create A/B preview URLs
+      // Отзываем старые A/B ссылки перед созданием новых
+      if (config.abOriginalUrl) BlobUrlRegistry.revoke(config.abOriginalUrl);
+      if (config.abProcessedUrl) BlobUrlRegistry.revoke(config.abProcessedUrl);
+
+      // Create A/B preview URLs зарегистрированные в BlobUrlRegistry
       const origBlob = createWavBlobFromInterleaved(pcm);
       const procBlob = createWavBlobFromInterleaved(currentPcm);
-      const origUrl = URL.createObjectURL(origBlob);
-      const procUrl = URL.createObjectURL(procBlob);
+      const origUrl = BlobUrlRegistry.create(origBlob);
+      const procUrl = BlobUrlRegistry.create(procBlob);
 
       handleUpdateTrackConfig(trackId, {
         status: 'done',
@@ -725,6 +740,11 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
       } else if (config.outputMode === 'stems' && vocalsPcm && karaokePcm && onAddStemTracks) {
         onAddStemTracks(vocalsPcm, karaokePcm, `[Вокал] ${trackName}`, `[Фонограмма M&E] ${trackName}`);
       }
+
+      // ПАКЕТНАЯ ОЧИСТКА ПАМЯТИ: Освобождаем тяжелые промежуточные PCM массивы сразу после отправки
+      currentPcm = null;
+      vocalsPcm = null;
+      karaokePcm = null;
     } catch (err: any) {
       console.error('[DubbingAIStudio] Ошибка выполнения AI цепочки:', err);
       handleUpdateTrackConfig(trackId, {
@@ -823,8 +843,11 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
         }
       });
 
-      const vocUrl = URL.createObjectURL(result.vocalsWavBlob);
-      const karUrl = URL.createObjectURL(result.karaokeWavBlob);
+      if (sepResult?.vocalsWavUrl) BlobUrlRegistry.revoke(sepResult.vocalsWavUrl);
+      if (sepResult?.karaokeWavUrl) BlobUrlRegistry.revoke(sepResult.karaokeWavUrl);
+
+      const vocUrl = BlobUrlRegistry.create(result.vocalsWavBlob);
+      const karUrl = BlobUrlRegistry.create(result.karaokeWavBlob);
 
       const vocInterleaved = new Float32Array(totalFrames * 2);
       const karInterleaved = new Float32Array(totalFrames * 2);
@@ -863,6 +886,8 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
         `[Изоляция Вокала] ${sourceName}`,
         `[Фонограмма M&E] ${sourceName}`
       );
+      // ПАКЕТНАЯ ОЧИСТКА ПАМЯТИ: Освобождаем тяжелые PCM массивы
+      setSepResult((prev) => (prev ? { ...prev, vocalsPcm: undefined, karaokePcm: undefined } : null));
     } else {
       alert('Стемы готовы! Добавьте их через микшер или панель дорожек.');
     }
@@ -900,11 +925,14 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
       setCleanProgress({ percent: 100, message: 'Очистка успешно завершена!' });
       setCleanedAudioBuffer(dereverbed);
 
+      if (originalAudioUrl) BlobUrlRegistry.revoke(originalAudioUrl);
+      if (cleanedAudioUrl) BlobUrlRegistry.revoke(cleanedAudioUrl);
+
       const origBlob = createWavBlobFromInterleaved(pcm);
       const cleanBlob = createWavBlobFromInterleaved(dereverbed);
 
-      setOriginalAudioUrl(URL.createObjectURL(origBlob));
-      setCleanedAudioUrl(URL.createObjectURL(cleanBlob));
+      setOriginalAudioUrl(BlobUrlRegistry.create(origBlob));
+      setCleanedAudioUrl(BlobUrlRegistry.create(cleanBlob));
     } catch (err: any) {
       console.error('[DubbingAIStudio] Ошибка очистки:', err);
       alert(`Ошибка очистки аудио: ${err.message || 'Сбой нейросети'}`);
@@ -935,6 +963,8 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
 
     if (onApplyProcessedAudioToTrack) {
       onApplyProcessedAudioToTrack(cleanTrackId, cleanedAudioBuffer, `${tName} (Очищено AI)`);
+      // ПАКЕТНАЯ ОЧИСТКА ПАМЯТИ
+      setCleanedAudioBuffer(null);
     } else {
       alert('Очищенное аудио готово!');
     }
@@ -986,6 +1016,8 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
 
     if (onApplyProcessedAudioToTrack) {
       onApplyProcessedAudioToTrack(specTargetTrackId, matchResult.processedBuffer, `${tName} (Спектр Оригинала)`);
+      // ПАКЕТНАЯ ОЧИСТКА ПАМЯТИ
+      setMatchResult(null);
     } else {
       alert('Спектрально подогнанное аудио готово!');
     }
@@ -1032,6 +1064,8 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
 
     if (onApplyProcessedAudioToTrack) {
       onApplyProcessedAudioToTrack(vfTrackId, vfProcessedBuffer, `${tName} (VoiceFixer HD)`);
+      // ПАКЕТНАЯ ОЧИСТКА ПАМЯТИ
+      setVfProcessedBuffer(null);
     } else {
       alert('Отреставрированное аудио готово!');
     }

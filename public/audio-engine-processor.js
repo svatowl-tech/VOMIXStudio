@@ -4,15 +4,13 @@
  * ============================================================================
  * Выполняется в выделенном высокоприоритетном аудиопотоке Web Audio API.
  * Все вычисления, микширование, цепочки VST2/VST3 плагинов и телеметрия
- * производятся в нативном C++ ядре через WebAssembly:
+ * производятся исключительно в нативном C++ ядре через WebAssembly:
  *
- * 1. LOAD_VST_PLUGIN: Создание инстанса плагина в слоте трека/мастера через C-API.
- * 2. UPDATE_VST_PARAM: Атомарная передача числового ID параметра и нормализованного
- *    float-значения (0.0 .. 1.0) напрямую в C++ структуру плагина.
- * 3. SET_VST_BYPASS: Безопасный байпас с плавным сглаживанием гейна.
- * 4. SET_VST_WET_DRY: Сглаженное управление балансом сухого/обработанного сигнала.
- * 5. SET_TRACK_CLIPS: Полная синхронизация буферов клипов (включая Trim/Split) в куче WASM.
- * 6. METERS_TELEMETRY: Прямое чтение точных пиковых значений из C++ движка через _getTrackPeak.
+ * 1. ZERO DUAL PROCESS: Вызовы микширования и сглаживания производятся строго
+ *    в C++ движке (_processMixer). Ручные JS-циклы суммирования полностью исключены.
+ * 2. C++ TELEMETRY: Прямой замер точных пиковых и RMS значений через _getTrackPeak и _getTrackRMS.
+ * 3. THROTTLED CONTROL: Командный буфер с дедупликацией частых обновлений параметров
+ *    (Volume, Pan, VST Params) для предотвращения микрозаиканий.
  * ============================================================================
  */
 
@@ -28,16 +26,6 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
     this.jsTracks = new Map();
     this.clipBufferCache = new Map();
     this.clipWasmPtrs = new Map(); // clipId -> wasmPtr
-
-    // RT-Safe Scratch Buffers для микширования блоков без аллокаций памяти
-    this.mixBlockL = new Float32Array(128);
-    this.mixBlockR = new Float32Array(128);
-    this.trackBlockL = new Float32Array(128);
-    this.trackBlockR = new Float32Array(128);
-    this.vocalBusBlockL = new Float32Array(128);
-    this.vocalBusBlockR = new Float32Array(128);
-    this.origBusBlockL = new Float32Array(128);
-    this.origBusBlockR = new Float32Array(128);
 
     // Реестр VST-слотов по стандарту Universal VST Contract (до 8 слотов на трек/шину)
     this.trackVstSlots = new Map(); // trackId -> Array[8]
@@ -62,7 +50,15 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
     this.isWasmReady = false;
     this.wasmModule = null;
     this.mixerPtr = 0;
-    this.outBufferPtr = 0; // Стерео буфер вывода C++ (L, R, L, R...)
+    this.outBufferPtr = 0;
+    this.outBufferCapacity = 512; // Емкость выходного стереобуфера в float
+
+    // Троттлинг и буфер дедупликации частых команд управления (Volume, Pan, VST Params)
+    this.pendingTrackVolumes = new Map(); // trackId -> volumeDb
+    this.pendingTrackPans = new Map();    // trackId -> pan
+    this.pendingMasterVolume = null;      // volumeDb
+    this.pendingVocalBusVolume = null;    // volumeDb
+    this.pendingVstParams = new Map();    // key -> { target, trackId, slotIdx, paramId, value }
 
     // Защита от спама в консоль
     this.hasReportedError = false;
@@ -191,10 +187,10 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         this.mixerPtr = 0;
       }
 
-      // Выделяем буфер под стерео аутпут (128 Stereo фреймов = 256 float)
-      const outSamples = 256;
+      // Выделяем буфер под стерео аутпут (512 float = до 256 стереокадров)
+      this.outBufferCapacity = 512;
       if (this.wasmModule._malloc) {
-        this.outBufferPtr = this.wasmModule._malloc(outSamples * 4);
+        this.outBufferPtr = this.wasmModule._malloc(this.outBufferCapacity * 4);
       }
 
       this.isWasmReady = true;
@@ -500,6 +496,60 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
   }
 
   /**
+   * Сброс всех накопленных отложенных обновлений параметров
+   */
+  flushPendingControlUpdates() {
+    if (!this.isWasmReady || !this.wasmModule || !this.mixerPtr) return;
+
+    if (this.pendingMasterVolume !== null) {
+      if (this.wasmModule._setMasterVolume) {
+        this.wasmModule._setMasterVolume(this.mixerPtr, this.pendingMasterVolume);
+      }
+      this.pendingMasterVolume = null;
+    }
+
+    if (this.pendingVocalBusVolume !== null) {
+      if (this.wasmModule._setVocalBusVolume) {
+        this.wasmModule._setVocalBusVolume(this.mixerPtr, this.pendingVocalBusVolume);
+      }
+      this.pendingVocalBusVolume = null;
+    }
+
+    if (this.pendingTrackVolumes.size > 0) {
+      if (this.wasmModule._setTrackVolume) {
+        for (const [trackId, vol] of this.pendingTrackVolumes.entries()) {
+          this.wasmModule._setTrackVolume(this.mixerPtr, trackId, vol);
+        }
+      }
+      this.pendingTrackVolumes.clear();
+    }
+
+    if (this.pendingTrackPans.size > 0) {
+      if (this.wasmModule._setTrackPan) {
+        for (const [trackId, pan] of this.pendingTrackPans.entries()) {
+          this.wasmModule._setTrackPan(this.mixerPtr, trackId, pan);
+        }
+      }
+      this.pendingTrackPans.clear();
+    }
+
+    if (this.pendingVstParams.size > 0) {
+      for (const [, item] of this.pendingVstParams.entries()) {
+        if (item.target === 'master' || item.trackId === 1000) {
+          if (this.wasmModule._setMasterPluginParam) {
+            this.wasmModule._setMasterPluginParam(this.mixerPtr, item.slotIdx, item.paramId, item.value);
+          }
+        } else {
+          if (this.wasmModule._setTrackPluginParam) {
+            this.wasmModule._setTrackPluginParam(this.mixerPtr, item.trackId, item.slotIdx, item.paramId, item.value);
+          }
+        }
+      }
+      this.pendingVstParams.clear();
+    }
+  }
+
+  /**
    * Обработка команд MessagePort от хоста (useAudioEngine)
    */
   handleHostMessage(msg) {
@@ -536,7 +586,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         break;
 
       // ======================================================================
-      // 1. LOAD_VST_PLUGIN: Прямой вызов _loadTrackPlugin / _loadMasterPlugin
+      // 1. LOAD_VST_PLUGIN: Создание и инициализация C++ плагина
       // ======================================================================
       case 'LOAD_VST_PLUGIN': {
         const { target, trackId, slotIdx, descriptor, instanceId, initialParams } = msg;
@@ -568,7 +618,6 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           parameters: {}
         };
 
-        // Заполняем дефолтные параметры из дескриптора
         if (descriptor && Array.isArray(descriptor.parameters)) {
           for (const p of descriptor.parameters) {
             const numId = this.getParamIdAsNumber(pluginId, p.id);
@@ -579,7 +628,6 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           }
         }
 
-        // Перекрываем переданными initialParams
         if (initialParams && typeof initialParams === 'object') {
           for (const [k, v] of Object.entries(initialParams)) {
             const numId = this.getParamIdAsNumber(pluginId, k);
@@ -589,7 +637,6 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
 
         slots[validSlotIdx] = pluginInstance;
 
-        // Прямой вызов C-API функции в C++ движке
         if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
           if (target === 'master' || finalTrackId === 1000) {
             if (this.wasmModule._loadMasterPlugin) {
@@ -624,13 +671,11 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           }
         }
 
-        // Синхронизируем массив плагинов в jsTracks
         if (this.jsTracks.has(finalTrackId)) {
           const track = this.jsTracks.get(finalTrackId);
           track.vstPlugins = slots.filter(Boolean);
         }
 
-        // Подтверждаем создание инстанса хосту
         this.port.postMessage({
           type: 'VST_PLUGIN_LOADED',
           trackId: finalTrackId,
@@ -642,7 +687,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       }
 
       // ======================================================================
-      // 2. UPDATE_VST_PARAM: Прямой вызов _setTrackPluginParam / _setMasterPluginParam
+      // 2. UPDATE_VST_PARAM: Буферизированное обновление параметров с троттлингом
       // ======================================================================
       case 'UPDATE_VST_PARAM': {
         const { target, trackId, instanceId, slotIdx, paramId, numericParamId, value } = msg;
@@ -652,8 +697,8 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           targetInfo = this.findPluginByInstanceId(instanceId);
         }
 
-        let resolvedTrackId = targetInfo ? targetInfo.trackId : (Number(trackId) || 0);
-        let resolvedSlotIdx = targetInfo ? targetInfo.slotIdx : (Number(slotIdx) || 0);
+        const resolvedTrackId = targetInfo ? targetInfo.trackId : (Number(trackId) || 0);
+        const resolvedSlotIdx = targetInfo ? targetInfo.slotIdx : (Number(slotIdx) || 0);
         let activePlugin = targetInfo ? targetInfo.plugin : null;
 
         if (!activePlugin) {
@@ -678,36 +723,19 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           }
         }
 
-        if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
-          if (target === 'master' || resolvedTrackId === 1000) {
-            if (this.wasmModule._setMasterPluginParam) {
-              try {
-                this.wasmModule._setMasterPluginParam(this.mixerPtr, resolvedSlotIdx, finalNumericParamId, normalizedValue);
-              } catch (err) {
-                console.warn('[AudioWorklet] Сбой _setMasterPluginParam:', err);
-              }
-            }
-          } else {
-            if (this.wasmModule._setTrackPluginParam) {
-              try {
-                this.wasmModule._setTrackPluginParam(
-                  this.mixerPtr,
-                  resolvedTrackId,
-                  resolvedSlotIdx,
-                  finalNumericParamId,
-                  normalizedValue
-                );
-              } catch (err) {
-                console.warn('[AudioWorklet] Сбой _setTrackPluginParam:', err);
-              }
-            }
-          }
-        }
+        const paramKey = `${target}_${resolvedTrackId}_${resolvedSlotIdx}_${finalNumericParamId}`;
+        this.pendingVstParams.set(paramKey, {
+          target,
+          trackId: resolvedTrackId,
+          slotIdx: resolvedSlotIdx,
+          paramId: finalNumericParamId,
+          value: normalizedValue
+        });
         break;
       }
 
       // ======================================================================
-      // 3. SET_VST_BYPASS: Прямой вызов _setTrackPluginBypass / _setMasterPluginBypass
+      // 3. SET_VST_BYPASS: Прямой переключатель байпаса VST
       // ======================================================================
       case 'SET_VST_BYPASS': {
         const { target, trackId, instanceId, bypass, enabled } = msg;
@@ -746,7 +774,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       }
 
       // ======================================================================
-      // 4. SET_VST_WET_DRY: Прямой вызов _setTrackPluginWetDry / _setMasterPluginWetDry
+      // 4. SET_VST_WET_DRY: Регулировка баланса Wet/Dry
       // ======================================================================
       case 'SET_VST_WET_DRY': {
         const { target, trackId, instanceId, wetDry } = msg;
@@ -818,10 +846,10 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       }
 
       // ======================================================================
-      // 6. LOAD_TRACK_CLIP: Загрузка отдельного клипа в дорожку
+      // 6. LOAD_TRACK_CLIP: Загрузка отдельного клипа в C++ микшер
       // ======================================================================
       case 'LOAD_TRACK_CLIP': {
-        const trackId = msg.trackId;
+        const trackId = Number(msg.trackId) || 0;
         const clipId = msg.clipId || Date.now();
         const pcmBuffer = msg.audioData || msg.pcmBuffer || msg.pcm || new Float32Array(0);
         const offsetSamples = typeof msg.offsetSamples === 'number'
@@ -865,9 +893,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           isStereo
         });
 
-        // Загружаем в C++ микшер
         if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
-          // Жестко проверяем мапу clipWasmPtrs и вызываем принудительное освобождение _free для перезаписываемых ID клипов
           const existingPtr = this.clipWasmPtrs.get(clipId);
           if (existingPtr && this.wasmModule._free) {
             this.wasmModule._free(existingPtr);
@@ -907,7 +933,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       }
 
       // ======================================================================
-      // 6.1. UPDATE_TRACK: Обновление дорожки и синхронизация клипов с WASM
+      // 6.1. UPDATE_TRACK: Обновление параметров и сэмплов клипов дорожки
       // ======================================================================
       case 'UPDATE_TRACK': {
         const track = msg.track;
@@ -926,10 +952,26 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           });
         }
         const currentTrack = this.jsTracks.get(trackId);
-        if (typeof track.volumeDb === 'number') currentTrack.volumeDb = track.volumeDb;
-        if (typeof track.pan === 'number') currentTrack.pan = track.pan;
-        if (typeof track.solo === 'boolean') currentTrack.solo = track.solo;
-        if (typeof track.mute === 'boolean') currentTrack.mute = track.mute;
+        if (typeof track.volumeDb === 'number') {
+          currentTrack.volumeDb = track.volumeDb;
+          this.pendingTrackVolumes.set(trackId, track.volumeDb);
+        }
+        if (typeof track.pan === 'number') {
+          currentTrack.pan = track.pan;
+          this.pendingTrackPans.set(trackId, track.pan);
+        }
+        if (typeof track.solo === 'boolean') {
+          currentTrack.solo = track.solo;
+          if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._setTrackSolo) {
+            this.wasmModule._setTrackSolo(this.mixerPtr, trackId, track.solo);
+          }
+        }
+        if (typeof track.mute === 'boolean') {
+          currentTrack.mute = track.mute;
+          if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._setTrackMute) {
+            this.wasmModule._setTrackMute(this.mixerPtr, trackId, track.mute);
+          }
+        }
 
         if (Array.isArray(track.clips)) {
           for (const c of track.clips) {
@@ -938,7 +980,6 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
             if (pcmBuffer && pcmBuffer.length > 0) {
               this.clipBufferCache.set(c.id, pcmBuffer);
               if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
-                // Перед отправкой новых pcmBuffer в WASM жестко проверяем мапу clipWasmPtrs и вызываем принудительное освобождение _free
                 const existingPtr = this.clipWasmPtrs.get(c.id);
                 if (existingPtr && this.wasmModule._free) {
                   this.wasmModule._free(existingPtr);
@@ -973,7 +1014,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       }
 
       // ======================================================================
-      // 6.2. FREE_CLIP_BUFFER: Принудительное освобождение пойнтера клипа
+      // 6.2. FREE_CLIP_BUFFER: Освобождение указателя клипа
       // ======================================================================
       case 'FREE_CLIP_BUFFER': {
         const { clipId } = msg;
@@ -985,7 +1026,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       }
 
       // ======================================================================
-      // 6.3. GARBAGE_COLLECT_WASM: Принудительная сборка мусора указателей WASM
+      // 6.3. GARBAGE_COLLECT_WASM: Принудительный сбор утерянных пойнтеров
       // ======================================================================
       case 'GARBAGE_COLLECT_WASM': {
         this.garbageCollectWasm();
@@ -993,10 +1034,10 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       }
 
       // ======================================================================
-      // 7. SET_TRACK_CLIPS: Гарантированная синхронизация срезов после Trim/Split
+      // 7. SET_TRACK_CLIPS: Полная перестройка массива клипов трека после Trim/Split
       // ======================================================================
       case 'SET_TRACK_CLIPS': {
-        const trackId = msg.trackId;
+        const trackId = Number(msg.trackId) || 0;
         const clips = Array.isArray(msg.clips) ? msg.clips : [];
 
         if (!this.jsTracks.has(trackId)) {
@@ -1013,7 +1054,6 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
 
         const track = this.jsTracks.get(trackId);
 
-        // Освобождаем старые указатели клипов этой дорожки
         for (const [oldClipId] of track.clips.entries()) {
           this.freeWasmClipBuffer(oldClipId);
         }
@@ -1031,7 +1071,6 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           if (pcmBuffer && pcmBuffer.length > 0) {
             this.clipBufferCache.set(c.id, pcmBuffer);
           } else {
-            // Если буфер еще не передан, пропускаем либо ждем LOAD_TRACK_CLIP
             continue;
           }
 
@@ -1086,7 +1125,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       }
 
       // ======================================================================
-      // 8. SET_ALL_TRACKS: Полная пакетная синхронизация микшера
+      // 8. SET_ALL_TRACKS: Полная синхронизация состава микшера
       // ======================================================================
       case 'SET_ALL_TRACKS': {
         const tracks = Array.isArray(msg.tracks) ? msg.tracks : [];
@@ -1103,7 +1142,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         }
 
         for (const t of tracks) {
-          const trackId = t.id;
+          const trackId = Number(t.id) || 0;
           const trackClips = new Map();
 
           if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
@@ -1190,7 +1229,6 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
             clips: trackClips
           });
 
-          // Регистрируем VST-цепочку
           if (Array.isArray(t.vstPlugins)) {
             const slots = this.getSlotsArray('track', trackId);
             t.vstPlugins.forEach((p, idx) => {
@@ -1240,31 +1278,27 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       }
 
       case 'SET_TRACK_VOLUME': {
-        const trackId = msg.trackId;
+        const trackId = Number(msg.trackId) || 0;
         const volumeDb = typeof msg.volumeDb === 'number' ? msg.volumeDb : 0.0;
         if (this.jsTracks.has(trackId)) {
           this.jsTracks.get(trackId).volumeDb = volumeDb;
         }
-        if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._setTrackVolume) {
-          this.wasmModule._setTrackVolume(this.mixerPtr, trackId, volumeDb);
-        }
+        this.pendingTrackVolumes.set(trackId, volumeDb);
         break;
       }
 
       case 'SET_TRACK_PAN': {
-        const trackId = msg.trackId;
+        const trackId = Number(msg.trackId) || 0;
         const pan = typeof msg.pan === 'number' ? msg.pan : 0.0;
         if (this.jsTracks.has(trackId)) {
           this.jsTracks.get(trackId).pan = pan;
         }
-        if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._setTrackPan) {
-          this.wasmModule._setTrackPan(this.mixerPtr, trackId, pan);
-        }
+        this.pendingTrackPans.set(trackId, pan);
         break;
       }
 
       case 'SET_TRACK_SOLO': {
-        const trackId = msg.trackId;
+        const trackId = Number(msg.trackId) || 0;
         const solo = !!msg.solo;
         if (this.jsTracks.has(trackId)) {
           this.jsTracks.get(trackId).solo = solo;
@@ -1276,7 +1310,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       }
 
       case 'SET_TRACK_MUTE': {
-        const trackId = msg.trackId;
+        const trackId = Number(msg.trackId) || 0;
         const mute = !!msg.mute;
         if (this.jsTracks.has(trackId)) {
           this.jsTracks.get(trackId).mute = mute;
@@ -1289,9 +1323,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
 
       case 'SET_MASTER_VOLUME': {
         this.masterVolumeDb = typeof msg.volumeDb === 'number' ? msg.volumeDb : 0.0;
-        if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._setMasterVolume) {
-          this.wasmModule._setMasterVolume(this.mixerPtr, this.masterVolumeDb);
-        }
+        this.pendingMasterVolume = this.masterVolumeDb;
         break;
       }
 
@@ -1305,7 +1337,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       }
 
       case 'SET_TRACK_VST_CHAIN': {
-        const trackId = msg.trackId;
+        const trackId = Number(msg.trackId) || 0;
         const plugins = Array.isArray(msg.vstPlugins) ? msg.vstPlugins : [];
         if (this.jsTracks.has(trackId)) {
           this.jsTracks.get(trackId).vstPlugins = plugins;
@@ -1355,6 +1387,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         }
         if (typeof msg.volumeDb === 'number') {
           this.vocalBus.volumeDb = msg.volumeDb;
+          this.pendingVocalBusVolume = msg.volumeDb;
         }
         if (typeof msg.pan === 'number') {
           this.vocalBus.pan = msg.pan;
@@ -1366,9 +1399,6 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           this.vocalBus.solo = msg.solo;
         }
         if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
-          if (this.wasmModule._setVocalBusVolume && typeof this.vocalBus.volumeDb === 'number') {
-            this.wasmModule._setVocalBusVolume(this.mixerPtr, this.vocalBus.volumeDb);
-          }
           if (this.wasmModule._setVocalBusAutoDucker && this.vocalBus.autoDucker) {
             const ad = this.vocalBus.autoDucker;
             this.wasmModule._setVocalBusAutoDucker(
@@ -1472,6 +1502,11 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         this.trackVstSlots.clear();
         this.vocalBusVstSlots.fill(null);
         this.masterVstSlots.fill(null);
+        this.pendingTrackVolumes.clear();
+        this.pendingTrackPans.clear();
+        this.pendingVstParams.clear();
+        this.pendingMasterVolume = null;
+        this.pendingVocalBusVolume = null;
         if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
           if (this.wasmModule._removeAllTracks) {
             this.wasmModule._removeAllTracks(this.mixerPtr);
@@ -1518,7 +1553,8 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
   }
 
   /**
-   * Основной расчетный цикл рендеринга звука (RT-Safe, 128 сэмплов)
+   * Основной высокопроизводительный аудиоколбэк (RT-Safe, 128 сэмплов)
+   * Полностью сфокусирован на исполнении в C++ WebAssembly
    */
   process(inputs, outputs, parameters) {
     const output = outputs[0];
@@ -1528,9 +1564,10 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
     const rightOut = output[1] || leftOut;
     const numFrames = leftOut.length; // Обычно 128 сэмплов
 
-    // Плавное сглаживание параметров плагинов
+    // Плавное сглаживание плагинов
     this.smoothPluginGainRamps();
 
+    // Если воспроизведение остановлено, выводим тишину
     if (!this.isPlaying) {
       leftOut.fill(0);
       if (rightOut !== leftOut) rightOut.fill(0);
@@ -1543,258 +1580,113 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       return true;
     }
 
+    // ТРЕБОВАНИЕ 1 & 2: Если C++ ядро WASM не инициализировано, выводим тишину без запуска тяжелых JS-циклов
+    if (!this.isWasmReady || !this.wasmModule || !this.mixerPtr) {
+      leftOut.fill(0);
+      if (rightOut !== leftOut) rightOut.fill(0);
+      return true;
+    }
+
     try {
-      if (numFrames > this.mixBlockL.length) {
-        this.mixBlockL = new Float32Array(numFrames);
-        this.mixBlockR = new Float32Array(numFrames);
-        this.trackBlockL = new Float32Array(numFrames);
-        this.trackBlockR = new Float32Array(numFrames);
-        this.vocalBusBlockL = new Float32Array(numFrames);
-        this.vocalBusBlockR = new Float32Array(numFrames);
-        this.origBusBlockL = new Float32Array(numFrames);
-        this.origBusBlockR = new Float32Array(numFrames);
-      }
+      // ТРЕБОВАНИЕ 3: Применяем накопленные сгруппированные команды управления (Volume, Pan, VST Params)
+      this.flushPendingControlUpdates();
 
-      this.vocalBusBlockL.fill(0);
-      this.vocalBusBlockR.fill(0);
-      this.origBusBlockL.fill(0);
-      this.origBusBlockR.fill(0);
-
-      const blockStart = this.currentTimelineSample;
-      const blockEnd = blockStart + numFrames;
-
-      // Проверяем наличие соло на дорожках
-      let hasSolo = false;
-      for (const t of this.jsTracks.values()) {
-        if (t.solo) {
-          hasSolo = true;
-          break;
+      // Гарантируем достаточный размер выходного стереобуфера C++
+      const neededFloatSamples = numFrames * 2;
+      if (neededFloatSamples > this.outBufferCapacity) {
+        if (this.outBufferPtr && this.wasmModule._free) {
+          this.wasmModule._free(this.outBufferPtr);
+        }
+        this.outBufferCapacity = neededFloatSamples * 2;
+        if (this.wasmModule._malloc) {
+          this.outBufferPtr = this.wasmModule._malloc(this.outBufferCapacity * 4);
         }
       }
 
-      // Флаг отправки телеметрии в этом кванте (каждые 15 блоков = ~40 мс = 25 FPS)
-      const isTelemetryFrame = (this.meterFrameCounter + 1 >= this.meterReportInterval);
-      if (isTelemetryFrame) {
-        this.trackTelemetryList.length = 0;
+      // 1. ВЫЗОВ ТОЛЬКО НАТИВНОГО C++ МИКШЕРА (Единственная точка расчета аудиопотока)
+      const processFn = this.wasmModule._processMixer || this.wasmModule.processMixer;
+      if (processFn) {
+        processFn(this.mixerPtr, this.outBufferPtr, numFrames);
       }
-      let telemetryIndex = 0;
 
-      let vocalPeakL = 0;
-      let vocalPeakR = 0;
-      let vocalRmsSumL = 0;
-      let vocalRmsSumR = 0;
+      // 2. ПРЯМОЕ ПЕРЕМЕЩЕНИЕ СЭМПЛОВ ИЗ WASM HEAPВ ВЫХОДНЫЕ КАНАЛЫ БЕЗ ПРОМЕЖУТОЧНЫХ JS-АЛЛОКАЦИЙ
+      const heapF32 = this.wasmModule.HEAPF32;
+      const floatOffset = this.outBufferPtr >> 2;
 
-      // 1. Подорожечное сведение клипов с учетом громкости, панорамы, Mute и Solo
-      for (const [trackId, track] of this.jsTracks.entries()) {
-        let tPeakL = 0;
-        let tPeakR = 0;
-        let tRmsSumL = 0;
-        let tRmsSumR = 0;
-
-        if (track.mute || (hasSolo && !track.solo)) {
-          if (isTelemetryFrame) {
-            const item = this.getTrackTelemetryItem(telemetryIndex++);
-            item.trackId = trackId;
-            item.peakL = 0;
-            item.peakR = 0;
-            item.rmsL = 0;
-            item.rmsR = 0;
-            item.clipped = false;
-            item.latencySamples = 0;
-            item.pdcMs = 0;
-            this.trackTelemetryList.push(item);
-          }
-          continue;
-        }
-
-        this.trackBlockL.fill(0);
-        this.trackBlockR.fill(0);
-
-        if (track.clips && track.clips.size > 0) {
-          for (const clip of track.clips.values()) {
-            const pcm = clip.pcm;
-            if (!pcm || pcm.length === 0) continue;
-
-            const clipOffset = clip.offsetSamples || 0;
-            const isStereo = clip.isStereo !== undefined ? clip.isStereo : (pcm.length >= 2);
-            const clipLen = clip.lengthSamples || (isStereo ? Math.floor(pcm.length / 2) : pcm.length);
-            const clipEnd = clipOffset + clipLen;
-
-            if (clipEnd <= blockStart || clipOffset >= blockEnd) continue;
-
-            const intersectStart = Math.max(clipOffset, blockStart);
-            const intersectEnd = Math.min(clipEnd, blockEnd);
-            const sampleOffsetInBlock = intersectStart - blockStart;
-            const framesToCopy = intersectEnd - intersectStart;
-            const clipSampleStart = intersectStart - clipOffset;
-
-            const cGain = typeof clip.gain === 'number' ? clip.gain : 1.0;
-            const fadeIn = clip.fadeInSamples || 0;
-            const fadeOut = clip.fadeOutSamples || 0;
-
-            for (let f = 0; f < framesToCopy; f++) {
-              const frameIdxInClip = clipSampleStart + f;
-              const targetIdx = sampleOffsetInBlock + f;
-
-              let fadeMult = 1.0;
-              if (fadeIn > 0 && frameIdxInClip < fadeIn) {
-                fadeMult = frameIdxInClip / fadeIn;
-              } else if (fadeOut > 0 && frameIdxInClip >= clipLen - fadeOut) {
-                fadeMult = Math.max(0, (clipLen - frameIdxInClip) / fadeOut);
-              }
-              const effectiveGain = cGain * fadeMult;
-
-              let sL = 0;
-              let sR = 0;
-              if (isStereo) {
-                sL = (pcm[frameIdxInClip * 2] || 0) * effectiveGain;
-                sR = (pcm[frameIdxInClip * 2 + 1] || 0) * effectiveGain;
-              } else {
-                sL = (pcm[frameIdxInClip] || 0) * effectiveGain;
-                sR = sL;
-              }
-
-              this.trackBlockL[targetIdx] += sL;
-              this.trackBlockR[targetIdx] += sR;
-            }
-          }
-        }
-
-        // Применяем громкость фейдера и панораму дорожки
-        const trackGain = Math.pow(10, (track.volumeDb || 0) / 20);
-        const panNorm = Math.max(-1.0, Math.min(1.0, track.pan || 0));
-        const panAngle = (panNorm + 1.0) * (Math.PI / 4);
-        const panGainL = Math.cos(panAngle) * Math.SQRT2;
-        const panGainR = Math.sin(panAngle) * Math.SQRT2;
-
+      if (rightOut !== leftOut) {
         for (let i = 0; i < numFrames; i++) {
-          const sL = this.trackBlockL[i] * trackGain * panGainL;
-          const sR = this.trackBlockR[i] * trackGain * panGainR;
-          this.trackBlockL[i] = sL;
-          this.trackBlockR[i] = sR;
-
-          const absL = Math.abs(sL);
-          const absR = Math.abs(sR);
-          if (absL > tPeakL) tPeakL = absL;
-          if (absR > tPeakR) tPeakR = absR;
-          tRmsSumL += sL * sL;
-          tRmsSumR += sR * sR;
+          const idx = floatOffset + (i << 1);
+          leftOut[i] = heapF32[idx];
+          rightOut[i] = heapF32[idx + 1];
         }
-
-        // Маршрутизация дорожки: оригинал/видео или голоса дабберов (Шина Вокала)
-        const isOriginal = !!track.isOriginalAudio || /видео|video|оригинал|original/i.test(track.name || '');
-        if (isOriginal) {
-          for (let i = 0; i < numFrames; i++) {
-            this.origBusBlockL[i] += this.trackBlockL[i];
-            this.origBusBlockR[i] += this.trackBlockR[i];
-          }
-        } else {
-          for (let i = 0; i < numFrames; i++) {
-            this.vocalBusBlockL[i] += this.trackBlockL[i];
-            this.vocalBusBlockR[i] += this.trackBlockR[i];
-          }
+      } else {
+        for (let i = 0; i < numFrames; i++) {
+          leftOut[i] = heapF32[floatOffset + (i << 1)];
         }
-
-        if (isTelemetryFrame) {
-          const latencySamples = this.getTrackLatencySamples(trackId);
-          const pdcMs = (latencySamples / this.sampleRate) * 1000;
-          const item = this.getTrackTelemetryItem(telemetryIndex++);
-          item.trackId = trackId;
-          item.peakL = tPeakL;
-          item.peakR = tPeakR;
-          item.rmsL = Math.sqrt(tRmsSumL / numFrames);
-          item.rmsR = Math.sqrt(tRmsSumR / numFrames);
-          item.clipped = tPeakL >= 0.999 || tPeakR >= 0.999;
-          item.latencySamples = latencySamples;
-          item.pdcMs = Math.round(pdcMs * 100) / 100;
-          this.trackTelemetryList.push(item);
-        }
-      }
-
-      // 2. Обработка Шины Вокала (Vocal Bus Master)
-      const vocalGain = Math.pow(10, (this.vocalBus.volumeDb || 0) / 20);
-      const vocalPan = Math.max(-1.0, Math.min(1.0, this.vocalBus.pan || 0));
-      const vPanAngle = (vocalPan + 1.0) * (Math.PI / 4);
-      const vPanL = Math.cos(vPanAngle) * Math.SQRT2;
-      const vPanR = Math.sin(vPanAngle) * Math.SQRT2;
-
-      for (let i = 0; i < numFrames; i++) {
-        const vbL = this.vocalBusBlockL[i] * vocalGain * vPanL;
-        const vbR = this.vocalBusBlockR[i] * vocalGain * vPanR;
-        this.vocalBusBlockL[i] = vbL;
-        this.vocalBusBlockR[i] = vbR;
-
-        const absL = Math.abs(vbL);
-        const absR = Math.abs(vbR);
-        if (absL > vocalPeakL) vocalPeakL = absL;
-        if (absR > vocalPeakR) vocalPeakR = absR;
-        vocalRmsSumL += vbL * vbL;
-        vocalRmsSumR += vbR * vbR;
-      }
-
-      // 3. Авто-даккинг оригинальной звуковой дорожки при наличии голоса дабберов
-      let duckGain = 1.0;
-      const ducker = this.vocalBus?.dsp?.autoDucker || this.vocalBus?.autoDucker;
-      if (ducker && ducker.enabled) {
-        const threshLinear = Math.pow(10, (ducker.thresholdDb ?? -28.0) / 20);
-        if (vocalPeakL > threshLinear || vocalPeakR > threshLinear) {
-          duckGain = Math.pow(10, (ducker.duckDepthDb ?? ducker.duckingDb ?? -10.0) / 20);
-        }
-      }
-
-      // 4. Суммирование в Мастер с защитным Soft Peak Limiter
-      const masterGain = Math.pow(10, (this.masterVolumeDb || 0) / 20);
-      let masterPeakL = 0;
-      let masterPeakR = 0;
-      let masterRmsSumL = 0;
-      let masterRmsSumR = 0;
-
-      for (let i = 0; i < numFrames; i++) {
-        const origL = this.origBusBlockL[i] * duckGain;
-        const origR = this.origBusBlockR[i] * duckGain;
-        const rawMixL = (this.vocalBusBlockL[i] + origL) * masterGain;
-        const rawMixR = (this.vocalBusBlockR[i] + origR) * masterGain;
-
-        // Плавный True Peak Guard без щелчков и цифрового треска
-        const limL = rawMixL > 1.0 ? Math.tanh(rawMixL) : (rawMixL < -1.0 ? Math.tanh(rawMixL) : rawMixL);
-        const limR = rawMixR > 1.0 ? Math.tanh(rawMixR) : (rawMixR < -1.0 ? Math.tanh(rawMixR) : rawMixR);
-
-        leftOut[i] = limL;
-        if (rightOut !== leftOut) {
-          rightOut[i] = limR;
-        }
-
-        const absL = Math.abs(limL);
-        const absR = Math.abs(limR);
-        if (absL > masterPeakL) masterPeakL = absL;
-        if (absR > masterPeakR) masterPeakR = absR;
-        masterRmsSumL += limL * limL;
-        masterRmsSumR += limR * limR;
       }
 
       this.currentTimelineSample += numFrames;
 
-      // 5. Отправка высокоточной телеметрии уровней каждые ~40 мс (25 FPS)
+      // 3. ТЕЛЕМЕТРИЯ ПИКОВ И RMS НАПРЯМУЮ ИЗ C++ (каждые ~40 мс / 25 FPS)
       this.meterFrameCounter++;
       if (this.meterFrameCounter >= this.meterReportInterval) {
-        this.vocalBusMeterTelemetry.peakL = vocalPeakL;
-        this.vocalBusMeterTelemetry.peakR = vocalPeakR;
-        this.vocalBusMeterTelemetry.rmsL = Math.sqrt(vocalRmsSumL / numFrames);
-        this.vocalBusMeterTelemetry.rmsR = Math.sqrt(vocalRmsSumR / numFrames);
+        const getPeakFn = this.wasmModule._getTrackPeak || this.wasmModule.getTrackPeak;
+        const getRmsFn = this.wasmModule._getTrackRMS || this.wasmModule.getTrackRMS;
 
-        this.masterMeterTelemetry.peakL = masterPeakL;
-        this.masterMeterTelemetry.peakR = masterPeakR;
-        this.masterMeterTelemetry.rmsL = Math.sqrt(masterRmsSumL / numFrames);
-        this.masterMeterTelemetry.rmsR = Math.sqrt(masterRmsSumR / numFrames);
+        this.trackTelemetryList.length = 0;
+        let telemetryIndex = 0;
 
-        const isClipped = masterPeakL >= 0.999 || masterPeakR >= 0.999;
+        if (getPeakFn && getRmsFn) {
+          // Замер уровня для каждой активной дорожки
+          for (const [trackId] of this.jsTracks.entries()) {
+            const peakL = getPeakFn(this.mixerPtr, trackId, 0);
+            const peakR = getPeakFn(this.mixerPtr, trackId, 1);
+            const rmsL = getRmsFn(this.mixerPtr, trackId, 0);
+            const rmsR = getRmsFn(this.mixerPtr, trackId, 1);
+            const latencySamples = this.getTrackLatencySamples(trackId);
+            const pdcMs = Math.round(((latencySamples / this.sampleRate) * 1000) * 100) / 100;
 
-        this.sendTelemetryMeters(
-          this.trackTelemetryList,
-          this.vocalBusMeterTelemetry,
-          this.masterMeterTelemetry,
-          isClipped
-        );
+            const item = this.getTrackTelemetryItem(telemetryIndex++);
+            item.trackId = trackId;
+            item.peakL = peakL;
+            item.peakR = peakR;
+            item.rmsL = rmsL;
+            item.rmsR = rmsR;
+            item.clipped = peakL >= 0.999 || peakR >= 0.999;
+            item.latencySamples = latencySamples;
+            item.pdcMs = pdcMs;
+            this.trackTelemetryList.push(item);
+          }
+
+          // Замер уровня для Вокальной Шины (Vocal Bus = trackId 999)
+          const vbPeakL = getPeakFn(this.mixerPtr, 999, 0);
+          const vbPeakR = getPeakFn(this.mixerPtr, 999, 1);
+          const vbRmsL = getRmsFn(this.mixerPtr, 999, 0);
+          const vbRmsR = getRmsFn(this.mixerPtr, 999, 1);
+          this.vocalBusMeterTelemetry.peakL = vbPeakL;
+          this.vocalBusMeterTelemetry.peakR = vbPeakR;
+          this.vocalBusMeterTelemetry.rmsL = vbRmsL;
+          this.vocalBusMeterTelemetry.rmsR = vbRmsR;
+
+          // Замер уровня для Мастера (Master = trackId 1000)
+          const mPeakL = getPeakFn(this.mixerPtr, 1000, 0);
+          const mPeakR = getPeakFn(this.mixerPtr, 1000, 1);
+          const mRmsL = getRmsFn(this.mixerPtr, 1000, 0);
+          const mRmsR = getRmsFn(this.mixerPtr, 1000, 1);
+          this.masterMeterTelemetry.peakL = mPeakL;
+          this.masterMeterTelemetry.peakR = mPeakR;
+          this.masterMeterTelemetry.rmsL = mRmsL;
+          this.masterMeterTelemetry.rmsR = mRmsR;
+
+          const isClipped = mPeakL >= 0.999 || mPeakR >= 0.999;
+
+          this.sendTelemetryMeters(
+            this.trackTelemetryList,
+            this.vocalBusMeterTelemetry,
+            this.masterMeterTelemetry,
+            isClipped
+          );
+        }
         this.meterFrameCounter = 0;
       }
     } catch (err) {
