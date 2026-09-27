@@ -684,12 +684,16 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
           }
 
           syncedClipBuffersRef.current.set(clipId, pcmFloat32);
+          const offsetSamples = typeof offsetSec === 'number' ? Math.round(offsetSec * 48000) : 0;
+          const lengthSamples = Math.floor(pcmFloat32.length / 2);
           workletNodeRef.current.port.postMessage({
             type: 'LOAD_TRACK_CLIP',
             trackId,
             clipId,
             audioData: pcmFloat32,
             offsetSec,
+            offsetSamples,
+            lengthSamples,
             gain: 1.0,
             pan: 0.0,
             isStereo: true
@@ -735,12 +739,17 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
         workletNodeRef.current.port.addEventListener('message', handleAck);
         workletNodeRef.current.port.start();
 
+        const offsetSamples = typeof offsetSec === 'number' ? Math.round(offsetSec * 48000) : 0;
+        const lengthSamples = isStereo ? Math.floor(pcmFloat32.length / 2) : pcmFloat32.length;
+
         workletNodeRef.current.port.postMessage({
           type: 'LOAD_TRACK_CLIP',
           trackId,
           clipId,
           audioData: pcmFloat32,
           offsetSec,
+          offsetSamples,
+          lengthSamples,
           gain,
           pan,
           isStereo
@@ -822,15 +831,23 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
                 freeClipWasmPointer(c.id);
               }
               syncedClipBuffersRef.current.set(c.id, c.buffer);
+              const isStereo = c.buffer.length >= (c.lengthSamples || 0) * 2;
+              const lengthSamples = c.lengthSamples || (isStereo ? Math.floor(c.buffer.length / 2) : c.buffer.length);
               workletNodeRef.current.port.postMessage({
                 type: 'LOAD_TRACK_CLIP',
                 trackId: t.id,
                 clipId: c.id,
                 audioData: c.buffer,
                 offsetSamples: c.offsetSamples || 0,
+                lengthSamples,
                 gain: typeof c.gain === 'number' ? c.gain : 1.0,
                 pan: typeof c.pan === 'number' ? c.pan : 0.0,
-                isStereo: c.buffer.length >= (c.lengthSamples || 0) * 2
+                isStereo,
+                isOriginalAudio: !!t.isOriginalAudio,
+                trackVolumeDb: t.volumeDb,
+                trackPan: t.pan,
+                trackSolo: !!t.solo,
+                trackMute: !!t.mute
               });
             }
           }

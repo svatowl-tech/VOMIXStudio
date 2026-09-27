@@ -530,26 +530,36 @@ export class LiveDAWEngine {
 
   // --- Управление памятью WebAssembly кучи (HEAPF32) ---
   public syncClipBufferToWasm(clip: ClipConfig): number {
+    if (!clip || !clip.id) return 0;
+
     const existingPtr = this.activeWasmPointers.get(clip.id);
-    if (existingPtr && clip.wasmBufferPtr && existingPtr !== clip.wasmBufferPtr) {
-      globalNativeDAWBridge.freeFloats(existingPtr);
-      this.activeWasmPointers.delete(clip.id);
+
+    // Если указатель уже существует и активен для этого клипа, повторно НЕ дублируем выделение памяти!
+    if (existingPtr && clip.wasmBufferPtr === existingPtr) {
+      return existingPtr;
     }
-    if (clip.wasmBufferPtr && this.activeWasmPointers.get(clip.id) === clip.wasmBufferPtr) {
-      return clip.wasmBufferPtr;
-    }
+
     if (!clip.buffer || clip.buffer.length === 0) {
       return 0;
     }
-    // Если для этого clipId уже был выделен другой буфер в WASM, принудительно освобождаем старый перед повторной аллокацией
+
+    // Если для этого clipId выделялся старый указатель в WASM — освобождаем его перед повторной аллокацией
     if (existingPtr) {
       globalNativeDAWBridge.freeFloats(existingPtr);
       this.activeWasmPointers.delete(clip.id);
     }
-    const ptr = globalNativeDAWBridge.writeFloat32Direct(clip.buffer);
-    clip.wasmBufferPtr = ptr;
-    this.activeWasmPointers.set(clip.id, ptr);
-    return ptr;
+
+    try {
+      const ptr = globalNativeDAWBridge.writeFloat32Direct(clip.buffer);
+      clip.wasmBufferPtr = ptr;
+      if (ptr > 0) {
+        this.activeWasmPointers.set(clip.id, ptr);
+      }
+      return ptr;
+    } catch (err) {
+      console.warn(`[LiveDAWEngine] Ошибка аллокации памяти WASM для клипа #${clip.id}:`, err);
+      return 0;
+    }
   }
 
   public releaseClipWasmBuffer(clipId: number): void {
@@ -595,14 +605,14 @@ export class LiveDAWEngine {
   }
 
   /**
-   * Синхронизация клипов конкретной дорожки с автоматической сборкой мусора WASM
+   * Синхронизация клипов конкретной дорожки с контролем повторных копирований в WASM
    */
   public syncTrackClips(trackId: number, clips: ClipConfig[]): void {
     const track = this.tracks.find((t) => t.id === trackId);
     if (track) {
       track.clips = clips;
       for (const clip of clips) {
-        if (clip && clip.buffer) {
+        if (clip && clip.buffer && (!clip.wasmBufferPtr || !this.activeWasmPointers.has(clip.id))) {
           this.syncClipBufferToWasm(clip);
         }
       }
@@ -612,14 +622,14 @@ export class LiveDAWEngine {
   }
 
   /**
-   * Синхронизация всех дорожек проекта с автоматической сборкой мусора WASM
+   * Синхронизация всех дорожек проекта с выборочной передачей только новых или измененных клипов
    */
   public syncAllTracks(tracks: TrackState[]): void {
     this.tracks = tracks;
     for (const track of tracks) {
       if (track && Array.isArray(track.clips)) {
         for (const clip of track.clips) {
-          if (clip && clip.buffer) {
+          if (clip && clip.buffer && (!clip.wasmBufferPtr || !this.activeWasmPointers.has(clip.id))) {
             this.syncClipBufferToWasm(clip);
           }
         }

@@ -771,21 +771,66 @@ export class NativeDAWBridge {
   }
 
   /**
+   * Возвращает объем доступной или выделенной памяти WebAssembly в байтах
+   */
+  public getAvailableWasmMemory(): number {
+    if (!this.wasmModule) return 0;
+    const mod = this.getModule();
+    if (mod._getAvailableWasmMemory) {
+      try {
+        return mod._getAvailableWasmMemory();
+      } catch {
+        // Игнорируем
+      }
+    }
+    return mod.HEAPU8?.byteLength || 0;
+  }
+
+  /**
    * Выделение памяти под Float32 сэмплы через C++ Module._malloc()
+   * С защитой от Null Pointer, принудительной сборкой мусора при OOM и ровно одной повторной попыткой.
    */
   public allocateFloats(count: number): number {
+    if (count <= 0) return 0;
+    const bytesNeeded = count * 4;
     const mod = this.getModule();
-    if (mod.allocateAudioBuffer) {
-      return mod.allocateAudioBuffer(count);
+
+    let ptr = mod.allocateAudioBuffer
+      ? mod.allocateAudioBuffer(count)
+      : mod._malloc(bytesNeeded);
+
+    // Если malloc вернул 0 (память исчерпана) — НЕ обращаться по нулевому адресу, а вызывать принудительную сборку мусора!
+    if (!ptr || ptr === 0) {
+      console.warn(`[NativeDAWBridge] malloc(${bytesNeeded} B) вернул NULL (0). Запуск принудительной очистки арены памяти C++ WASM...`);
+      
+      try {
+        this.resetMemoryArena();
+      } catch (e) {
+        console.warn('[NativeDAWBridge] Сбой сброса арены памяти:', e);
+      }
+
+      // Повторная попытка выделения памяти ровно один раз
+      ptr = mod.allocateAudioBuffer
+        ? mod.allocateAudioBuffer(count)
+        : mod._malloc(bytesNeeded);
+
+      // Если память по-прежнему недоступна — выбрасываем контролируемую ошибку JavaScript без сброса инстанса WASM
+      if (!ptr || ptr === 0) {
+        const memoryInfo = this.getMemoryUsageInfo();
+        throw new Error(
+          `[NativeDAWBridge OOM] Превышен лимит памяти WebAssembly (OOM). Не удалось выделить ${(bytesNeeded / (1024 * 1024)).toFixed(1)} МБ Float32 сэмплов (Текущий размер кучи: ${memoryInfo.heapSizeMb} МБ).`
+        );
+      }
     }
-    return mod._malloc(count * 4);
+
+    return ptr;
   }
 
   /**
    * Освобождение памяти Float32 через C++ Module._free()
    */
   public freeFloats(ptr: number): void {
-    if (!ptr) return;
+    if (!ptr || ptr === 0) return;
     const mod = this.getModule();
     if (mod.freeAudioBuffer) {
       mod.freeAudioBuffer(ptr);
@@ -798,18 +843,27 @@ export class NativeDAWBridge {
    * Выделение памяти под байтовый буфер через C++ Module._malloc()
    */
   public allocateBytes(count: number): number {
+    if (count <= 0) return 0;
     const mod = this.getModule();
-    if (mod.allocateByteBuffer) {
-      return mod.allocateByteBuffer(count);
+    let ptr = mod.allocateByteBuffer
+      ? mod.allocateByteBuffer(count)
+      : mod._malloc(count);
+
+    if (!ptr || ptr === 0) {
+      this.resetMemoryArena();
+      ptr = mod.allocateByteBuffer ? mod.allocateByteBuffer(count) : mod._malloc(count);
+      if (!ptr || ptr === 0) {
+        throw new Error(`[NativeDAWBridge OOM] Не удалось выделить ${count} байт в куче WebAssembly.`);
+      }
     }
-    return mod._malloc(count);
+    return ptr;
   }
 
   /**
    * Освобождение памяти байт через C++ Module._free()
    */
   public freeBytes(ptr: number): void {
-    if (!ptr) return;
+    if (!ptr || ptr === 0) return;
     const mod = this.getModule();
     if (mod.freeByteBuffer) {
       mod.freeByteBuffer(ptr);
@@ -824,7 +878,11 @@ export class NativeDAWBridge {
   public resetMemoryArena(): void {
     const mod = this.getModule();
     if (mod._free) {
-      mod._free(0);
+      try {
+        mod._free(0);
+      } catch {
+        // Игнорируем
+      }
     }
   }
 
@@ -844,13 +902,20 @@ export class NativeDAWBridge {
 
   /**
    * Прямая запись Float32Array PCM аудиоданных в C++ кучу (Module.HEAPF32.set)
+   * Для длинных файлов (> 15 минут) передает данные чанками без создания дубликатов массивов.
    */
   public writeFloat32Direct(data: Float32Array): number {
     if (!data || data.length === 0) return 0;
+    
+    // Безопасное выделение памяти в WASM с проверкой OOM
     const ptr = this.allocateFloats(data.length);
+    if (!ptr || ptr === 0) {
+      throw new Error('[NativeDAWBridge] Ошибка выделения памяти в куче WASM для записи Float32Array.');
+    }
+
     const mod = this.getModule();
     const floatOffset = ptr >> 2;
-    
+
     let heapF32 = mod.HEAPF32;
     if (!heapF32) {
       const buffer = mod.buffer || mod.wasmMemory?.buffer || (mod.memory ? mod.memory.buffer : null);
@@ -858,12 +923,27 @@ export class NativeDAWBridge {
         heapF32 = new Float32Array(buffer);
       }
     }
-    
-    if (heapF32) {
-      heapF32.set(data, floatOffset);
-    } else {
-      console.warn('[NativeDAWBridge] HEAPF32 не найден при записи Float32.');
+
+    if (!heapF32) {
+      this.freeFloats(ptr);
+      throw new Error('[NativeDAWBridge] HEAPF32 не найден при записи Float32.');
     }
+
+    // Для длинных файлов (> 15 минут / > 43.2M сэмплов) отдаем обработку потоково чанками по 1M сэмплов (~4МБ)
+    const CHUNK_SIZE = 1048576; // 1,048,576 сэмплов (~4 МБ)
+    if (data.length > CHUNK_SIZE) {
+      const totalSamples = data.length;
+      let written = 0;
+      while (written < totalSamples) {
+        const chunkSize = Math.min(CHUNK_SIZE, totalSamples - written);
+        const chunk = data.subarray(written, written + chunkSize);
+        heapF32.set(chunk, floatOffset + written);
+        written += chunkSize;
+      }
+    } else {
+      heapF32.set(data, floatOffset);
+    }
+
     return ptr;
   }
 

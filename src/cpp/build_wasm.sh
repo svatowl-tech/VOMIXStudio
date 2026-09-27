@@ -1,12 +1,13 @@
 #!/bin/bash
 # ==============================================================================
 # Скрипт компиляции модульного C++ DAW Core в WebAssembly с помощью Emscripten
+# С защитой от переполнения кучи (MAXIMUM_MEMORY=2GB, ABORTING_MALLOC=0)
 # ==============================================================================
 
 # Останавливать скрипт при любой ошибке
 set -euo pipefail
 
-# Проверка наличия emcc
+# Проверка наличия emcc / em++
 if ! command -v emcc &> /dev/null
 then
     echo "Ошибка: Emscripten (emcc) не найден в PATH."
@@ -17,7 +18,7 @@ then
     exit 1
 fi
 
-echo "Начало модульной компиляции DAW Core в WebAssembly (SIMD128 + Embind)..."
+echo "Начало модульной компиляции DAW Core в WebAssembly (SIMD128 + Embind + 2GB Memory)..."
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 cd "$SCRIPT_DIR"
@@ -50,12 +51,13 @@ if em++ -O3 \
     -I. \
     -s WASM=1 \
     -s INITIAL_MEMORY=134217728 \
-    -s MAXIMUM_MEMORY=1073741824 \
+    -s MAXIMUM_MEMORY=2147483648 \
     -s ALLOW_MEMORY_GROWTH=1 \
+    -s ABORTING_MALLOC=0 \
     -s ENVIRONMENT=web,worker \
     -s MODULARIZE=1 \
     -s EXPORT_NAME="CreateDAWCoreModule" \
-    -s EXPORTED_FUNCTIONS='["_malloc", "_free", "_createMixerInstance", "_freeMixerInstance", "_processMixer", "_setTimelinePosition", "_addClipToTrack", "_setTrackVolume", "_setTrackPan", "_setTrackSolo", "_setTrackMute", "_removeAllTracks", "_setMasterVolume", "_setMasterLimiter", "_setVocalBusVolume", "_setVocalBusAutoDucker", "_loadTrackPlugin", "_setTrackPluginParam", "_setTrackPluginBypass", "_setTrackPluginWetDry", "_loadMasterPlugin", "_setMasterPluginParam", "_setMasterPluginBypass", "_setMasterPluginWetDry", "_getTrackPeak", "_getTrackRMS"]' \
+    -s EXPORTED_FUNCTIONS='["_malloc", "_free", "_getAvailableWasmMemory", "_createMixerInstance", "_freeMixerInstance", "_processMixer", "_setTimelinePosition", "_addClipToTrack", "_addTrack", "_getTrack", "_setTrackIsOriginalAudio", "_setTrackVolume", "_setTrackPan", "_setTrackSolo", "_setTrackMute", "_removeAllTracks", "_setMasterVolume", "_setMasterLimiter", "_setVocalBusVolume", "_setVocalBusAutoDucker", "_loadTrackPlugin", "_setTrackPluginParam", "_setTrackPluginBypass", "_setTrackPluginWetDry", "_loadMasterPlugin", "_setMasterPluginParam", "_setMasterPluginBypass", "_setMasterPluginWetDry", "_getTrackPeak", "_getTrackRMS"]' \
     -s EXPORTED_RUNTIME_METHODS='["cwrap", "setValue", "getValue", "HEAPF32"]' \
     -s SINGLE_FILE=0 \
     "${SOURCES[@]}" \
@@ -66,4 +68,3 @@ else
     echo "Ошибка: Сборка WebAssembly-модуля (em++) завершилась со сбоем!"
     exit 1
 fi
-

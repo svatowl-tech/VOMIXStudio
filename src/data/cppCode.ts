@@ -5,6 +5,7 @@ export const FULL_CPP_CODE = Object.values(MODULAR_CPP_SOURCES).join('\n\n');
 export const BUILD_WASM_SCRIPT = `#!/bin/bash
 # ==============================================================================
 # Скрипт модульной компиляции C++ DAW Core в WebAssembly с помощью Emscripten
+# С защитой от переполнения кучи (MAXIMUM_MEMORY=2GB, ABORTING_MALLOC=0)
 # ==============================================================================
 
 if ! command -v emcc &> /dev/null
@@ -17,7 +18,7 @@ then
     exit 1
 fi
 
-echo "Начало модульной компиляции DAW Core в WebAssembly (SIMD128 + Embind)..."
+echo "Начало модульной компиляции DAW Core в WebAssembly (SIMD128 + Embind + 2GB Memory)..."
 
 SCRIPT_DIR="$( cd "$( dirname "\${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 cd "$SCRIPT_DIR"
@@ -43,12 +44,13 @@ emcc -O3 \\
     -I. \\
     -s WASM=1 \\
     -s INITIAL_MEMORY=134217728 \\
-    -s MAXIMUM_MEMORY=1073741824 \\
+    -s MAXIMUM_MEMORY=2147483648 \\
     -s ALLOW_MEMORY_GROWTH=1 \\
+    -s ABORTING_MALLOC=0 \\
     -s ENVIRONMENT=web,worker \\
     -s MODULARIZE=1 \\
     -s EXPORT_NAME="CreateDAWCoreModule" \\
-    -s EXPORTED_FUNCTIONS='["_malloc", "_free"]' \\
+    -s EXPORTED_FUNCTIONS='["_malloc", "_free", "_getAvailableWasmMemory"]' \\
     -s EXPORTED_RUNTIME_METHODS='["cwrap", "setValue", "getValue", "HEAPF32"]' \\
     -s SINGLE_FILE=0 \\
     "\${SOURCES[@]}" \\

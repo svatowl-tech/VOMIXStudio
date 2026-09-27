@@ -72,6 +72,11 @@ static bool JS_AddClipToTrack(
     bool isStereo
 ) {
     Track* track = mixer.getTrack(trackId);
+    if (!track) {
+        auto newTrack = new Track(trackId, "Track " + std::to_string(trackId), mixer.sampleRate);
+        mixer.addTrack(newTrack);
+        track = newTrack;
+    }
     if (!track) return false;
 
     Clip clip;
@@ -790,6 +795,40 @@ void setTimelinePosition(uintptr_t mixerPtr, int64_t samplePosition) {
 }
 
 EMSCRIPTEN_KEEPALIVE
+bool addTrack(uintptr_t mixerPtr, uint32_t trackId, const char* name, bool isOriginalAudio) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    DAWCore::Track* existing = mixer->getTrack(trackId);
+    if (!existing) {
+        std::string trackName = (name && strlen(name) > 0) ? name : ("Track " + std::to_string(trackId));
+        auto newTrack = new DAWCore::Track(trackId, trackName, mixer->sampleRate);
+        newTrack->isOriginalAudio = isOriginalAudio;
+        mixer->addTrack(newTrack);
+    } else {
+        if (name && strlen(name) > 0) existing->name = name;
+        existing->isOriginalAudio = isOriginalAudio;
+    }
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uintptr_t getTrack(uintptr_t mixerPtr, uint32_t trackId) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return 0;
+    return reinterpret_cast<uintptr_t>(mixer->getTrack(trackId));
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool setTrackIsOriginalAudio(uintptr_t mixerPtr, uint32_t trackId, bool isOriginalAudio) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    DAWCore::Track* track = mixer->getTrack(trackId);
+    if (!track) return false;
+    track->isOriginalAudio = isOriginalAudio;
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
 bool addClipToTrack(
     uintptr_t mixerPtr,
     uint32_t trackId,
@@ -807,6 +846,11 @@ bool addClipToTrack(
     auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
     if (!mixer) return false;
     DAWCore::Track* track = mixer->getTrack(trackId);
+    if (!track) {
+        auto newTrack = new DAWCore::Track(trackId, "Track " + std::to_string(trackId), mixer->sampleRate);
+        mixer->addTrack(newTrack);
+        track = newTrack;
+    }
     if (!track) return false;
 
     DAWCore::Clip clip;
