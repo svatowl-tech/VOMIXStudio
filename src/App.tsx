@@ -42,6 +42,7 @@ export default function App() {
     seek,
     uploadAudioFileToTrack,
     uploadRawPCMToTrack,
+    uploadClipsBatchToTrack,
     syncAllTracks,
     syncTrackClips,
     setTrackVolume,
@@ -746,6 +747,7 @@ export default function App() {
               onUpdateTrack={handleUpdateTrack}
               syncAllTracks={syncAllTracks}
               syncTrackClips={syncTrackClips}
+              uploadClipsBatchToTrack={uploadClipsBatchToTrack}
               videoFile={sourceVideoFile}
               onTogglePlay={togglePlay}
             />

@@ -26,6 +26,7 @@ import {
 import { systemLogger } from './SystemLogger';
 import { VideoExportParameters, DEFAULT_VIDEO_EXPORT_PARAMS } from './RenderPipelineGraphManager';
 import { BlobUrlRegistry } from '../utils/BlobUrlRegistry';
+import { toSafeArray } from '../utils/safeIterables';
 
 export { BlobUrlRegistry };
 
@@ -161,6 +162,7 @@ export class RenderManager {
   /**
    * Высокоскоростной офлайн-рендеринг мастер-микса из графа дорожек DAW
    * Делегирует выполнение в C++ BatchOfflineRenderer через NativeDAWBridge.
+   * Гарантирует строгое 1-в-1 совпадение уровней громкости, панорамы и эффектов с предпрослушиванием.
    */
   public async renderMasterMix(
     tracks: TrackState[],
@@ -174,10 +176,28 @@ export class RenderManager {
     this.addLog('Запуск нативного C++ офлайн-рендеринга мастер-микса...');
     this.notifyProgress('rendering_audio', 5, 'Анализ графа треков и распределение WebAssembly памяти...');
 
+    // Фиксация параметров каждого трека 1-в-1 с плеером предпрослушивания
+    const safeTracks = toSafeArray<TrackState>(tracks);
+    safeTracks.forEach((t) => {
+      const isOrig = !!t.isOriginalAudio || /видео|video|оригинал|original/i.test(t.name || '');
+      this.addLog(
+        `[Player Balance] Трек #${t.id} [${t.name}] | Оригинал: ${isOrig ? 'Да' : 'Нет'} | Громкость: ${(t.volumeDb || 0).toFixed(1)} dB | Pan: ${(t.pan || 0).toFixed(2)} | Mute: ${!!t.mute} | Solo: ${!!t.solo}`
+      );
+    });
+
+    if (vocalBus) {
+      this.addLog(
+        `[Vocal Bus] Громкость: ${(vocalBus.volumeDb || 0).toFixed(1)} dB | Mute: ${!!vocalBus.mute} | AutoDucker: ${vocalBus.dsp?.autoDucker?.enabled ? 'ВКЛ (Duck Depth: ' + (vocalBus.dsp.autoDucker.duckDepthDb ?? -8) + ' dB)' : 'ВЫКЛ'}`
+      );
+    }
+    this.addLog(
+      `[Master Mix] Громкость: ${(master.volumeDb || 0).toFixed(1)} dB | Limiter: ${master.limiterEnabled ? 'ВКЛ (Потолок: ' + (master.limiterCeilingDb ?? -0.1) + ' dB)' : 'ВЫКЛ'}`
+    );
+
     const bridge = globalNativeDAWBridge;
 
     const result = await bridge.renderMasterMix(
-      tracks,
+      safeTracks,
       master,
       sampleRate,
       bitDepth,
@@ -353,60 +373,31 @@ export class RenderManager {
         }
       }
 
-      this.notifyProgress('muxing_video', 55, 'Финальный проход кодирования и сборка контейнера...');
-      this.addLog(`Запуск FFmpeg: объединение видеопотока, сведенного аудио и оригинальной аудиодорожки в [${tempOutputFile}]...`);
+      this.notifyProgress('muxing_video', 55, 'Финальный проход муксинга: объединение видео с C++ мастер-миксом...');
+      this.addLog(`Запуск FFmpeg: замена аудиопотока на сведенный мастер-микс C++ DSP (1-в-1 с превью) в [${tempOutputFile}]...`);
 
-      if (!hasTimelineOriginal) {
-        try {
-          this.addLog('Подмешивание оригинального звука видео к сведенным дорожкам дабберов (баланс закадрового озвучания)...');
-          await this.ffmpeg.exec([
-            '-i', 'input_video.mp4',
-            '-i', 'audio_mix.wav',
-            '-filter_complex', '[0:a:0]volume=0.22[aorig];[1:a:0]volume=1.25[adub];[aorig][adub]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]',
-            '-map', '0:v:0',
-            '-map', '[aout]',
-            '-map', '0:a:0?',
-            ...videoArgs,
-            ...audioArgs,
-            '-metadata:s:a:0', `title=${track1Title}`,
-            '-metadata:s:a:1', `title=${track2Title}`,
-            '-shortest',
-            ...(params.fastStart ? ['-movflags', '+faststart'] : []),
-            tempOutputFile
-          ]);
-        } catch (filterErr) {
-          this.addLog('Резервный муксинг с сохранением двух аудиодорожек...');
-          await this.ffmpeg.exec([
-            '-i', 'input_video.mp4',
-            '-i', 'audio_mix.wav',
-            '-map', '0:v:0',
-            '-map', '1:a:0',
-            '-map', '0:a:0?',
-            ...videoArgs,
-            ...audioArgs,
-            '-metadata:s:a:0', `title=${track1Title}`,
-            '-metadata:s:a:1', `title=${track2Title}`,
-            '-shortest',
-            ...(params.fastStart ? ['-movflags', '+faststart'] : []),
-            tempOutputFile
-          ]);
-        }
-      } else {
-        await this.ffmpeg.exec([
-          '-i', 'input_video.mp4',
-          '-i', 'audio_mix.wav',
-          '-map', '0:v:0',
-          '-map', '1:a:0',
-          '-map', '0:a:0?',
-          ...videoArgs,
-          ...audioArgs,
-          '-metadata:s:a:0', `title=${track1Title}`,
-          '-metadata:s:a:1', `title=${track2Title}`,
-          '-shortest',
-          ...(params.fastStart ? ['-movflags', '+faststart'] : []),
-          tempOutputFile
-        ]);
+      // СТРОГОЕ СООТВЕТСТВИЕ 1-В-1:
+      // Все дорожки (оригинал с точным фейдером volumeDb/pan/mute, голоса дублеров, VocalBus и Auto-Ducking)
+      // уже сведены нативно внутри C++ DSP ядра в файл audio_mix.wav.
+      // Фильтр amix полностью исключен, аттенюация устранена.
+      const ffmpegArgs: string[] = [
+        '-i', 'input_video.mp4',
+        '-i', 'audio_mix.wav',
+        '-map', '0:v:0',
+        '-map', '1:a:0',
+        ...videoArgs,
+        ...audioArgs,
+        '-metadata:s:a:0', `title=${track1Title}`,
+        '-shortest'
+      ];
+
+      if (params.fastStart) {
+        ffmpegArgs.push('-movflags', '+faststart');
       }
+      ffmpegArgs.push(tempOutputFile);
+
+      this.addLog(`Выполнение команды FFmpeg: ffmpeg ${ffmpegArgs.join(' ')}`);
+      await this.ffmpeg.exec(ffmpegArgs);
 
       this.notifyProgress('muxing_video', 90, `Чтение готового ${ext.toUpperCase()} файла из виртуальной памяти...`);
       this.addLog(`Чтение результата ${tempOutputFile}...`);

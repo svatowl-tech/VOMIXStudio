@@ -411,30 +411,18 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
     systemLogger.info('MVPPipeline', 'Шаг 4/4: Старт финального C++ мастеринга и FFmpeg видео-муксинга.');
 
     try {
-      let targetVocalBus = currentVocalBus || vocalBus;
-      let targetTracks = [...tracks];
+      const targetVocalBus = currentVocalBus || vocalBus;
+      const targetTracks = [...toSafeArray<TrackState>(tracks)];
 
-      // Автоматическое согласование громкости перед рендером
-      if (autoAlignBeforeRender) {
-        const aligned = globalLoudnessAutoAligner.applyAutoAlignment(
-          toSafeArray<TrackState>(targetTracks),
-          targetVocalBus,
-          master,
-          targetDeltaDb
-        );
-
-        targetVocalBus = aligned.updatedVocalBus;
-        setCurrentVocalBus(aligned.updatedVocalBus);
-        if (onVocalBusChange) onVocalBusChange(aligned.updatedVocalBus);
-
-        addLog(
-          `[AutoLoudness] Финальная калибровка: Оригинал=${aligned.comparison.originalLoudness.speechRmsDb} dBFS, Дубляж=${aligned.comparison.dubbedLoudness.speechRmsDb} dBFS. Разница: +${aligned.comparison.targetDeltaDb} dB.`
-        );
-        systemLogger.info(
-          'MVPPipeline',
-          `Авто-выравнивание перед рендером: Оригинал=${aligned.comparison.originalLoudness.speechRmsDb} dBFS, Закадр=${aligned.comparison.dubbedLoudness.speechRmsDb} dBFS (Цель +${aligned.comparison.targetDeltaDb} dB)`
-        );
-      }
+      // СТРОГО 1-В-1: Запрещены скрытые поправки перед рендером
+      // Все коэффициенты громкости и эффектов строго зафиксированы из предпрослушивания
+      addLog(
+        `[Mixer 1-в-1] Фиксация параметров: Шина вокала ${(targetVocalBus.volumeDb || 0).toFixed(1)} dB, Мастер ${(master.volumeDb || 0).toFixed(1)} dB, треков: ${targetTracks.length}`
+      );
+      systemLogger.info(
+        'MVPPipeline',
+        `Шаг 4/4: Фиксация параметров 1-в-1 с превью: Шина вокала ${(targetVocalBus.volumeDb || 0).toFixed(1)} dB, треков: ${targetTracks.length}`
+      );
 
       const res = await onRunFinalMasterAndMux(targetTracks, targetVocalBus);
       setResultVideoUrl(res.videoUrl);
@@ -1101,15 +1089,14 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
                   </div>
 
                   <div className="flex items-center justify-between pt-1">
-                    <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-300 select-none">
-                      <input
-                        type="checkbox"
-                        checked={autoAlignBeforeRender}
-                        onChange={(e) => setAutoAlignBeforeRender(e.target.checked)}
-                        className="rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-0 cursor-pointer"
-                      />
-                      <span>Автоматически согласовать финальную громкость (+{targetDeltaDb.toFixed(1)} dB) перед рендером</span>
-                    </label>
+                    <button
+                      type="button"
+                      onClick={() => handleApplyAutoLoudness()}
+                      className="px-3 py-1.5 bg-cyan-900/40 hover:bg-cyan-800/60 border border-cyan-500/40 rounded-lg text-xs text-cyan-200 transition-colors flex items-center gap-1.5 cursor-pointer shadow-sm active:scale-95"
+                    >
+                      <Zap size={13} className="text-cyan-400" />
+                      <span>Применить авто-баланс к плееру (+{targetDeltaDb.toFixed(1)} dB)</span>
+                    </button>
                     <span className="text-[10px] text-emerald-400 font-mono flex items-center gap-1">
                       <ShieldCheck size={12} /> Limiter -0.1 dB
                     </span>

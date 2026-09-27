@@ -1383,6 +1383,11 @@ export class NativeDAWBridge {
     const hasSolo = tracks.some((t) => !!t.solo);
     const activeTracks = tracks.filter((t) => !t.mute && (!hasSolo || t.solo));
 
+    systemLogger.info(
+      'C++ WASM',
+      `[renderMasterMixDirect] Офлайн-рендер C++ DSP микса 1-в-1. Всего треков: ${tracks.length}, активных: ${activeTracks.length}, solo-режим: ${hasSolo}`
+    );
+
     // Инициализируем DSP-состояния для каждой дорожки
     const trackStates = activeTracks.map((t) => ({
       trackId: t.id,
@@ -1498,11 +1503,12 @@ export class NativeDAWBridge {
           processVSTBlock(trackBlockL, trackBlockR, currentBlockFrames, t.vstPlugins, tState.vstStates, sampleRate);
         }
 
-        // 5. Применяем фейдер громкости и панорамы дорожки
+        // 5. Применяем фейдер громкости и панорамы дорожки (Constant Power Pan Law, 1-в-1 с C++ ядром и предпрослушиванием)
         const trackVolLinear = Math.pow(10, (t.volumeDb || 0) / 20);
         const pan = Math.max(-1, Math.min(1, t.pan || 0));
-        const panL = Math.min(1.0, 1.0 - pan);
-        const panR = Math.min(1.0, 1.0 + pan);
+        const angle = (pan + 1.0) * (Math.PI / 4.0);
+        const panL = Math.cos(angle);
+        const panR = Math.sin(angle);
 
         for (let i = 0; i < currentBlockFrames; i++) {
           trackBlockL[i] *= trackVolLinear * panL;
@@ -1541,11 +1547,12 @@ export class NativeDAWBridge {
           processVSTBlock(vocalBusBlockL, vocalBusBlockR, currentBlockFrames, vocalBus.vstPlugins, vocalBusState.vstStates, sampleRate);
         }
 
-        // Применяем фейдер и панораму шины вокала
+        // Применяем фейдер и панораму шины вокала (Constant Power Pan Law, 1-в-1 с превью)
         const vocalVolLinear = Math.pow(10, (vocalBus.volumeDb || 0) / 20);
         const vocalPan = Math.max(-1, Math.min(1, vocalBus.pan || 0));
-        const vPanL = Math.min(1.0, 1.0 - vocalPan);
-        const vPanR = Math.min(1.0, 1.0 + vocalPan);
+        const vAngle = (vocalPan + 1.0) * (Math.PI / 4.0);
+        const vPanL = Math.cos(vAngle);
+        const vPanR = Math.sin(vAngle);
 
         for (let i = 0; i < currentBlockFrames; i++) {
           vocalBusBlockL[i] *= vocalVolLinear * vPanL;

@@ -95,6 +95,7 @@ export const MinimalStudio: React.FC = () => {
     seek,
     uploadAudioFileToTrack,
     uploadRawPCMToTrack,
+    uploadClipsBatchToTrack,
     syncTrackClips,
     syncAllTracks,
     setTrackVolume,
@@ -1001,20 +1002,10 @@ export const MinimalStudio: React.FC = () => {
       setTracks(result.updatedTracks);
       syncAllTracks(result.updatedTracks);
 
-      // Синхронизируем срезы буферов и таймкоды с AudioWorklet
+      // Синхронизируем срезы буферов и таймкоды с AudioWorklet единым пакетом
       for (const track of result.updatedTracks) {
-        for (const clip of toSafeArray<ClipConfig>(track.clips)) {
-          if (clip.buffer && clip.buffer.length > 0) {
-            await uploadRawPCMToTrack(
-              clip.buffer,
-              track.id,
-              clip.id,
-              (clip.offsetSamples || 0) / 48000,
-              clip.gain || 1.0,
-              clip.pan || 0.0,
-              true
-            );
-          }
+        if (track.clips && track.clips.length > 0) {
+          await uploadClipsBatchToTrack(track.id, track.clips);
         }
       }
 
@@ -1047,19 +1038,10 @@ export const MinimalStudio: React.FC = () => {
       setTracks(updatedTracks);
       syncAllTracks(updatedTracks);
 
+      // Пакетная синхронизация нарезанных клипов
       for (const track of updatedTracks) {
-        for (const clip of toSafeArray<ClipConfig>(track.clips)) {
-          if (clip.buffer && clip.buffer.length > 0) {
-            uploadRawPCMToTrack(
-              clip.buffer,
-              track.id,
-              clip.id,
-              clip.offsetSamples / 48000,
-              clip.gain,
-              clip.pan,
-              true
-            );
-          }
+        if (track.clips && track.clips.length > 0) {
+          await uploadClipsBatchToTrack(track.id, track.clips);
         }
       }
 
@@ -2290,6 +2272,7 @@ export const MinimalStudio: React.FC = () => {
           onUpdateTrack={handleUpdateTrack}
           syncAllTracks={syncAllTracks}
           syncTrackClips={syncTrackClips}
+          uploadClipsBatchToTrack={uploadClipsBatchToTrack}
           videoFile={videoFile}
           videoSrc={videoSrc}
           videoDuration={videoDuration}
@@ -2778,6 +2761,9 @@ export const MinimalStudio: React.FC = () => {
         }}
         onTrackVolumeChange={(trackId, volumeDb) => {
           setTrackVolume(trackId, volumeDb);
+          setTracks((prev) =>
+            toSafeArray<TrackState>(prev).map((t) => (t.id === trackId ? { ...t, volumeDb } : t))
+          );
         }}
         master={master}
         videoFile={videoFile}
@@ -2795,18 +2781,8 @@ export const MinimalStudio: React.FC = () => {
           setTracks(updatedTracks);
           syncAllTracks(updatedTracks);
           for (const t of updatedTracks) {
-            for (const c of toSafeArray(t.clips)) {
-              if (c.buffer && c.buffer.length > 0) {
-                await uploadRawPCMToTrack(
-                  c.buffer,
-                  t.id,
-                  c.id,
-                  (c.offsetSamples || 0) / 48000,
-                  c.gain || 1.0,
-                  c.pan || 0.0,
-                  true
-                );
-              }
+            if (t.clips && t.clips.length > 0) {
+              await uploadClipsBatchToTrack(t.id, t.clips);
             }
           }
           const col = detectTrackCollisions(updatedTracks);

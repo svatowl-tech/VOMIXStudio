@@ -283,8 +283,23 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
     }
 
     const track = this.jsTracks.get(trackId);
+    if (name) {
+      track.name = name;
+    }
     if (isOriginalAudio !== undefined) {
       track.isOriginalAudio = !!isOriginalAudio;
+    }
+    if (typeof volumeDb === 'number') {
+      track.volumeDb = volumeDb;
+    }
+    if (typeof pan === 'number') {
+      track.pan = pan;
+    }
+    if (solo !== undefined) {
+      track.solo = !!solo;
+    }
+    if (mute !== undefined) {
+      track.mute = !!mute;
     }
 
     if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
@@ -941,11 +956,16 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
             } catch (_) {}
           }
 
-          this.freeWasmClipBuffer(clipId);
+          let bufferPtr = this.clipWasmPtrs.get(clipId);
           if (cachedPcm.length > 0) {
-            const bufferPtr = this.allocateWasmBuffer(cachedPcm);
+            if (!bufferPtr) {
+              bufferPtr = this.allocateWasmBuffer(cachedPcm);
+              if (bufferPtr) {
+                this.clipWasmPtrs.set(clipId, bufferPtr);
+              }
+            }
+
             if (bufferPtr) {
-              this.clipWasmPtrs.set(clipId, bufferPtr);
               const addClipFn = this.wasmModule._addClipToTrack || this.wasmModule.addClipToTrack;
               if (addClipFn) {
                 addClipFn(
@@ -975,6 +995,138 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           clipId,
           lengthSamples,
           wasmPtr: this.clipWasmPtrs.get(clipId) || 0
+        });
+        break;
+      }
+
+      // ======================================================================
+      // LOAD_CLIPS_BATCH: Пакетная загрузка нарезанных клипов (Batch Clip Insertion)
+      // Предотвращает лавину вызовов postMessage и DataCloneError
+      // ======================================================================
+      case 'LOAD_CLIPS_BATCH': {
+        const trackId = Number(msg.trackId) || 0;
+        const clips = Array.isArray(msg.clips) ? msg.clips : [];
+        const isOriginalAudio = msg.isOriginalAudio !== undefined ? !!msg.isOriginalAudio : false;
+        const track = this.ensureTrackExists(
+          trackId,
+          msg.trackName || `Track ${trackId}`,
+          isOriginalAudio,
+          typeof msg.trackVolumeDb === 'number' ? msg.trackVolumeDb : 0.0,
+          typeof msg.trackPan === 'number' ? msg.trackPan : 0.0,
+          !!msg.trackSolo,
+          !!msg.trackMute
+        );
+
+        if (msg.replaceTrackClips || msg.clearExisting) {
+          track.clips.clear();
+        }
+
+        if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
+          const getTrackFn = this.wasmModule._getTrack || this.wasmModule.getTrack;
+          const addTrackFn = this.wasmModule._addTrack || this.wasmModule.addTrack;
+          if (getTrackFn && addTrackFn) {
+            try {
+              if (!getTrackFn(this.mixerPtr, trackId)) {
+                addTrackFn(this.mixerPtr, trackId, 0, isOriginalAudio);
+              }
+            } catch (_) {}
+          }
+        }
+
+        let loadedCount = 0;
+        for (const c of clips) {
+          if (!c || (typeof c.id !== 'number' && typeof c.clipId !== 'number')) continue;
+          const clipId = typeof c.clipId === 'number' ? c.clipId : c.id;
+          const parentId = c.parentClipId || c.originalClipId || c.sourceClipId;
+
+          // Если клипы нарезаны из родительского клипа, исключаем родителя из воспроизведения
+          if (parentId && track.clips.has(parentId)) {
+            track.clips.delete(parentId);
+          }
+
+          let pcmBuffer = null;
+          if (c.buffer && c.buffer.length > 0) {
+            pcmBuffer = c.buffer;
+          } else if (c.audioData && c.audioData.length > 0) {
+            pcmBuffer = c.audioData;
+          } else if (this.clipBufferCache.has(clipId)) {
+            pcmBuffer = this.clipBufferCache.get(clipId);
+          } else if (parentId && this.clipBufferCache.has(parentId)) {
+            // Быстрое извлечение подбуфера из родительского кеша со смещением
+            const parentBuf = this.clipBufferCache.get(parentId);
+            const isStereo = c.isStereo !== undefined ? !!c.isStereo : (parentBuf.length >= (c.lengthSamples || 0) * 2);
+            const channels = isStereo ? 2 : 1;
+            const bufferOffsetSamples = c.bufferOffsetSamples || c.segOffsetInClip || c.startSample || 0;
+            const lengthSamples = c.lengthSamples || Math.floor((parentBuf.length - bufferOffsetSamples * channels) / channels);
+            const startIdx = Math.max(0, bufferOffsetSamples * channels);
+            const totalLen = Math.max(0, lengthSamples * channels);
+            if (startIdx < parentBuf.length) {
+              pcmBuffer = parentBuf.subarray(startIdx, Math.min(parentBuf.length, startIdx + totalLen));
+            }
+          }
+
+          if (pcmBuffer && pcmBuffer.length > 0) {
+            this.clipBufferCache.set(clipId, pcmBuffer);
+          } else {
+            pcmBuffer = new Float32Array(0);
+          }
+
+          const isStereo = c.isStereo !== undefined ? !!c.isStereo : true;
+          const lengthSamples = c.lengthSamples || (isStereo ? Math.floor(pcmBuffer.length / 2) : pcmBuffer.length);
+          const offsetSamples = typeof c.offsetSamples === 'number' ? c.offsetSamples : 0;
+          const gain = typeof c.gain === 'number' ? c.gain : 1.0;
+          const pan = typeof c.pan === 'number' ? c.pan : 0.0;
+          const fadeIn = c.fadeInSamples || 0;
+          const fadeOut = c.fadeOutSamples || 0;
+
+          track.clips.set(clipId, {
+            pcm: pcmBuffer,
+            offsetSamples,
+            lengthSamples,
+            gain,
+            pan,
+            fadeInSamples: fadeIn,
+            fadeOutSamples: fadeOut,
+            isStereo
+          });
+
+          if (this.isWasmReady && this.wasmModule && this.mixerPtr && pcmBuffer.length > 0) {
+            let bufferPtr = this.clipWasmPtrs.get(clipId);
+            if (!bufferPtr) {
+              bufferPtr = this.allocateWasmBuffer(pcmBuffer);
+              if (bufferPtr) {
+                this.clipWasmPtrs.set(clipId, bufferPtr);
+              }
+            }
+
+            if (bufferPtr) {
+              const addClipFn = this.wasmModule._addClipToTrack || this.wasmModule.addClipToTrack;
+              if (addClipFn) {
+                addClipFn(
+                  this.mixerPtr,
+                  trackId,
+                  clipId,
+                  bufferPtr,
+                  pcmBuffer.length,
+                  offsetSamples,
+                  lengthSamples,
+                  gain,
+                  pan,
+                  fadeIn,
+                  fadeOut,
+                  isStereo
+                );
+              }
+            }
+          }
+          loadedCount++;
+        }
+
+        // Единый групповой ACK для снижения нагрузки на MessagePort
+        this.port.postMessage({
+          type: 'CLIPS_BATCH_LOADED_SUCCESS',
+          trackId,
+          count: loadedCount
         });
         break;
       }
@@ -1022,10 +1174,14 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
             if (pcmBuffer && pcmBuffer.length > 0) {
               this.clipBufferCache.set(c.id, pcmBuffer);
               if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
-                this.freeWasmClipBuffer(c.id);
-                const bufferPtr = this.allocateWasmBuffer(pcmBuffer);
+                let bufferPtr = this.clipWasmPtrs.get(c.id);
+                if (!bufferPtr && pcmBuffer.length > 0) {
+                  bufferPtr = this.allocateWasmBuffer(pcmBuffer);
+                  if (bufferPtr) {
+                    this.clipWasmPtrs.set(c.id, bufferPtr);
+                  }
+                }
                 if (bufferPtr) {
-                  this.clipWasmPtrs.set(c.id, bufferPtr);
                   const isStereo = c.isStereo !== undefined ? !!c.isStereo : (pcmBuffer.length >= (c.lengthSamples || 0) * 2);
                   const lengthSamples = c.lengthSamples || (isStereo ? Math.floor(pcmBuffer.length / 2) : pcmBuffer.length);
                   const addClipFn = this.wasmModule._addClipToTrack || this.wasmModule.addClipToTrack;
@@ -1086,9 +1242,6 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           !!msg.mute
         );
 
-        for (const [oldClipId] of track.clips.entries()) {
-          this.freeWasmClipBuffer(oldClipId);
-        }
         track.clips.clear();
 
         for (const c of clips) {
@@ -1098,6 +1251,21 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           }
           if (!pcmBuffer && c.originalClipId) {
             pcmBuffer = this.clipBufferCache.get(c.originalClipId);
+          }
+          if (!pcmBuffer && (c.parentClipId || c.sourceClipId)) {
+            const parentId = c.parentClipId || c.sourceClipId;
+            const parentBuf = this.clipBufferCache.get(parentId);
+            if (parentBuf) {
+              const isStereo = c.isStereo !== undefined ? !!c.isStereo : true;
+              const channels = isStereo ? 2 : 1;
+              const bufferOffsetSamples = c.bufferOffsetSamples || c.segOffsetInClip || c.startSample || 0;
+              const lengthSamples = c.lengthSamples || Math.floor((parentBuf.length - bufferOffsetSamples * channels) / channels);
+              const startIdx = Math.max(0, bufferOffsetSamples * channels);
+              const totalLen = Math.max(0, lengthSamples * channels);
+              if (startIdx < parentBuf.length) {
+                pcmBuffer = parentBuf.subarray(startIdx, Math.min(parentBuf.length, startIdx + totalLen));
+              }
+            }
           }
 
           if (pcmBuffer && pcmBuffer.length > 0) {
@@ -1136,10 +1304,15 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
               } catch (_) {}
             }
 
-            this.freeWasmClipBuffer(c.id);
-            const bufferPtr = this.allocateWasmBuffer(pcmBuffer);
+            let bufferPtr = this.clipWasmPtrs.get(c.id);
+            if (!bufferPtr && pcmBuffer.length > 0) {
+              bufferPtr = this.allocateWasmBuffer(pcmBuffer);
+              if (bufferPtr) {
+                this.clipWasmPtrs.set(c.id, bufferPtr);
+              }
+            }
+
             if (bufferPtr) {
-              this.clipWasmPtrs.set(c.id, bufferPtr);
               const addClipFn = this.wasmModule._addClipToTrack || this.wasmModule.addClipToTrack;
               if (addClipFn) {
                 addClipFn(
@@ -1175,12 +1348,6 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           if (this.wasmModule._removeAllTracks) {
             this.wasmModule._removeAllTracks(this.mixerPtr);
           }
-          for (const [, ptr] of this.clipWasmPtrs.entries()) {
-            try {
-              if (this.wasmModule._free) this.wasmModule._free(ptr);
-            } catch (_) {}
-          }
-          this.clipWasmPtrs.clear();
         }
 
         for (const t of tracks) {
@@ -1205,6 +1372,21 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
               }
               if (!pcmBuffer && c.originalClipId) {
                 pcmBuffer = this.clipBufferCache.get(c.originalClipId);
+              }
+              if (!pcmBuffer && (c.parentClipId || c.sourceClipId)) {
+                const parentId = c.parentClipId || c.sourceClipId;
+                const parentBuf = this.clipBufferCache.get(parentId);
+                if (parentBuf) {
+                  const isStereo = c.isStereo !== undefined ? !!c.isStereo : true;
+                  const channels = isStereo ? 2 : 1;
+                  const bufferOffsetSamples = c.bufferOffsetSamples || c.segOffsetInClip || c.startSample || 0;
+                  const lengthSamples = c.lengthSamples || Math.floor((parentBuf.length - bufferOffsetSamples * channels) / channels);
+                  const startIdx = Math.max(0, bufferOffsetSamples * channels);
+                  const totalLen = Math.max(0, lengthSamples * channels);
+                  if (startIdx < parentBuf.length) {
+                    pcmBuffer = parentBuf.subarray(startIdx, Math.min(parentBuf.length, startIdx + totalLen));
+                  }
+                }
               }
 
               if (pcmBuffer && pcmBuffer.length > 0) {
@@ -1243,9 +1425,15 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
                   } catch (_) {}
                 }
 
-                const bufferPtr = this.allocateWasmBuffer(pcmBuffer);
+                let bufferPtr = this.clipWasmPtrs.get(c.id);
+                if (!bufferPtr && pcmBuffer.length > 0) {
+                  bufferPtr = this.allocateWasmBuffer(pcmBuffer);
+                  if (bufferPtr) {
+                    this.clipWasmPtrs.set(c.id, bufferPtr);
+                  }
+                }
+
                 if (bufferPtr) {
-                  this.clipWasmPtrs.set(c.id, bufferPtr);
                   const addClipFn = this.wasmModule._addClipToTrack || this.wasmModule.addClipToTrack;
                   if (addClipFn) {
                     addClipFn(
@@ -1319,16 +1507,28 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       case 'SET_TRACK_VOLUME': {
         const trackId = Number(msg.trackId) || 0;
         const volumeDb = typeof msg.volumeDb === 'number' ? msg.volumeDb : 0.0;
-        this.ensureTrackExists(trackId, `Track ${trackId}`, false, volumeDb);
+        const trk = this.ensureTrackExists(trackId, `Track ${trackId}`, false, volumeDb);
+        trk.volumeDb = volumeDb;
         this.pendingTrackVolumes.set(trackId, volumeDb);
+        if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._setTrackVolume) {
+          try {
+            this.wasmModule._setTrackVolume(this.mixerPtr, trackId, volumeDb);
+          } catch (_) {}
+        }
         break;
       }
 
       case 'SET_TRACK_PAN': {
         const trackId = Number(msg.trackId) || 0;
         const pan = typeof msg.pan === 'number' ? msg.pan : 0.0;
-        this.ensureTrackExists(trackId, `Track ${trackId}`, false, 0.0, pan);
+        const trk = this.ensureTrackExists(trackId, `Track ${trackId}`, false, 0.0, pan);
+        trk.pan = pan;
         this.pendingTrackPans.set(trackId, pan);
+        if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._setTrackPan) {
+          try {
+            this.wasmModule._setTrackPan(this.mixerPtr, trackId, pan);
+          } catch (_) {}
+        }
         break;
       }
 
@@ -1338,7 +1538,9 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         const trk = this.ensureTrackExists(trackId, `Track ${trackId}`);
         trk.solo = solo;
         if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._setTrackSolo) {
-          this.wasmModule._setTrackSolo(this.mixerPtr, trackId, solo);
+          try {
+            this.wasmModule._setTrackSolo(this.mixerPtr, trackId, solo);
+          } catch (_) {}
         }
         break;
       }
@@ -1349,7 +1551,9 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         const trk = this.ensureTrackExists(trackId, `Track ${trackId}`);
         trk.mute = mute;
         if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._setTrackMute) {
-          this.wasmModule._setTrackMute(this.mixerPtr, trackId, mute);
+          try {
+            this.wasmModule._setTrackMute(this.mixerPtr, trackId, mute);
+          } catch (_) {}
         }
         break;
       }
@@ -1357,6 +1561,11 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       case 'SET_MASTER_VOLUME': {
         this.masterVolumeDb = typeof msg.volumeDb === 'number' ? msg.volumeDb : 0.0;
         this.pendingMasterVolume = this.masterVolumeDb;
+        if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._setMasterVolume) {
+          try {
+            this.wasmModule._setMasterVolume(this.mixerPtr, this.masterVolumeDb);
+          } catch (_) {}
+        }
         break;
       }
 

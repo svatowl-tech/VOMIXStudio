@@ -78,6 +78,11 @@ export interface UseAudioEngineReturn {
     isStereo?: boolean
   ) => void;
 
+  uploadClipsBatchToTrack: (
+    trackId: number,
+    clips: ClipConfig[]
+  ) => Promise<void>;
+
   syncTrackClips: (trackId: number, clips: ClipConfig[]) => void;
   syncAllTracks: (tracks: TrackState[]) => void;
   handleUpdateTrack: (updatedTrack: TrackState) => void;
@@ -248,9 +253,9 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
   // requestId -> resolve callback с Base64 строкой чанка
   const pendingChunkRequestsRef = useRef<Map<string, (chunk: string) => void>>(new Map());
 
-  // Кэш ссылок на буферы клипов, уже переданные в AudioWorklet (clipId -> Float32Array)
-  // Исключает катастрофическое повторное клонирование сотен мегабайт PCM буферов через postMessage на каждый чих интерфейса
-  const syncedClipBuffersRef = useRef<Map<number, Float32Array>>(new Map());
+  // Множество ID клипов, уже переданных в AudioWorklet (clipId)
+  // Исключает катастрофическое повторное клонирование сотен мегабайт PCM буферов через postMessage
+  const syncedClipIdsRef = useRef<Set<number>>(new Set());
 
   // Мапа активных указателей кучи C++ WebAssembly для клипов (clipId -> wasmBufferPtr)
   const clipWasmPtrs = useRef<Map<number, number>>(new Map());
@@ -268,7 +273,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
       }
       clipWasmPtrs.current.delete(clipId);
     }
-    syncedClipBuffersRef.current.delete(clipId);
+    syncedClipIdsRef.current.delete(clipId);
     if (workletNodeRef.current) {
       workletNodeRef.current.port.postMessage({
         type: 'FREE_CLIP_BUFFER',
@@ -307,7 +312,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             console.warn(`[useAudioEngine] Ошибка GC WASM пойнтера clip #${clipId}:`, e);
           }
           clipWasmPtrs.current.delete(clipId);
-          syncedClipBuffersRef.current.delete(clipId);
+          syncedClipIdsRef.current.delete(clipId);
         }
       }
     }
@@ -683,21 +688,41 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             freeClipWasmPointer(clipId);
           }
 
-          syncedClipBuffersRef.current.set(clipId, pcmFloat32);
+          syncedClipIdsRef.current.add(clipId);
           const offsetSamples = typeof offsetSec === 'number' ? Math.round(offsetSec * 48000) : 0;
           const lengthSamples = Math.floor(pcmFloat32.length / 2);
-          workletNodeRef.current.port.postMessage({
-            type: 'LOAD_TRACK_CLIP',
-            trackId,
-            clipId,
-            audioData: pcmFloat32,
-            offsetSec,
-            offsetSamples,
-            lengthSamples,
-            gain: 1.0,
-            pan: 0.0,
-            isStereo: true
-          });
+
+          try {
+            workletNodeRef.current.port.postMessage({
+              type: 'LOAD_TRACK_CLIP',
+              trackId,
+              clipId,
+              audioData: pcmFloat32,
+              offsetSec,
+              offsetSamples,
+              lengthSamples,
+              gain: 1.0,
+              pan: 0.0,
+              isStereo: true
+            });
+          } catch (cloneErr) {
+            console.warn('[useAudioEngine] postMessage fallback to Transferable buffer:', cloneErr);
+            workletNodeRef.current.port.postMessage(
+              {
+                type: 'LOAD_TRACK_CLIP',
+                trackId,
+                clipId,
+                audioData: pcmFloat32,
+                offsetSec,
+                offsetSamples,
+                lengthSamples,
+                gain: 1.0,
+                pan: 0.0,
+                isStereo: true
+              },
+              [pcmFloat32.buffer]
+            );
+          }
         });
       }
 
@@ -727,12 +752,11 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
           freeClipWasmPointer(clipId);
         }
 
-        syncedClipBuffersRef.current.set(clipId, pcmFloat32);
+        syncedClipIdsRef.current.add(clipId);
 
         const handleAck = (e: MessageEvent) => {
           if (e.data && e.data.type === 'CLIP_LOADED_SUCCESS' && e.data.clipId === clipId) {
             workletNodeRef.current?.port.removeEventListener('message', handleAck);
-            systemLogger.debug('System', `ACK получен для сырого PCM клипа #${clipId}`);
           }
         };
 
@@ -742,21 +766,106 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
         const offsetSamples = typeof offsetSec === 'number' ? Math.round(offsetSec * 48000) : 0;
         const lengthSamples = isStereo ? Math.floor(pcmFloat32.length / 2) : pcmFloat32.length;
 
-        workletNodeRef.current.port.postMessage({
-          type: 'LOAD_TRACK_CLIP',
-          trackId,
-          clipId,
-          audioData: pcmFloat32,
-          offsetSec,
-          offsetSamples,
-          lengthSamples,
-          gain,
-          pan,
-          isStereo
-        });
+        try {
+          workletNodeRef.current.port.postMessage({
+            type: 'LOAD_TRACK_CLIP',
+            trackId,
+            clipId,
+            audioData: pcmFloat32,
+            offsetSec,
+            offsetSamples,
+            lengthSamples,
+            gain,
+            pan,
+            isStereo
+          });
+        } catch (cloneErr) {
+          console.warn('[useAudioEngine] Raw PCM postMessage fallback to Transferable:', cloneErr);
+          workletNodeRef.current.port.postMessage(
+            {
+              type: 'LOAD_TRACK_CLIP',
+              trackId,
+              clipId,
+              audioData: pcmFloat32,
+              offsetSec,
+              offsetSamples,
+              lengthSamples,
+              gain,
+              pan,
+              isStereo
+            },
+            [pcmFloat32.buffer]
+          );
+        }
       }
     },
     [freeClipWasmPointer]
+  );
+
+  /**
+   * Пакетная загрузка нарезанных клипов (Batch Clip Insertion)
+   * Передает метаданные всех клипов за один вызов postMessage
+   * Предотвращает лавину вызовов postMessage и DataCloneError
+   */
+  const uploadClipsBatchToTrack = useCallback(
+    async (trackId: number, clips: ClipConfig[]): Promise<void> => {
+      if (!workletNodeRef.current) return;
+      const safeClips = toSafeArray<ClipConfig>(clips);
+      if (safeClips.length === 0) return;
+
+      for (const c of safeClips) {
+        if (c && typeof c.id === 'number') {
+          if (clipWasmPtrs.current.has(c.id)) {
+            freeClipWasmPointer(c.id);
+          }
+          syncedClipIdsRef.current.add(c.id);
+        }
+      }
+
+      const count = safeClips.length;
+
+      const handleBatchAck = (e: MessageEvent) => {
+        if (e.data && e.data.type === 'CLIPS_BATCH_LOADED_SUCCESS' && e.data.trackId === trackId) {
+          workletNodeRef.current?.port.removeEventListener('message', handleBatchAck);
+          systemLogger.info('System', `Успешно загружен пакет из ${e.data.count || count} клипов для дорожки #${trackId}`);
+        }
+      };
+
+      workletNodeRef.current.port.addEventListener('message', handleBatchAck);
+      workletNodeRef.current.port.start();
+
+      const batchPayload = safeClips.map((c) => {
+        const isStereo = c.buffer ? c.buffer.length >= (c.lengthSamples || 0) * 2 : true;
+        return {
+          clipId: c.id,
+          id: c.id,
+          name: c.name,
+          offsetSamples: c.offsetSamples || 0,
+          lengthSamples: c.lengthSamples || 0,
+          gain: typeof c.gain === 'number' ? c.gain : 1.0,
+          pan: typeof c.pan === 'number' ? c.pan : 0.0,
+          fadeInSamples: c.fadeInSamples || 0,
+          fadeOutSamples: c.fadeOutSamples || 0,
+          isStereo,
+          parentClipId: c.parentClipId || (c as any).originalClipId || (c as any).sourceClipId,
+          bufferOffsetSamples: c.bufferOffsetSamples || (c as any).segOffsetInClip || 0
+        };
+      });
+
+      try {
+        workletNodeRef.current.port.postMessage({
+          type: 'LOAD_CLIPS_BATCH',
+          trackId,
+          clips: batchPayload
+        });
+      } catch (err) {
+        console.warn('[useAudioEngine] uploadClipsBatchToTrack postMessage error:', err);
+      }
+
+      globalLiveDAWEngine.syncTrackClips(trackId, safeClips);
+      garbageCollectWasm();
+    },
+    [freeClipWasmPointer, garbageCollectWasm]
   );
 
   const syncTrackClips = useCallback((trackId: number, clips: ClipConfig[]) => {
@@ -764,51 +873,22 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
       try {
         const safeClips = toSafeArray<ClipConfig>(clips);
 
-        // Проверяем, появились ли новые или обновленные PCM буферы, не загруженные в Worklet
-        for (const c of safeClips) {
-          if (!c) continue;
-          const prevBuf = syncedClipBuffersRef.current.get(c.id);
-          const currentBuf = (c.buffer instanceof Float32Array && c.buffer.length > 0) ? c.buffer : prevBuf;
-          if (c.buffer instanceof Float32Array && c.buffer.length > 0) {
-            syncedClipBuffersRef.current.set(c.id, c.buffer);
-          }
-          if (currentBuf && prevBuf !== c.buffer) {
-            // Перед отправкой новых pcmBuffer в WASM жестко проверяем мапу clipWasmPtrs
-            // и вызываем принудительное освобождение _free для перезаписываемых ID клипов
-            if (clipWasmPtrs.current.has(c.id)) {
-              freeClipWasmPointer(c.id);
-            }
-            const isStereo = currentBuf.length >= (c.lengthSamples || 0) * 2;
-            const lengthSamples = c.lengthSamples || (isStereo ? Math.floor(currentBuf.length / 2) : currentBuf.length);
-            workletNodeRef.current.port.postMessage({
-              type: 'LOAD_TRACK_CLIP',
-              trackId,
-              clipId: c.id,
-              audioData: currentBuf,
-              offsetSamples: c.offsetSamples || 0,
-              lengthSamples,
-              gain: typeof c.gain === 'number' ? c.gain : 1.0,
-              pan: typeof c.pan === 'number' ? c.pan : 0.0,
-              isStereo
-            });
-          }
-        }
-
-        // Синхронизируем метаданные дорожки и гарантируем передачу буферов
+        // Передаем СТРОГО метаданные клипов без единого байта Float32Array аудиоданных во избежание DataCloneError
         workletNodeRef.current.port.postMessage({
           type: 'SET_TRACK_CLIPS',
           trackId,
           clips: safeClips.map((c) => ({
             id: c.id,
             name: c.name,
-            offsetSamples: c.offsetSamples,
-            lengthSamples: c.lengthSamples,
+            offsetSamples: c.offsetSamples || 0,
+            lengthSamples: c.lengthSamples || 0,
             gain: typeof c.gain === 'number' ? c.gain : 1.0,
             pan: typeof c.pan === 'number' ? c.pan : 0.0,
             fadeInSamples: c.fadeInSamples || 0,
             fadeOutSamples: c.fadeOutSamples || 0,
-            isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true,
-            buffer: c.buffer || syncedClipBuffersRef.current.get(c.id)
+            isStereo: c.buffer ? c.buffer.length >= (c.lengthSamples || 0) * 2 : true,
+            parentClipId: c.parentClipId || (c as any).originalClipId || (c as any).sourceClipId,
+            bufferOffsetSamples: c.bufferOffsetSamples || (c as any).segOffsetInClip || 0
           }))
         });
 
@@ -821,62 +901,25 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
         console.warn('[useAudioEngine] syncTrackClips postMessage ignored:', err);
       }
     }
-  }, [freeClipWasmPointer, garbageCollectWasm]);
+  }, [garbageCollectWasm]);
 
   const syncAllTracks = useCallback((tracks: TrackState[]) => {
     if (workletNodeRef.current) {
       try {
         const safeTracks = toSafeArray<TrackState>(tracks);
 
-        // Проверяем, появились ли новые или обновленные PCM буферы, не загруженные в Worklet
-        for (const t of safeTracks) {
-          if (!t) continue;
-          for (const c of toSafeArray<ClipConfig>(t.clips)) {
-            if (!c) continue;
-            const prevBuf = syncedClipBuffersRef.current.get(c.id);
-            const currentBuf = (c.buffer instanceof Float32Array && c.buffer.length > 0) ? c.buffer : prevBuf;
-            if (c.buffer instanceof Float32Array && c.buffer.length > 0) {
-              syncedClipBuffersRef.current.set(c.id, c.buffer);
-            }
-            if (currentBuf && prevBuf !== c.buffer) {
-              // Перед отправкой новых pcmBuffer в WASM жестко проверяем мапу clipWasmPtrs
-              // и вызываем принудительное освобождение _free для перезаписываемых ID клипов
-              if (clipWasmPtrs.current.has(c.id)) {
-                freeClipWasmPointer(c.id);
-              }
-              const isStereo = currentBuf.length >= (c.lengthSamples || 0) * 2;
-              const lengthSamples = c.lengthSamples || (isStereo ? Math.floor(currentBuf.length / 2) : currentBuf.length);
-              workletNodeRef.current.port.postMessage({
-                type: 'LOAD_TRACK_CLIP',
-                trackId: t.id,
-                clipId: c.id,
-                audioData: currentBuf,
-                offsetSamples: c.offsetSamples || 0,
-                lengthSamples,
-                gain: typeof c.gain === 'number' ? c.gain : 1.0,
-                pan: typeof c.pan === 'number' ? c.pan : 0.0,
-                isStereo,
-                isOriginalAudio: !!t.isOriginalAudio,
-                trackVolumeDb: t.volumeDb,
-                trackPan: t.pan,
-                trackSolo: !!t.solo,
-                trackMute: !!t.mute
-              });
-            }
-          }
-        }
-
-        // Передаем полную структуру дорожек в AudioWorklet
+        // Передаем СТРОГО метаданные дорожек и параметров микшера.
+        // Буферы PCM хранятся в кэше AudioWorklet и КАТЕГОРИЧЕСКИ не передаются повторно в SET_ALL_TRACKS.
         workletNodeRef.current.port.postMessage({
           type: 'SET_ALL_TRACKS',
           tracks: safeTracks.map((t) => ({
             id: t.id,
             name: t.name,
-            volumeDb: t.volumeDb,
-            pan: t.pan,
-            solo: t.solo,
-            mute: t.mute,
-            isOriginalAudio: t.isOriginalAudio,
+            volumeDb: typeof t.volumeDb === 'number' ? t.volumeDb : 0.0,
+            pan: typeof t.pan === 'number' ? t.pan : 0.0,
+            solo: !!t.solo,
+            mute: !!t.mute,
+            isOriginalAudio: !!t.isOriginalAudio,
             vstPlugins: toSafeArray<VSTPluginInstance>(t.vstPlugins),
             dsp: {
               eq: t.eq,
@@ -889,14 +932,15 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             clips: toSafeArray<ClipConfig>(t.clips).map((c) => ({
               id: c.id,
               name: c.name,
-              offsetSamples: c.offsetSamples,
-              lengthSamples: c.lengthSamples,
+              offsetSamples: c.offsetSamples || 0,
+              lengthSamples: c.lengthSamples || 0,
               gain: typeof c.gain === 'number' ? c.gain : 1.0,
               pan: typeof c.pan === 'number' ? c.pan : 0.0,
               fadeInSamples: c.fadeInSamples || 0,
               fadeOutSamples: c.fadeOutSamples || 0,
-              isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true,
-              buffer: c.buffer || syncedClipBuffersRef.current.get(c.id)
+              isStereo: c.buffer ? c.buffer.length >= (c.lengthSamples || 0) * 2 : true,
+              parentClipId: c.parentClipId || (c as any).originalClipId || (c as any).sourceClipId,
+              bufferOffsetSamples: c.bufferOffsetSamples || (c as any).segOffsetInClip || 0
             }))
           }))
         });
@@ -910,7 +954,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
         console.warn('[useAudioEngine] syncAllTracks postMessage ignored:', err);
       }
     }
-  }, [freeClipWasmPointer, garbageCollectWasm]);
+  }, [garbageCollectWasm]);
 
   /**
    * Обновление состояния дорожки с контролем памяти WASM и принудительным освобождением _free
@@ -925,8 +969,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
       // и вызываем принудительное освобождение _free для перезаписываемых ID клипов
       for (const c of safeClips) {
         if (!c || typeof c.id !== 'number') continue;
-        const prevBuf = syncedClipBuffersRef.current.get(c.id);
-        const isBufferChanged = c.buffer instanceof Float32Array && c.buffer.length > 0 && prevBuf !== c.buffer;
+        const isBufferChanged = c.buffer instanceof Float32Array && c.buffer.length > 0 && !syncedClipIdsRef.current.has(c.id);
         if (isBufferChanged) {
           if (clipWasmPtrs.current.has(c.id)) {
             freeClipWasmPointer(c.id);
@@ -1320,6 +1363,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
 
     uploadAudioFileToTrack,
     uploadRawPCMToTrack,
+    uploadClipsBatchToTrack,
     syncTrackClips,
     syncAllTracks,
     handleUpdateTrack,

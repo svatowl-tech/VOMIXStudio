@@ -49,6 +49,7 @@ export interface TimelineViewProps {
   onUpdateTrack?: (updatedTrack: TrackState) => void;
   syncAllTracks?: (tracks: TrackState[]) => void;
   syncTrackClips?: (trackId: number, clips: ClipConfig[]) => void;
+  uploadClipsBatchToTrack?: (trackId: number, clips: ClipConfig[]) => Promise<void> | void;
   onSyncAllTracks?: (tracks: TrackState[]) => void;
   onSyncTrackClips?: (trackId: number, clips: ClipConfig[]) => void;
   // Видеодорожка и синхронизация
@@ -388,6 +389,7 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   onUpdateTrack,
   syncAllTracks,
   syncTrackClips,
+  uploadClipsBatchToTrack,
   onSyncAllTracks,
   onSyncTrackClips,
   videoFile,
@@ -407,6 +409,26 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
   const tracksRef = useRef<TrackState[]>(tracks);
   tracksRef.current = tracks;
 
+  /**
+   * Проверка строгой монотонности клипов дорожки в памяти:
+   * каждый последующий клип обязан иметь offsetSamples >= previousClip.offsetSamples + previousClip.lengthSamples + minGap
+   */
+  const enforceMonotonicClips = useCallback(
+    (clips: ClipConfig[], minGapMs = 10): ClipConfig[] => {
+      const minGapSamples = Math.round((sampleRate * minGapMs) / 1000);
+      const safe = [...(clips || [])].sort((a, b) => a.offsetSamples - b.offsetSamples);
+      for (let i = 1; i < safe.length; i++) {
+        const prev = safe[i - 1];
+        const minAllowed = prev.offsetSamples + prev.lengthSamples + minGapSamples;
+        if (safe[i].offsetSamples < minAllowed) {
+          safe[i].offsetSamples = minAllowed;
+        }
+      }
+      return safe;
+    },
+    [sampleRate]
+  );
+
   const handleSyncAllTracks = useCallback(
     (updatedTracks: TrackState[]) => {
       if (syncAllTracks) {
@@ -416,6 +438,19 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       }
     },
     [syncAllTracks, onSyncAllTracks]
+  );
+
+  const handleUploadClipsBatch = useCallback(
+    (trackId: number, clips: ClipConfig[]) => {
+      if (uploadClipsBatchToTrack) {
+        uploadClipsBatchToTrack(trackId, clips);
+      } else if (syncTrackClips) {
+        syncTrackClips(trackId, clips);
+      } else if (onSyncTrackClips) {
+        onSyncTrackClips(trackId, clips);
+      }
+    },
+    [uploadClipsBatchToTrack, syncTrackClips, onSyncTrackClips]
   );
 
   const handleSyncTrackClips = useCallback(
@@ -1045,11 +1080,12 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
         };
 
         const newClips = (track.clips || []).flatMap((c) => (c.id === clipId ? [leftClip, rightClip] : [c]));
-        const updatedTrack = { ...track, clips: newClips };
+        const monotonicClips = enforceMonotonicClips(newClips, 10);
+        const updatedTrack = { ...track, clips: monotonicClips };
         const newTracks = (tracksRef.current || []).map((t) => (t.id === trackId ? updatedTrack : t));
 
         onUpdateTrack(updatedTrack);
-        handleSyncTrackClips(trackId, newClips);
+        handleUploadClipsBatch(trackId, monotonicClips);
         handleSyncAllTracks(newTracks);
 
         setSelectedClipId(rightClip.id);
@@ -1188,7 +1224,9 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
                 buffer: segBuffer,
                 originalBuffer: segBuffer,
                 originalLengthSamples: segLength,
-                color: clip.color || track.color || '#10b981'
+                color: clip.color || track.color || '#10b981',
+                parentClipId: clip.id,
+                bufferOffsetSamples: segOffsetInClip
               };
             });
 
@@ -1197,10 +1235,12 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
 
           if (trackModified) {
             processedTracksCount++;
-            const updated = { ...track, clips: newTrackClips };
+            // Строгая проверка монотонности на дорожке
+            const monotonicClips = enforceMonotonicClips(newTrackClips, 10);
+            const updated = { ...track, clips: monotonicClips };
             updatedTracks.push(updated);
             onUpdateTrack(updated);
-            handleSyncTrackClips(track.id, newTrackClips);
+            handleUploadClipsBatch(track.id, monotonicClips);
           } else {
             updatedTracks.push(track);
           }
@@ -1287,7 +1327,9 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
           buffer: segBuffer,
           originalBuffer: segBuffer,
           originalLengthSamples: segLength,
-          color: sourceClip!.color || targetTrack.color || '#10b981'
+          color: sourceClip!.color || targetTrack.color || '#10b981',
+          parentClipId: sourceClip!.id,
+          bufferOffsetSamples: segOffsetInClip
         };
       });
 
@@ -1296,11 +1338,13 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
         c.id === sourceClip!.id ? newClips : [c]
       );
 
-      const updatedTrack = { ...targetTrack, clips: updatedClips };
+      // Строгая монотонность расстановки фраз на таймлайне
+      const monotonicClips = enforceMonotonicClips(updatedClips, 10);
+      const updatedTrack = { ...targetTrack, clips: monotonicClips };
       const newTracks = (tracksRef.current || []).map((t) => (t.id === targetTrack.id ? updatedTrack : t));
 
       onUpdateTrack(updatedTrack);
-      handleSyncTrackClips(targetTrack.id, updatedClips);
+      handleUploadClipsBatch(targetTrack.id, monotonicClips);
       handleSyncAllTracks(newTracks);
 
       setSelectedClipId(newClips[0]?.id || null);
@@ -1515,11 +1559,12 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
         };
 
         const newClips = track.clips.map((c) => (c.id === clip.id ? updatedClip : c));
-        const updatedTrack = { ...track, clips: newClips };
+        const monotonicClips = enforceMonotonicClips(newClips, 10);
+        const updatedTrack = { ...track, clips: monotonicClips };
         const newTracks = tracksRef.current.map((t) => (t.id === track.id ? updatedTrack : t));
 
         onUpdateTrack(updatedTrack);
-        handleSyncTrackClips(track.id, newClips);
+        handleUploadClipsBatch(track.id, monotonicClips);
         handleSyncAllTracks(newTracks);
 
         showNotice(

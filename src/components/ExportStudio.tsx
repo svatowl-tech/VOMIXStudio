@@ -50,7 +50,7 @@ export const ExportStudio: React.FC<ExportStudioProps> = ({
   const [bitDepth, setBitDepth] = useState<WavBitDepth>(24);
   const [isRendering, setIsRendering] = useState<boolean>(false);
   const [targetDeltaDb, setTargetDeltaDb] = useState<number>(4.0);
-  const [autoAlignLoudness, setAutoAlignLoudness] = useState<boolean>(true);
+  const [autoAlignLoudness, setAutoAlignLoudness] = useState<boolean>(false);
 
   const effectiveVocalBus = vocalBus || createDefaultVocalBus();
 
