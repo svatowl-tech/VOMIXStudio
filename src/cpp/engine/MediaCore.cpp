@@ -293,14 +293,16 @@ size_t NativeWavBuilder::buildWav(
         bytesPerSample = 4;
     }
 
-    const uint32_t dataBytes = static_cast<uint32_t>(numFrames * numChannels * bytesPerSample);
-    const size_t totalWavSize = 44 + dataBytes;
+    const size_t bytesPerSample = (format == FormatType::PCM_24BIT) ? 3 : (format == FormatType::FLOAT_32BIT ? 4 : 2);
+    const size_t dataBytes = numFrames * static_cast<size_t>(numChannels) * bytesPerSample;
+    const size_t requiredBytes = 44 + dataBytes;
 
-    if (totalWavSize > maxBufferSize) return 0;
+    if (maxBufferSize < requiredBytes) return 0;
 
     // 1. Формирование RIFF заголовка
     std::memcpy(outBuffer + 0, "RIFF", 4);
-    writeUint32LE(outBuffer + 4, static_cast<uint32_t>(totalWavSize - 8));
+    uint32_t riffChunkSize = static_cast<uint32_t>(dataBytes > 0xFFFFFFE0 ? 0xFFFFFFFF : (requiredBytes - 8));
+    writeUint32LE(outBuffer + 4, riffChunkSize);
     std::memcpy(outBuffer + 8, "WAVE", 4);
 
     // 2. fmt chunk

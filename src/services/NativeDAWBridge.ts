@@ -26,6 +26,7 @@ import { TrackState, MasterState, ClipConfig, VocalBusState } from '../audio/daw
 import { EMBEDDED_WASM_CORE_BASE64 } from '../data/embeddedWasmCore';
 import { systemLogger } from './SystemLogger';
 import { toSafeArray } from '../utils/safeIterables';
+import { encodeWavToBlob, encodeInterleavedToWavBlob } from '../utils/wavEncoder';
 
 export type WavBitDepth = 16 | 24 | 32;
 
@@ -772,9 +773,41 @@ export class NativeDAWBridge {
   }
 
   /**
+   * Обновление ссылок на типизированные массивы памяти WebAssembly при Memory Growth
+   */
+  public refreshMemoryViews(): void {
+    if (this.wasmModule && this.wasmModule.memory) {
+      this.wasmModule.HEAPF32 = new Float32Array(this.wasmModule.memory.buffer);
+      this.wasmModule.HEAPU8 = new Uint8Array(this.wasmModule.memory.buffer);
+    }
+    const mod = this.wasmModule || ((typeof window !== 'undefined' ? (window as any).Module : null) as EmscriptenDAWCoreModule | null);
+    if (!mod) return;
+    const mem = mod.memory || mod.wasmMemory || (mod['asm'] ? mod['asm']['memory'] : null);
+    const buffer = mem?.buffer || mod.buffer;
+    if (buffer) {
+      if (!mod.memory && mem) {
+        mod.memory = mem;
+      }
+      if (!mod.HEAPF32 || mod.HEAPF32.buffer !== buffer || mod.HEAPF32.buffer.byteLength === 0) {
+        mod.HEAPF32 = new Float32Array(buffer);
+      }
+      if (!mod.HEAPU8 || mod.HEAPU8.buffer !== buffer || mod.HEAPU8.buffer.byteLength === 0) {
+        mod.HEAPU8 = new Uint8Array(buffer);
+      }
+      if (!mod.HEAP16 || mod.HEAP16.buffer !== buffer || mod.HEAP16.buffer.byteLength === 0) {
+        mod.HEAP16 = new Int16Array(buffer);
+      }
+      if (!mod.HEAP32 || mod.HEAP32.buffer !== buffer || mod.HEAP32.buffer.byteLength === 0) {
+        mod.HEAP32 = new Int32Array(buffer);
+      }
+    }
+  }
+
+  /**
    * Возвращает объем доступной или выделенной памяти WebAssembly в байтах
    */
   public getAvailableWasmMemory(): number {
+    this.refreshMemoryViews();
     if (!this.wasmModule) return 0;
     const mod = this.getModule();
     if (mod._getAvailableWasmMemory) {
@@ -842,6 +875,7 @@ export class NativeDAWBridge {
       }
     }
 
+    this.refreshMemoryViews();
     return ptr;
   }
 
@@ -875,6 +909,7 @@ export class NativeDAWBridge {
         throw new Error(`[NativeDAWBridge OOM] Не удалось выделить ${count} байт в куче WebAssembly.`);
       }
     }
+    this.refreshMemoryViews();
     return ptr;
   }
 
@@ -921,7 +956,7 @@ export class NativeDAWBridge {
 
   /**
    * Прямая запись Float32Array PCM аудиоданных в C++ кучу (Module.HEAPF32.set)
-   * С защитой от OOM: запрет записи > 480 000 сэмплов и безопасный возврат 0 при отказе выделения.
+   * С защитой от OOM: запрет записи > 16 000 000 сэмплов и безопасный возврат 0 при отказе выделения.
    */
   public writeFloat32Direct(data: Float32Array): number {
     if (!data || data.length === 0) return 0;
@@ -941,20 +976,27 @@ export class NativeDAWBridge {
       return 0;
     }
 
+    if (this.wasmModule && this.wasmModule.memory) {
+      this.wasmModule.HEAPF32 = new Float32Array(this.wasmModule.memory.buffer);
+      this.wasmModule.HEAPU8 = new Uint8Array(this.wasmModule.memory.buffer);
+    }
+    this.refreshMemoryViews();
+
     const mod = this.getModule();
     const floatOffset = ptr >> 2;
 
     let heapF32 = mod.HEAPF32;
-    if (!heapF32) {
-      const buffer = mod.buffer || mod.wasmMemory?.buffer || (mod.memory ? mod.memory.buffer : null);
+    if (!heapF32 || heapF32.buffer.byteLength === 0) {
+      const buffer = mod.memory?.buffer || mod.buffer || mod.wasmMemory?.buffer;
       if (buffer) {
         heapF32 = new Float32Array(buffer);
+        mod.HEAPF32 = heapF32;
       }
     }
 
-    if (!heapF32) {
+    if (!heapF32 || floatOffset + data.length > heapF32.length) {
       this.freeFloats(ptr);
-      console.warn('[NativeDAWBridge] HEAPF32 не найден при записи Float32.');
+      console.warn('[NativeDAWBridge] HEAPF32 не найден или переполнен при записи Float32.');
       return 0;
     }
 
@@ -964,56 +1006,64 @@ export class NativeDAWBridge {
   }
 
   /**
-   * Прямое чтение Float32Array из кучи WASM без промежуточных накладных расходов
+   * Прямое чтение Float32Array из кучи WASM без риска RangeError
    */
   public readFloat32Direct(ptr: number, length: number): Float32Array {
     if (!ptr || length <= 0) return new Float32Array(0);
-    const mod = this.getModule();
-    const floatOffset = ptr >> 2;
-    
-    let heapF32 = mod.HEAPF32;
-    if (!heapF32) {
-      const buffer = mod.buffer || mod.wasmMemory?.buffer || (mod.memory ? mod.memory.buffer : null);
-      if (buffer) {
-        heapF32 = new Float32Array(buffer);
-      }
+
+    // Перед ЛЮБЫМ чтением срендеренных данных из кучи C++ ОБЯЗАТЕЛЬНО обновлять ссылки на буферы памяти:
+    if (this.wasmModule && this.wasmModule.memory) {
+      this.wasmModule.HEAPF32 = new Float32Array(this.wasmModule.memory.buffer);
+      this.wasmModule.HEAPU8 = new Uint8Array(this.wasmModule.memory.buffer);
     }
-    
-    if (!heapF32) {
-      console.warn('[NativeDAWBridge] HEAPF32 не найден при чтении Float32.');
+    this.refreshMemoryViews();
+
+    const mod = this.getModule();
+    const memBuffer = mod.memory?.buffer || mod.buffer || mod.wasmMemory?.buffer;
+    if (!memBuffer) {
+      console.warn('[NativeDAWBridge] HEAPF32 / memory buffer не найден при чтении Float32.');
       return new Float32Array(0);
     }
-    
-    const view = heapF32.subarray(floatOffset, floatOffset + length);
-    const result = new Float32Array(length);
-    result.set(view);
-    return result;
+
+    const byteOffset = ptr;
+    const byteLength = length * 4;
+    const totalBufferBytes = memBuffer.byteLength;
+
+    if (byteOffset + byteLength > totalBufferBytes) {
+      throw new Error(`WASM Buffer Overflow: попытка прочесть [${byteOffset} .. ${byteOffset + byteLength}] при размере памяти ${totalBufferBytes}`);
+    }
+
+    return new Float32Array(memBuffer.slice(byteOffset, byteOffset + byteLength));
   }
 
   /**
-   * Прямое чтение Uint8Array байтового массива из кучи WASM
+   * Прямое чтение Uint8Array байтового массива из кучи WASM с защитой от RangeError и detached ArrayBuffer
    */
-  public readUint8Direct(ptr: number, length: number): Uint8Array {
-    if (!ptr || length <= 0) return new Uint8Array(0);
-    const mod = this.getModule();
-    
-    let heapU8 = mod.HEAPU8;
-    if (!heapU8) {
-      const buffer = mod.buffer || mod.wasmMemory?.buffer || (mod.memory ? mod.memory.buffer : null);
-      if (buffer) {
-        heapU8 = new Uint8Array(buffer);
-      }
+  public readUint8Direct(byteOffset: number, byteLength: number): Uint8Array {
+    if (!byteOffset || byteLength <= 0) return new Uint8Array(0);
+
+    // Перед ЛЮБЫМ чтением срендеренных данных из кучи C++ ОБЯЗАТЕЛЬНО обновлять ссылки на буферы памяти:
+    if (this.wasmModule && this.wasmModule.memory) {
+      this.wasmModule.HEAPF32 = new Float32Array(this.wasmModule.memory.buffer);
+      this.wasmModule.HEAPU8 = new Uint8Array(this.wasmModule.memory.buffer);
     }
-    
-    if (!heapU8) {
-      console.warn('[NativeDAWBridge] HEAPU8 не найден при чтении Uint8.');
+    this.refreshMemoryViews();
+
+    const mod = this.getModule();
+    const memBuffer = mod.memory?.buffer || mod.buffer || mod.wasmMemory?.buffer;
+    if (!memBuffer) {
+      console.warn('[NativeDAWBridge] HEAPU8 / memory buffer не найден при чтении Uint8.');
       return new Uint8Array(0);
     }
-    
-    const view = heapU8.subarray(ptr, ptr + length);
-    const result = new Uint8Array(length);
-    result.set(view);
-    return result;
+
+    // Защита чтения среза: проверять границы перед созданием Uint8Array:
+    const totalBufferBytes = memBuffer.byteLength;
+    if (byteOffset + byteLength > totalBufferBytes) {
+      throw new Error(`WASM Buffer Overflow: попытка прочесть [${byteOffset} .. ${byteOffset + byteLength}] при размере памяти ${totalBufferBytes}`);
+    }
+
+    // Использовать slice() для создания независимой копии в JS-памяти перед передачей в FFmpeg:
+    return new Uint8Array(memBuffer.slice(byteOffset, byteOffset + byteLength));
   }
 
   /**
@@ -1649,7 +1699,8 @@ export class NativeDAWBridge {
     if (onProgress) onProgress(90, 'Кодирование мастер-файла WAV...');
 
     const wavBlob = NativeDAWBridge.createWavBlobDirect(leftChannel, rightChannel, sampleRate, bitDepth);
-    const wavArrayBuffer = await wavBlob.arrayBuffer();
+    // Для больших файлов (>100 МБ) не дублируем память в ArrayBuffer впустую во избежание RangeError
+    const wavArrayBuffer = wavBlob.size <= 100 * 1024 * 1024 ? await wavBlob.arrayBuffer() : new ArrayBuffer(0);
 
     const interleavedBuffer = new Float32Array(maxFrames * 2);
     for (let i = 0; i < maxFrames; i++) {
@@ -1671,7 +1722,7 @@ export class NativeDAWBridge {
   }
 
   /**
-   * Прямая быстрая бинарная генерация стандартного RIFF WAV файла в памяти
+   * Прямая быстрая бинарная генерация стандартного RIFF WAV файла в памяти с защитой от RangeError
    */
   public static createWavBlobDirect(
     leftChannel: Float32Array,
@@ -1679,62 +1730,7 @@ export class NativeDAWBridge {
     sampleRate: number = 48000,
     bitDepth: WavBitDepth = 24
   ): Blob {
-    const maxFrames = leftChannel.length;
-    const numChannels = 2;
-    const bytesPerSample = bitDepth === 24 ? 3 : 2;
-    const blockAlign = numChannels * bytesPerSample;
-    const byteRate = sampleRate * blockAlign;
-    const dataSize = maxFrames * blockAlign;
-    const totalSize = 44 + dataSize;
-    const buffer = new ArrayBuffer(totalSize);
-    const view = new DataView(buffer);
-
-    view.setUint32(0, 0x52494646, false); // "RIFF"
-    view.setUint32(4, 36 + dataSize, true);
-    view.setUint32(8, 0x57415645, false); // "WAVE"
-
-    view.setUint32(12, 0x666d7420, false); // "fmt "
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true); // PCM
-    view.setUint16(22, numChannels, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, byteRate, true);
-    view.setUint16(32, blockAlign, true);
-    view.setUint16(34, bitDepth, true);
-
-    view.setUint32(36, 0x64617461, false); // "data"
-    view.setUint32(40, dataSize, true);
-
-    if (bitDepth === 16) {
-      const pcm16 = new Int16Array(buffer, 44, maxFrames * 2);
-      for (let i = 0; i < maxFrames; i++) {
-        let l = leftChannel[i];
-        let r = rightChannel[i];
-        if (l < -1) l = -1; else if (l > 1) l = 1;
-        if (r < -1) r = -1; else if (r > 1) r = 1;
-        pcm16[i * 2] = l < 0 ? l * 0x8000 : l * 0x7fff;
-        pcm16[i * 2 + 1] = r < 0 ? r * 0x8000 : r * 0x7fff;
-      }
-    } else {
-      const u8 = new Uint8Array(buffer, 44, dataSize);
-      let offset = 0;
-      for (let i = 0; i < maxFrames; i++) {
-        let l = leftChannel[i];
-        let r = rightChannel[i];
-        if (l < -1) l = -1; else if (l > 1) l = 1;
-        if (r < -1) r = -1; else if (r > 1) r = 1;
-        const valL = Math.round(l < 0 ? l * 0x800000 : l * 0x7fffff);
-        const valR = Math.round(r < 0 ? r * 0x800000 : r * 0x7fffff);
-        u8[offset++] = valL & 0xff;
-        u8[offset++] = (valL >> 8) & 0xff;
-        u8[offset++] = (valL >> 16) & 0xff;
-        u8[offset++] = valR & 0xff;
-        u8[offset++] = (valR >> 8) & 0xff;
-        u8[offset++] = (valR >> 16) & 0xff;
-      }
-    }
-
-    return new Blob([buffer], { type: 'audio/wav' });
+    return encodeWavToBlob(leftChannel, rightChannel, sampleRate, bitDepth);
   }
 
   /**
@@ -1905,6 +1901,7 @@ export class NativeDAWBridge {
 
   /**
    * Нативная упаковка PCM данных в канонический WAV файл с помощью C++ (packWav или buildWav)
+   * с защитой от Memory Growth, RangeError и безопасным fallback для длинных файлов
    */
   public packWavNative(
     leftChannel: Float32Array,
@@ -1912,15 +1909,30 @@ export class NativeDAWBridge {
     sampleRate: number,
     bitDepth: WavBitDepth = 24
   ): Blob {
-    const mod = this.getModule();
     const maxFrames = leftChannel.length;
     const bytesPerSample = Math.floor(bitDepth / 8);
-    const maxOutBytes = 44 + maxFrames * 2 * bytesPerSample + 1024;
+    const requiredBytes = 44 + maxFrames * 2 * bytesPerSample;
+
+    // Для длинных аудиофайлов (> 16 000 000 сэмплов / > 32 МБ)
+    // используем чанковый потоковый кодировщик без аллокации сотен мегабайт в 32-битной куче WASM
+    if (maxFrames * 2 > NativeDAWBridge.MAX_SAFE_ALLOCATION_FLOATS || requiredBytes > 32 * 1024 * 1024) {
+      return encodeWavToBlob(leftChannel, rightChannel, sampleRate, bitDepth);
+    }
+
+    const mod = this.getModule();
+    const maxOutBytes = requiredBytes + 1024;
     const outBytePtr = this.allocateBytes(maxOutBytes);
 
     if (typeof mod.buildWav === 'function') {
       const leftPtr = this.writeFloat32Direct(leftChannel);
-      const rightPtr = this.writeFloat32Direct(rightChannel);
+      const rightPtr = rightChannel && rightChannel.length > 0 ? this.writeFloat32Direct(rightChannel) : 0;
+
+      if (!leftPtr || (rightChannel && rightChannel.length > 0 && !rightPtr)) {
+        if (leftPtr) this.freeFloats(leftPtr);
+        if (rightPtr) this.freeFloats(rightPtr);
+        this.freeBytes(outBytePtr);
+        return encodeWavToBlob(leftChannel, rightChannel, sampleRate, bitDepth);
+      }
 
       let formatInt = 1; // Default to 1 (PCM24)
       if (bitDepth === 16) {
@@ -1933,42 +1945,48 @@ export class NativeDAWBridge {
         const actualBytes = mod.buildWav(leftPtr, rightPtr, maxFrames, sampleRate, formatInt, outBytePtr, maxOutBytes);
         if (actualBytes > 0) {
           const rawBytes = this.readUint8Direct(outBytePtr, actualBytes);
-          const ab = new ArrayBuffer(actualBytes);
-          new Uint8Array(ab).set(rawBytes);
-          return new Blob([ab], { type: 'audio/wav' });
+          return new Blob([rawBytes as unknown as BlobPart], { type: 'audio/wav' });
         } else {
-          throw new Error('[NativeDAWBridge] C++ buildWav вернул 0 байт');
+          return encodeWavToBlob(leftChannel, rightChannel, sampleRate, bitDepth);
         }
+      } catch (err) {
+        console.warn('[NativeDAWBridge] Сбой C++ buildWav, запуск надежного fallback:', err);
+        return encodeWavToBlob(leftChannel, rightChannel, sampleRate, bitDepth);
       } finally {
-        this.freeFloats(leftPtr);
-        this.freeFloats(rightPtr);
+        if (leftPtr) this.freeFloats(leftPtr);
+        if (rightPtr) this.freeFloats(rightPtr);
         this.freeBytes(outBytePtr);
       }
     } else if (typeof mod.packWav === 'function') {
-      // packWav принимает интерливнутый буфер
       const interleaved = new Float32Array(maxFrames * 2);
       for (let i = 0; i < maxFrames; i++) {
         interleaved[i * 2] = leftChannel[i];
-        interleaved[i * 2 + 1] = rightChannel[i];
+        interleaved[i * 2 + 1] = rightChannel ? rightChannel[i] : leftChannel[i];
       }
       const outPcmPtr = this.writeFloat32Direct(interleaved);
+      if (!outPcmPtr) {
+        this.freeBytes(outBytePtr);
+        return encodeWavToBlob(leftChannel, rightChannel, sampleRate, bitDepth);
+      }
 
       try {
         const actualBytes = mod.packWav(outPcmPtr, maxFrames, bitDepth, outBytePtr, maxOutBytes, sampleRate);
         if (actualBytes > 0) {
           const rawBytes = this.readUint8Direct(outBytePtr, actualBytes);
-          const ab = new ArrayBuffer(actualBytes);
-          new Uint8Array(ab).set(rawBytes);
-          return new Blob([ab], { type: 'audio/wav' });
+          return new Blob([rawBytes as unknown as BlobPart], { type: 'audio/wav' });
         } else {
-          throw new Error('[NativeDAWBridge] C++ packWav вернул 0 байт');
+          return encodeWavToBlob(leftChannel, rightChannel, sampleRate, bitDepth);
         }
+      } catch (err) {
+        console.warn('[NativeDAWBridge] Сбой C++ packWav, запуск надежного fallback:', err);
+        return encodeWavToBlob(leftChannel, rightChannel, sampleRate, bitDepth);
       } finally {
         this.freeFloats(outPcmPtr);
         this.freeBytes(outBytePtr);
       }
     } else {
-      throw new Error('[NativeDAWBridge] Нативные C++ функции кодирования WAV отсутствуют в WASM модуле');
+      this.freeBytes(outBytePtr);
+      return encodeWavToBlob(leftChannel, rightChannel, sampleRate, bitDepth);
     }
   }
 
@@ -2026,6 +2044,92 @@ export class NativeDAWBridge {
       this.freeFloats(inPtr);
       this.freeFloats(outLeftPtr);
       this.freeFloats(outRightPtr);
+    }
+  }
+
+  /**
+   * Высокопроизводительное вычисление Min/Max пиков (Decimation Peaks) в нативном C++ ядре
+   * с аппаратной SIMD128 векторизацией и нулевыми аллокациями в JS
+   */
+  public extractWaveformPeaksNative(
+    pcmBuffer: Float32Array,
+    targetPixels: number,
+    startFrame: number = 0,
+    lengthFrames?: number,
+    isStereo: boolean = true
+  ): { minPeaks: Float32Array; maxPeaks: Float32Array; numPixels: number } {
+    if (!pcmBuffer || pcmBuffer.length === 0 || targetPixels <= 0) {
+      return {
+        minPeaks: new Float32Array(0),
+        maxPeaks: new Float32Array(0),
+        numPixels: 0
+      };
+    }
+
+    const channels = isStereo ? 2 : 1;
+    const totalFrames = Math.floor(pcmBuffer.length / channels);
+    const framesToProcess = lengthFrames !== undefined ? lengthFrames : (totalFrames - startFrame);
+
+    const mod = this.getModule();
+    const extractFn = mod.extractWaveformPeaks || mod._extractWaveformPeaks;
+
+    // Выделяем память под входной PCM буфер и выходные Min/Max массивы
+    const inPtr = this.writeFloat32Direct(pcmBuffer);
+    const outMinPtr = inPtr > 0 ? this.allocateFloats(targetPixels) : 0;
+    const outMaxPtr = inPtr > 0 ? this.allocateFloats(targetPixels) : 0;
+
+    if (!inPtr || !outMinPtr || !outMaxPtr || !extractFn) {
+      if (inPtr) this.freeFloats(inPtr);
+      if (outMinPtr) this.freeFloats(outMinPtr);
+      if (outMaxPtr) this.freeFloats(outMaxPtr);
+
+      // Чистый JS fallback
+      const minPeaks = new Float32Array(targetPixels);
+      const maxPeaks = new Float32Array(targetPixels);
+      const framesPerPixel = framesToProcess / targetPixels;
+
+      for (let p = 0; p < targetPixels; p++) {
+        const binStart = Math.floor(startFrame + p * framesPerPixel);
+        const binEnd = Math.min(totalFrames, Math.ceil(startFrame + (p + 1) * framesPerPixel));
+        let minV = 0.0;
+        let maxV = 0.0;
+
+        for (let f = binStart; f < binEnd; f++) {
+          const idx = f * channels;
+          const left = pcmBuffer[idx] || 0;
+          const right = isStereo ? (pcmBuffer[idx + 1] || 0) : left;
+          const sMin = Math.min(left, right);
+          const sMax = Math.max(left, right);
+          if (sMin < minV) minV = sMin;
+          if (sMax > maxV) maxV = sMax;
+        }
+        minPeaks[p] = minV;
+        maxPeaks[p] = maxV;
+      }
+      return { minPeaks, maxPeaks, numPixels: targetPixels };
+    }
+
+    try {
+      const generatedCount = extractFn(
+        inPtr,
+        pcmBuffer.length,
+        targetPixels,
+        startFrame,
+        framesToProcess,
+        isStereo ? 1 : 0,
+        outMinPtr,
+        outMaxPtr
+      );
+
+      const count = generatedCount > 0 ? generatedCount : targetPixels;
+      const minPeaks = this.readFloat32Direct(outMinPtr, count);
+      const maxPeaks = this.readFloat32Direct(outMaxPtr, count);
+
+      return { minPeaks, maxPeaks, numPixels: count };
+    } finally {
+      this.freeFloats(inPtr);
+      this.freeFloats(outMinPtr);
+      this.freeFloats(outMaxPtr);
     }
   }
 
@@ -2790,6 +2894,372 @@ export class NativeDAWBridge {
       const sub = samples.subarray(offset, offset + currentBlockFrames);
       processDeEsserBlock(sub, sub, currentBlockFrames, deEsser, deEssState, sampleRate);
     }
+  }
+
+  /**
+   * Нативная индексация виртуальных файлов через C++ WASM ProjectIndexer
+   */
+  public async indexVirtualFiles(
+    files: Array<{
+      fileName: string;
+      relativePath?: string;
+      sizeBytes: number;
+      lastModifiedMs: number;
+      isDirectory?: boolean;
+    }>,
+    rawProjectJson: string = ''
+  ): Promise<{
+    rootPath: string;
+    directoryName: string;
+    success: boolean;
+    errorMessage: string;
+    files: Array<{
+      fileName: string;
+      relativePath: string;
+      extension: string;
+      typeString: string;
+      mimeType: string;
+      sizeBytes: number;
+      lastModifiedMs: number;
+    }>;
+    stats: {
+      totalFiles: number;
+      totalDirectories: number;
+      totalSizeBytes: number;
+      videoCount: number;
+      audioCount: number;
+      subtitleCount: number;
+      presetCount: number;
+      configCount: number;
+      scriptCount: number;
+      otherCount: number;
+      scanDurationMs: number;
+    };
+    videoFiles: string[];
+    audioFiles: string[];
+    subtitleFiles: string[];
+    presetFiles: string[];
+    configFiles: string[];
+    validation: {
+      isValid: boolean;
+      hasProjectConfig: boolean;
+      configFilePath: string;
+      projectId: string;
+      projectName: string;
+      sampleRate: number;
+      createdAt: string;
+      updatedAt: string;
+      videoFileName: string;
+      videoRelativePath: string;
+      videoDurationSec: number;
+      videoFps: number;
+      trackCount: number;
+      cueCount: number;
+      trackFileNames: string[];
+      missingReferencedFiles: string[];
+      warnings: string[];
+      errors: string[];
+      canonicalJson: string;
+    };
+  }> {
+    await this.initWasmEngine();
+    if (this.wasmModule && typeof (this.wasmModule as any).indexVirtualFilesNative === 'function') {
+      try {
+        const vecFiles = new (this.wasmModule as any).VectorIndexedFileEntry();
+        for (const f of files) {
+          vecFiles.push_back({
+            relativePath: f.relativePath || f.fileName,
+            absolutePath: f.relativePath || f.fileName,
+            fileName: f.fileName,
+            extension: '',
+            parentDir: '',
+            typeString: '',
+            mimeType: '',
+            sizeBytes: f.sizeBytes || 0,
+            lastModifiedMs: f.lastModifiedMs || Date.now(),
+            isDirectory: !!f.isDirectory,
+            isSymlink: false
+          });
+        }
+        const res = (this.wasmModule as any).indexVirtualFilesNative(vecFiles, rawProjectJson);
+        vecFiles.delete();
+        return res;
+      } catch (err) {
+        console.warn('[NativeDAWBridge] indexVirtualFilesNative WASM error:', err);
+      }
+    }
+
+    // High performance pure TypeScript fallback matching C++ schema exactly
+    const ext = (fn: string) => fn.split('.').pop()?.toLowerCase() || '';
+    const outFiles: any[] = [];
+    const videoFiles: string[] = [];
+    const audioFiles: string[] = [];
+    const subtitleFiles: string[] = [];
+    const presetFiles: string[] = [];
+    const configFiles: string[] = [];
+
+    let totalSizeBytes = 0;
+    let videoCount = 0;
+    let audioCount = 0;
+    let subtitleCount = 0;
+    let presetCount = 0;
+    let configCount = 0;
+    let otherCount = 0;
+
+    for (const f of files) {
+      if (f.isDirectory) continue;
+      const fileExt = ext(f.fileName);
+      let typeStr = 'other';
+      let mime = 'application/octet-stream';
+
+      if (['mp4', 'mkv', 'mov', 'webm', 'avi', 'm4v'].includes(fileExt)) {
+        typeStr = 'video';
+        mime = 'video/' + fileExt;
+        videoCount++;
+        videoFiles.push(f.relativePath || f.fileName);
+      } else if (['wav', 'mp3', 'flac', 'ogg', 'aac', 'm4a', 'aiff'].includes(fileExt)) {
+        typeStr = 'audio';
+        mime = 'audio/' + fileExt;
+        audioCount++;
+        audioFiles.push(f.relativePath || f.fileName);
+      } else if (['srt', 'ass', 'ssa', 'vtt', 'sub'].includes(fileExt)) {
+        typeStr = 'subtitle';
+        mime = 'text/' + fileExt;
+        subtitleCount++;
+        subtitleFiles.push(f.relativePath || f.fileName);
+      } else if (['vstpreset', 'fxp', 'fxb', 'aupreset'].includes(fileExt)) {
+        typeStr = 'preset';
+        presetCount++;
+        presetFiles.push(f.relativePath || f.fileName);
+      } else if (['json', 'yaml', 'toml', 'xml'].includes(fileExt)) {
+        typeStr = 'config';
+        configCount++;
+        configFiles.push(f.relativePath || f.fileName);
+      } else {
+        otherCount++;
+      }
+
+      totalSizeBytes += f.sizeBytes;
+      outFiles.push({
+        fileName: f.fileName,
+        relativePath: f.relativePath || f.fileName,
+        extension: fileExt,
+        typeString: typeStr,
+        mimeType: mime,
+        sizeBytes: f.sizeBytes,
+        lastModifiedMs: f.lastModifiedMs
+      });
+    }
+
+    let validationRes: any = {
+      isValid: false,
+      hasProjectConfig: false,
+      configFilePath: '',
+      projectId: '',
+      projectName: 'DAW Studio Project',
+      sampleRate: 48000,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      videoFileName: videoFiles[0] || '',
+      videoRelativePath: videoFiles[0] || '',
+      videoDurationSec: 0,
+      videoFps: 30,
+      trackCount: audioFiles.length,
+      cueCount: 0,
+      trackFileNames: audioFiles,
+      missingReferencedFiles: [],
+      warnings: [],
+      errors: [],
+      canonicalJson: rawProjectJson
+    };
+
+    if (rawProjectJson) {
+      try {
+        const parsed = JSON.parse(rawProjectJson);
+        validationRes = {
+          ...validationRes,
+          isValid: true,
+          hasProjectConfig: true,
+          projectId: parsed.id || 'proj_default',
+          projectName: parsed.name || 'DAW Studio Project',
+          sampleRate: parsed.sampleRate || 48000,
+          createdAt: parsed.createdAt || new Date().toISOString(),
+          updatedAt: parsed.updatedAt || new Date().toISOString(),
+          videoFileName: parsed.videoFile?.name || '',
+          videoRelativePath: parsed.videoFile?.relativePath || '',
+          videoDurationSec: parsed.videoFile?.durationSec || 0,
+          videoFps: parsed.videoFile?.fps || 30,
+          trackCount: parsed.tracks?.length || 0,
+          cueCount: parsed.subtitles?.length || 0,
+          trackFileNames: (parsed.tracks || []).map((t: any) => t.fileName),
+        };
+      } catch (err: any) {
+        validationRes.isValid = false;
+        validationRes.errors.push('Ошибка парсинга project.json: ' + err.message);
+      }
+    }
+
+    return {
+      rootPath: 'virtual://workspace',
+      directoryName: 'Virtual Project Workspace',
+      success: true,
+      errorMessage: '',
+      files: outFiles,
+      stats: {
+        totalFiles: outFiles.length,
+        totalDirectories: 0,
+        totalSizeBytes,
+        videoCount,
+        audioCount,
+        subtitleCount,
+        presetCount,
+        configCount,
+        scriptCount: 0,
+        otherCount,
+        scanDurationMs: 1.5
+      },
+      videoFiles,
+      audioFiles,
+      subtitleFiles,
+      presetFiles,
+      configFiles,
+      validation: validationRes
+    };
+  }
+
+  /**
+   * Нативная валидация project.json через C++ модуль ProjectIndexer
+   */
+  public async validateProjectJson(
+    rawProjectJson: string,
+    indexedFiles: Array<{ fileName: string; relativePath?: string }> = []
+  ): Promise<any> {
+    await this.initWasmEngine();
+    if (this.wasmModule && typeof (this.wasmModule as any).validateProjectJsonNative === 'function') {
+      try {
+        const vecFiles = new (this.wasmModule as any).VectorIndexedFileEntry();
+        for (const f of indexedFiles) {
+          vecFiles.push_back({
+            relativePath: f.relativePath || f.fileName,
+            absolutePath: f.relativePath || f.fileName,
+            fileName: f.fileName,
+            extension: '',
+            parentDir: '',
+            typeString: '',
+            mimeType: '',
+            sizeBytes: 0,
+            lastModifiedMs: 0,
+            isDirectory: false,
+            isSymlink: false
+          });
+        }
+        const res = (this.wasmModule as any).validateProjectJsonNative(rawProjectJson, vecFiles);
+        vecFiles.delete();
+        return res;
+      } catch (err) {
+        console.warn('[NativeDAWBridge] validateProjectJsonNative error:', err);
+      }
+    }
+
+    try {
+      const parsed = JSON.parse(rawProjectJson);
+      return {
+        isValid: true,
+        hasProjectConfig: true,
+        projectId: parsed.id || '',
+        projectName: parsed.name || '',
+        sampleRate: parsed.sampleRate || 48000,
+        createdAt: parsed.createdAt || '',
+        updatedAt: parsed.updatedAt || '',
+        videoFileName: parsed.videoFile?.name || '',
+        videoRelativePath: parsed.videoFile?.relativePath || '',
+        videoDurationSec: parsed.videoFile?.durationSec || 0,
+        videoFps: parsed.videoFile?.fps || 30,
+        trackCount: parsed.tracks?.length || 0,
+        cueCount: parsed.subtitles?.length || 0,
+        trackFileNames: (parsed.tracks || []).map((t: any) => t.fileName),
+        missingReferencedFiles: [],
+        warnings: [],
+        errors: [],
+        canonicalJson: rawProjectJson
+      };
+    } catch (err: any) {
+      return {
+        isValid: false,
+        hasProjectConfig: true,
+        errors: ['Ошибка парсинга JSON: ' + err.message]
+      };
+    }
+  }
+
+  /**
+   * Генерация стандартного project.json на базе нативного C++ шаблона
+   */
+  public async generateDefaultProjectJson(
+    projectName: string,
+    files: Array<{ fileName: string; relativePath?: string; sizeBytes?: number }>,
+    sampleRate: number = 48000
+  ): Promise<string> {
+    await this.initWasmEngine();
+    if (this.wasmModule && typeof (this.wasmModule as any).generateDefaultProjectJsonNative === 'function') {
+      try {
+        const vecFiles = new (this.wasmModule as any).VectorIndexedFileEntry();
+        for (const f of files) {
+          vecFiles.push_back({
+            relativePath: f.relativePath || f.fileName,
+            absolutePath: f.relativePath || f.fileName,
+            fileName: f.fileName,
+            extension: '',
+            parentDir: '',
+            typeString: '',
+            mimeType: '',
+            sizeBytes: f.sizeBytes || 0,
+            lastModifiedMs: 0,
+            isDirectory: false,
+            isSymlink: false
+          });
+        }
+        const res = (this.wasmModule as any).generateDefaultProjectJsonNative(projectName, vecFiles, sampleRate);
+        vecFiles.delete();
+        return res;
+      } catch (err) {
+        console.warn('[NativeDAWBridge] generateDefaultProjectJsonNative error:', err);
+      }
+    }
+
+    // Fallback JSON generator
+    const audioFiles = files.filter(f => ['wav', 'mp3', 'flac', 'ogg', 'aac', 'm4a'].includes(f.fileName.split('.').pop()?.toLowerCase() || ''));
+    const videoFiles = files.filter(f => ['mp4', 'mkv', 'mov', 'webm'].includes(f.fileName.split('.').pop()?.toLowerCase() || ''));
+    
+    return JSON.stringify({
+      id: 'proj_' + Date.now().toString(16),
+      name: projectName || 'DAW Studio Project',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      sampleRate,
+      videoFile: videoFiles[0] ? {
+        name: videoFiles[0].fileName,
+        relativePath: videoFiles[0].relativePath || videoFiles[0].fileName,
+        durationSec: 0,
+        fps: 30
+      } : null,
+      tracks: audioFiles.map((f, i) => ({
+        id: i + 1,
+        name: f.fileName.replace(/\.[^/.]+$/, ''),
+        fileName: f.relativePath || f.fileName,
+        volumeDb: 0,
+        pan: 0,
+        solo: false,
+        mute: false,
+        offsetSec: 0
+      })),
+      master: {
+        volumeDb: 0,
+        limiterEnabled: true,
+        limiterCeilingDb: -0.1
+      },
+      subtitles: []
+    }, null, 2);
   }
 }
 

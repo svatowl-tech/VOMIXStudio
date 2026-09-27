@@ -24,6 +24,7 @@ import {
   WavBitDepth
 } from './NativeDAWBridge';
 import { ClipConfig } from '../audio/dawEngine';
+import { encodeInterleavedToWavBlob } from '../utils/wavEncoder';
 
 /**
  * Метаданные дорожки в файле конфигурации project.json
@@ -565,8 +566,19 @@ export class ProjectManager {
     const bytesPerSample = Math.floor(bitDepth / 8);
     const expectedWavBytes = 44 + numFrames * 2 * bytesPerSample;
 
+    // Для длинных аудиофайлов (> 16 000 000 сэмплов / > 32 МБ) сохраняем через потоковый чанковый кодировщик без переполнения кучи WASM
+    if (pcmInterleavedFloats.length > NativeDAWBridge.MAX_SAFE_ALLOCATION_FLOATS || expectedWavBytes > 32 * 1024 * 1024) {
+      const wavBlob = encodeInterleavedToWavBlob(pcmInterleavedFloats, sampleRate, 2, bitDepth);
+      return await this.saveRenderedAsset(fileName, wavBlob, saveInProjectSubdir);
+    }
+
     // Выделяем память в куче WebAssembly через _malloc
     const inFloatPtr = bridge.writeFloat32Direct(pcmInterleavedFloats);
+    if (!inFloatPtr) {
+      const wavBlob = encodeInterleavedToWavBlob(pcmInterleavedFloats, sampleRate, 2, bitDepth);
+      return await this.saveRenderedAsset(fileName, wavBlob, saveInProjectSubdir);
+    }
+
     const outBytePtr = bridge.allocateBytes(expectedWavBytes);
 
     try {

@@ -39,7 +39,9 @@ SOURCES=(
     "editing/ClipEditor.cpp"
     "editing/SilenceStripper.cpp"
     "analysis/SpeechAligner.cpp"
+    "analysis/SubtitleAligner.cpp"
     "analysis/StemSeparator.cpp"
+    "analysis/WaveformAnalyzer.cpp"
     "bindings/EmscriptenBindings.cpp"
 )
 
@@ -57,7 +59,8 @@ if em++ -O3 \
     -s ENVIRONMENT=web,worker \
     -s MODULARIZE=1 \
     -s EXPORT_NAME="CreateDAWCoreModule" \
-    -s EXPORTED_FUNCTIONS='["_malloc", "_free", "_getAvailableWasmMemory", "_createMixerInstance", "_freeMixerInstance", "_processMixer", "_setTimelinePosition", "_addClipToTrack", "_addTrack", "_getTrack", "_setTrackIsOriginalAudio", "_setTrackVolume", "_setTrackPan", "_setTrackSolo", "_setTrackMute", "_removeAllTracks", "_setMasterVolume", "_setMasterLimiter", "_setVocalBusVolume", "_setVocalBusAutoDucker", "_loadTrackPlugin", "_setTrackPluginParam", "_setTrackPluginBypass", "_setTrackPluginWetDry", "_loadMasterPlugin", "_setMasterPluginParam", "_setMasterPluginBypass", "_setMasterPluginWetDry", "_getTrackPeak", "_getTrackRMS"]' \
+    -s WASM_BIGINT \
+    -s EXPORTED_FUNCTIONS='["_malloc", "_free", "_getAvailableWasmMemory", "_createMixerInstance", "_freeMixerInstance", "_processMixer", "_pushTrackAudioChunk", "_setTimelinePosition", "_addClipToTrack", "_addTrack", "_getTrack", "_setTrackIsOriginalAudio", "_setTrackVolume", "_setTrackPan", "_setTrackSolo", "_setTrackMute", "_removeAllTracks", "_setMasterVolume", "_setMasterLimiter", "_setVocalBusVolume", "_setVocalBusAutoDucker", "_loadTrackPlugin", "_setTrackPluginParam", "_setTrackPluginBypass", "_setTrackPluginWetDry", "_loadMasterPlugin", "_setMasterPluginParam", "_setMasterPluginBypass", "_setMasterPluginWetDry", "_getTrackPeak", "_getTrackRMS"]' \
     -s EXPORTED_RUNTIME_METHODS='["cwrap", "setValue", "getValue", "HEAPF32"]' \
     -s SINGLE_FILE=0 \
     "${SOURCES[@]}" \

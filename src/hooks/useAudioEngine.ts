@@ -17,6 +17,7 @@ import { TrackState, ClipConfig, VocalBusState, globalLiveDAWEngine } from '../a
 import { VSTPluginInstance, VSTPluginDescriptor } from '../audio/vstTypes';
 import { systemLogger } from '../services/SystemLogger';
 import { globalNativeDAWBridge } from '../services/NativeDAWBridge';
+import { TauriNativeBridge } from '../services/TauriNativeBridge';
 import { EMBEDDED_WASM_CORE_BASE64 } from '../data/embeddedWasmCore';
 import { toSafeArray, toSafeMap } from '../utils/safeIterables';
 
@@ -1170,6 +1171,23 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
         `Загрузка VST плагина "${descriptor.name}" (${descriptor.format}) в слот [${slotIdx}] дорожки #${trackId}...`
       );
 
+      // Если запущено в нативной среде Tauri Desktop — параллельно инициализируем нативный C++ VST3 хост
+      if (TauriNativeBridge.isTauriEnvironment() && descriptor.path) {
+        try {
+          const sampleRate = audioCtxRef.current?.sampleRate || 48000;
+          await TauriNativeBridge.loadPluginNative(
+            trackId,
+            slotIdx,
+            descriptor.path,
+            sampleRate,
+            512,
+            descriptor.classUid
+          );
+        } catch (nativeErr) {
+          systemLogger.warn('VSTHost', `Нативная загрузка VST в Tauri вернула предупреждение: ${nativeErr}`);
+        }
+      }
+
       if (workletNodeRef.current) {
         return new Promise<void>((resolve) => {
           const timeout = setTimeout(() => {
@@ -1208,8 +1226,13 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
       value: number,
       trackId?: number
     ) => {
+      const normalizedValue = Math.max(0.0, Math.min(1.0, Number(value) || 0.0));
+
+      if (TauriNativeBridge.isTauriEnvironment()) {
+        TauriNativeBridge.setPluginParameterNative(instanceId, paramId, normalizedValue).catch(() => {});
+      }
+
       if (workletNodeRef.current) {
-        const normalizedValue = Math.max(0.0, Math.min(1.0, Number(value) || 0.0));
         workletNodeRef.current.port.postMessage({
           type: 'UPDATE_VST_PARAM',
           target,
@@ -1229,6 +1252,16 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
    */
   const savePluginChunk = useCallback(
     async (instanceId: string): Promise<string> => {
+      // В нативном окружении Desktop сперва опрашиваем VST3 IComponent::getState()
+      if (TauriNativeBridge.isTauriEnvironment()) {
+        try {
+          const nativeChunk = await TauriNativeBridge.savePluginChunkNative(instanceId);
+          if (nativeChunk && nativeChunk.length > 0) {
+            return nativeChunk;
+          }
+        } catch (_) {}
+      }
+
       if (!workletNodeRef.current) return '';
 
       const requestId = `chunk_${instanceId}_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;

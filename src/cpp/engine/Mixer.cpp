@@ -67,6 +67,11 @@ void Mixer::setSampleRate(float sr) noexcept {
 
 void Mixer::setTimelinePosition(size_t pos) noexcept {
     currentTimelineSample = pos;
+    for (auto& track : tracks) {
+        if (track) {
+            track->resetStreamingBuffer();
+        }
+    }
 }
 
 void Mixer::addTrack(Track* track) {

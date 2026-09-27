@@ -23,8 +23,12 @@
 #include "../editing/ClipEditor.hpp"
 #include "../editing/SilenceStripper.hpp"
 #include "../analysis/SpeechAligner.hpp"
+#include "../analysis/SubtitleAligner.hpp"
 #include "../analysis/StemSeparator.hpp"
+#include "../analysis/WaveformAnalyzer.hpp"
 #include "../engine/MediaCore.hpp"
+#include "../vst/VSTScanner.hpp"
+#include "../project/ProjectIndexer.hpp"
 
 using namespace emscripten;
 using namespace DAWCore;
@@ -331,6 +335,26 @@ static std::vector<AlignedPhrase> JS_AlignSpeechWithScript(
     const std::vector<TranscriptionSegment>& transcriptionSegments
 ) {
     return SmartAligner::align(scriptLines, speechSegments, transcriptionSegments);
+}
+
+static std::vector<SubtitleCueNative> JS_ParseSubtitleContent(const std::string& content) {
+    return SubtitleParser::parseSrtAss(content);
+}
+
+static std::vector<AlignedPhrase> JS_AlignWithAnchor(
+    const std::vector<ScriptLine>& scriptLines,
+    const std::vector<SpeechSegment>& speechSegments,
+    float maxDriftSec
+) {
+    return SubtitleAligner::alignWithAnchor(scriptLines, speechSegments, maxDriftSec);
+}
+
+static std::vector<AlignedPhrase> JS_AlignCuesWithAnchor(
+    const std::vector<SubtitleCueNative>& cues,
+    const std::vector<SpeechSegment>& speechSegments,
+    float maxDriftSec
+) {
+    return SubtitleAligner::alignCuesWithAnchor(cues, speechSegments, maxDriftSec);
 }
 
 // ============================================================================
@@ -728,10 +752,18 @@ EMSCRIPTEN_BINDINGS(daw_core_module) {
         .field("similarityScore", &AlignedPhrase::similarityScore)
         .field("status", &AlignedPhrase::status);
 
+    value_object<SubtitleCueNative>("SubtitleCueNative")
+        .field("index", &SubtitleCueNative::index)
+        .field("startSec", &SubtitleCueNative::startSec)
+        .field("endSec", &SubtitleCueNative::endSec)
+        .field("speaker", &SubtitleCueNative::speaker)
+        .field("text", &SubtitleCueNative::text);
+
     register_vector<SpeechSegment>("VectorSpeechSegment");
     register_vector<ScriptLine>("VectorScriptLine");
     register_vector<TranscriptionSegment>("VectorTranscriptionSegment");
     register_vector<AlignedPhrase>("VectorAlignedPhrase");
+    register_vector<SubtitleCueNative>("VectorSubtitleCueNative");
 
     function("fastLevenshteinDistance", &JS_FastLevenshteinDistance);
     function("fastStringSimilarity", &JS_FastStringSimilarity);
@@ -740,6 +772,10 @@ EMSCRIPTEN_BINDINGS(daw_core_module) {
     function("calculateFrameEnergy", &JS_CalculateFrameEnergyStats);
     function("detectSpeechSegments", &JS_DetectSpeechSegments);
     function("alignSpeechWithScript", &JS_AlignSpeechWithScript);
+    function("parseSubtitleContent", &JS_ParseSubtitleContent);
+    function("parseSrtAss", &JS_ParseSubtitleContent);
+    function("alignWithAnchor", &JS_AlignWithAnchor);
+    function("alignCuesWithAnchor", &JS_AlignCuesWithAnchor);
     function("separateVocalsAndKaraoke", &JS_SeparateVocalsAndKaraoke);
 
     // MediaCore bindings
@@ -753,6 +789,201 @@ EMSCRIPTEN_BINDINGS(daw_core_module) {
     function("buildWav", &JS_BuildWav);
     function("analyzeLoudness", &JS_AnalyzeLoudness);
     function("applyGain", &JS_ApplyGain);
+
+    // WaveformAnalyzer bindings (Zero GC / SIMD128 Decimation)
+    function("extractWaveformPeaks", optional_override([](
+        uintptr_t bufferPtr,
+        size_t bufferLength,
+        int targetPixels,
+        size_t startFrame,
+        size_t lengthFrames,
+        bool isStereo,
+        uintptr_t outMinPtr,
+        uintptr_t outMaxPtr
+    ) {
+        const float* inBuf = reinterpret_cast<const float*>(bufferPtr);
+        float* outMin = reinterpret_cast<float*>(outMinPtr);
+        float* outMax = reinterpret_cast<float*>(outMaxPtr);
+        return WaveformAnalyzer::extractPeaksNative(
+            inBuf, bufferLength, targetPixels, startFrame, lengthFrames, isStereo, outMin, outMax
+        );
+    }));
+
+    function("extractWaveformRMS", optional_override([](
+        uintptr_t bufferPtr,
+        size_t bufferLength,
+        int targetPixels,
+        size_t startFrame,
+        size_t lengthFrames,
+        bool isStereo,
+        uintptr_t outRmsPtr
+    ) {
+        const float* inBuf = reinterpret_cast<const float*>(bufferPtr);
+        float* outRms = reinterpret_cast<float*>(outRmsPtr);
+        return WaveformAnalyzer::extractRMSPeaksNative(
+            inBuf, bufferLength, targetPixels, startFrame, lengthFrames, isStereo, outRms
+        );
+    }));
+
+    function("calculateWaveformStats", optional_override([](
+        uintptr_t bufferPtr,
+        size_t totalFrames,
+        bool isStereo
+    ) {
+        const float* inBuf = reinterpret_cast<const float*>(bufferPtr);
+        WaveformStats stats = WaveformAnalyzer::calculateGlobalStats(inBuf, totalFrames, isStereo);
+        val obj = val::object();
+        obj.set("globalMin", stats.globalMin);
+        obj.set("globalMax", stats.globalMax);
+        obj.set("maxAbsolutePeak", stats.maxAbsolutePeak);
+        obj.set("rmsLevel", stats.rmsLevel);
+        obj.set("processedFrames", static_cast<double>(stats.processedFrames));
+        return obj;
+    }));
+
+    // VSTDiskScanner bindings
+    value_object<VSTSubPluginMetadata>("VSTSubPluginMetadata")
+        .field("name", &VSTSubPluginMetadata::name)
+        .field("classUid", &VSTSubPluginMetadata::classUid)
+        .field("category", &VSTSubPluginMetadata::category)
+        .field("isStereo", &VSTSubPluginMetadata::isStereo);
+
+    value_object<VSTPluginMetadata>("VSTPluginMetadata")
+        .field("id", &VSTPluginMetadata::id)
+        .field("name", &VSTPluginMetadata::name)
+        .field("category", &VSTPluginMetadata::category)
+        .field("vendor", &VSTPluginMetadata::vendor)
+        .field("format", &VSTPluginMetadata::format)
+        .field("path", &VSTPluginMetadata::path)
+        .field("binaryPath", &VSTPluginMetadata::binaryPath)
+        .field("classUid", &VSTPluginMetadata::classUid)
+        .field("latencySamples", &VSTPluginMetadata::latencySamples)
+        .field("isInstrument", &VSTPluginMetadata::isInstrument)
+        .field("isFx", &VSTPluginMetadata::isFx)
+        .field("isStereo", &VSTPluginMetadata::isStereo)
+        .field("audioInputs", &VSTPluginMetadata::audioInputs)
+        .field("audioOutputs", &VSTPluginMetadata::audioOutputs)
+        .field("hasEditor", &VSTPluginMetadata::hasEditor)
+        .field("is64Bit", &VSTPluginMetadata::is64Bit)
+        .field("sdkVersion", &VSTPluginMetadata::sdkVersion)
+        .field("version", &VSTPluginMetadata::version)
+        .field("fileSize", &VSTPluginMetadata::fileSize)
+        .field("lastModified", &VSTPluginMetadata::lastModified)
+        .field("isBundle", &VSTPluginMetadata::isBundle)
+        .field("isWaveshell", &VSTPluginMetadata::isWaveshell)
+        .field("isIzotope", &VSTPluginMetadata::isIzotope)
+        .field("isValid", &VSTPluginMetadata::isValid)
+        .field("errorMessage", &VSTPluginMetadata::errorMessage);
+
+    register_vector<VSTSubPluginMetadata>("VectorVSTSubPluginMetadata");
+    register_vector<VSTPluginMetadata>("VectorVSTPluginMetadata");
+    register_vector<std::string>("VectorString");
+
+    function("getStandardVstDirectoriesNative", optional_override([]() {
+        return VSTDiskScanner::getStandardSystemPaths();
+    }));
+
+    function("scanVstPluginsNative", optional_override([](const std::vector<std::string>& customPaths) {
+        VSTDiskScanner scanner;
+        VSTScanResult result = scanner.scanSystemDirectories(customPaths);
+        return result.plugins;
+    }));
+
+    // ProjectIndexer bindings
+    value_object<IndexedFileEntry>("IndexedFileEntry")
+        .field("relativePath", &IndexedFileEntry::relativePath)
+        .field("absolutePath", &IndexedFileEntry::absolutePath)
+        .field("fileName", &IndexedFileEntry::fileName)
+        .field("extension", &IndexedFileEntry::extension)
+        .field("parentDir", &IndexedFileEntry::parentDir)
+        .field("typeString", &IndexedFileEntry::typeString)
+        .field("mimeType", &IndexedFileEntry::mimeType)
+        .field("sizeBytes", &IndexedFileEntry::sizeBytes)
+        .field("lastModifiedMs", &IndexedFileEntry::lastModifiedMs)
+        .field("isDirectory", &IndexedFileEntry::isDirectory)
+        .field("isSymlink", &IndexedFileEntry::isSymlink);
+
+    register_vector<IndexedFileEntry>("VectorIndexedFileEntry");
+
+    value_object<ProjectDirectoryStats>("ProjectDirectoryStats")
+        .field("totalFiles", &ProjectDirectoryStats::totalFiles)
+        .field("totalDirectories", &ProjectDirectoryStats::totalDirectories)
+        .field("totalSizeBytes", &ProjectDirectoryStats::totalSizeBytes)
+        .field("videoCount", &ProjectDirectoryStats::videoCount)
+        .field("audioCount", &ProjectDirectoryStats::audioCount)
+        .field("subtitleCount", &ProjectDirectoryStats::subtitleCount)
+        .field("presetCount", &ProjectDirectoryStats::presetCount)
+        .field("configCount", &ProjectDirectoryStats::configCount)
+        .field("scriptCount", &ProjectDirectoryStats::scriptCount)
+        .field("otherCount", &ProjectDirectoryStats::otherCount)
+        .field("scanDurationMs", &ProjectDirectoryStats::scanDurationMs);
+
+    value_object<ProjectValidationResult>("ProjectValidationResult")
+        .field("isValid", &ProjectValidationResult::isValid)
+        .field("hasProjectConfig", &ProjectValidationResult::hasProjectConfig)
+        .field("configFilePath", &ProjectValidationResult::configFilePath)
+        .field("projectId", &ProjectValidationResult::projectId)
+        .field("projectName", &ProjectValidationResult::projectName)
+        .field("sampleRate", &ProjectValidationResult::sampleRate)
+        .field("createdAt", &ProjectValidationResult::createdAt)
+        .field("updatedAt", &ProjectValidationResult::updatedAt)
+        .field("videoFileName", &ProjectValidationResult::videoFileName)
+        .field("videoRelativePath", &ProjectValidationResult::videoRelativePath)
+        .field("videoDurationSec", &ProjectValidationResult::videoDurationSec)
+        .field("videoFps", &ProjectValidationResult::videoFps)
+        .field("trackCount", &ProjectValidationResult::trackCount)
+        .field("cueCount", &ProjectValidationResult::cueCount)
+        .field("trackFileNames", &ProjectValidationResult::trackFileNames)
+        .field("missingReferencedFiles", &ProjectValidationResult::missingReferencedFiles)
+        .field("warnings", &ProjectValidationResult::warnings)
+        .field("errors", &ProjectValidationResult::errors)
+        .field("canonicalJson", &ProjectValidationResult::canonicalJson);
+
+    value_object<ProjectIndexResult>("ProjectIndexResult")
+        .field("rootPath", &ProjectIndexResult::rootPath)
+        .field("directoryName", &ProjectIndexResult::directoryName)
+        .field("success", &ProjectIndexResult::success)
+        .field("errorMessage", &ProjectIndexResult::errorMessage)
+        .field("files", &ProjectIndexResult::files)
+        .field("stats", &ProjectIndexResult::stats)
+        .field("videoFiles", &ProjectIndexResult::videoFiles)
+        .field("audioFiles", &ProjectIndexResult::audioFiles)
+        .field("subtitleFiles", &ProjectIndexResult::subtitleFiles)
+        .field("presetFiles", &ProjectIndexResult::presetFiles)
+        .field("configFiles", &ProjectIndexResult::configFiles)
+        .field("validation", &ProjectIndexResult::validation);
+
+    function("indexVirtualFilesNative", optional_override([](
+        const std::vector<IndexedFileEntry>& rawFiles,
+        const std::string& rawProjectJson
+    ) {
+        return ProjectIndexer::indexVirtualFiles(rawFiles, rawProjectJson);
+    }));
+
+    function("validateProjectJsonNative", optional_override([](
+        const std::string& rawProjectJson,
+        const std::vector<IndexedFileEntry>& indexedFiles
+    ) {
+        return ProjectIndexer::validateAndParseProjectJson(rawProjectJson, indexedFiles);
+    }));
+
+    function("generateDefaultProjectJsonNative", optional_override([](
+        const std::string& projectName,
+        const std::vector<IndexedFileEntry>& files,
+        double sampleRate
+    ) {
+        return ProjectIndexer::generateDefaultProjectJson(projectName, files, sampleRate);
+    }));
+
+    function("detectFileTypeNative", optional_override([](const std::string& fileName) {
+        MediaFileType type = ProjectIndexer::detectFileType(fileName);
+        return ProjectIndexer::fileTypeToString(type);
+    }));
+
+    function("detectMimeTypeNative", optional_override([](const std::string& fileName) {
+        MediaFileType type = ProjectIndexer::detectFileType(fileName);
+        return ProjectIndexer::detectMimeType(fileName, type);
+    }));
 }
 
 #endif // __EMSCRIPTEN__
@@ -794,6 +1025,15 @@ void processMixer(uintptr_t mixerPtr, uintptr_t outputPtr, int numSamples) {
     if (mixer && outBuf) {
         mixer->processBlock(outBuf, static_cast<size_t>(numSamples));
     }
+}
+
+EMSCRIPTEN_KEEPALIVE
+void pushTrackAudioChunk(void* mixerPtr, int trackId, float* chunkPtr, int numFrames, int64_t startTimelineSample) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer || !chunkPtr || numFrames <= 0) return;
+    DAWCore::Track* track = mixer->getTrack(static_cast<uint32_t>(trackId));
+    if (!track) return;
+    track->pushAudioChunk(chunkPtr, numFrames, startTimelineSample);
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -1086,6 +1326,55 @@ float getTrackRMS(uintptr_t mixerPtr, int trackId, int channel) {
     auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
     if (!mixer) return 0.0f;
     return mixer->getRMS(trackId, channel);
+}
+
+EMSCRIPTEN_KEEPALIVE
+int extractWaveformPeaks(
+    uintptr_t bufferPtr,
+    size_t bufferLength,
+    int targetPixels,
+    size_t startFrame,
+    size_t lengthFrames,
+    int isStereo,
+    uintptr_t outMinPtr,
+    uintptr_t outMaxPtr
+) {
+    const float* inBuf = reinterpret_cast<const float*>(bufferPtr);
+    float* outMin = reinterpret_cast<float*>(outMinPtr);
+    float* outMax = reinterpret_cast<float*>(outMaxPtr);
+    return DAWCore::WaveformAnalyzer::extractPeaksNative(
+        inBuf,
+        bufferLength,
+        targetPixels,
+        startFrame,
+        lengthFrames,
+        isStereo != 0,
+        outMin,
+        outMax
+    );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int extractWaveformRMS(
+    uintptr_t bufferPtr,
+    size_t bufferLength,
+    int targetPixels,
+    size_t startFrame,
+    size_t lengthFrames,
+    int isStereo,
+    uintptr_t outRmsPtr
+) {
+    const float* inBuf = reinterpret_cast<const float*>(bufferPtr);
+    float* outRms = reinterpret_cast<float*>(outRmsPtr);
+    return DAWCore::WaveformAnalyzer::extractRMSPeaksNative(
+        inBuf,
+        bufferLength,
+        targetPixels,
+        startFrame,
+        lengthFrames,
+        isStereo != 0,
+        outRms
+    );
 }
 
 } // extern "C"

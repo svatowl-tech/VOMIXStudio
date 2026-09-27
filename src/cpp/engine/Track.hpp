@@ -20,8 +20,63 @@
 #include <vector>
 #include <array>
 #include <memory>
+#include <cstring>
+#include <algorithm>
 
 namespace DAWCore {
+
+/**
+ * Компактный потоковый кольцевой буфер (Streaming Chunked Ring-Buffer)
+ * Фиксированный размер 32768 стереокадров (~256 КБ).
+ * RT-Safe, Zero Allocation, с привязкой таймлайн-сэмплов для защиты от рассинхронизации.
+ */
+struct StreamingRingBuffer {
+    static constexpr size_t CAPACITY_FRAMES = 32768; // 32768 стереосэмплов (65536 float, ~256 КБ)
+    static constexpr size_t MASK = CAPACITY_FRAMES - 1;
+
+    alignas(16) float buffer[CAPACITY_FRAMES * 2]{};
+    int64_t timelinePositions[CAPACITY_FRAMES];
+
+    StreamingRingBuffer() noexcept {
+        reset();
+    }
+
+    void reset() noexcept {
+        std::memset(buffer, 0, sizeof(buffer));
+        std::fill(timelinePositions, timelinePositions + CAPACITY_FRAMES, -1);
+    }
+
+    void push(const float* chunkPtr, int numFrames, int64_t startTimelineSample) noexcept {
+        if (!chunkPtr || numFrames <= 0) return;
+        for (int f = 0; f < numFrames; ++f) {
+            int64_t s = startTimelineSample + f;
+            if (s < 0) continue;
+            size_t slot = static_cast<size_t>(s) & MASK;
+            if (timelinePositions[slot] == s) {
+                buffer[slot * 2]     += chunkPtr[f * 2];
+                buffer[slot * 2 + 1] += chunkPtr[f * 2 + 1];
+            } else {
+                buffer[slot * 2]     = chunkPtr[f * 2];
+                buffer[slot * 2 + 1] = chunkPtr[f * 2 + 1];
+                timelinePositions[slot] = s;
+            }
+        }
+    }
+
+    void read(float* destStereo, size_t numFrames, int64_t timelinePosition) noexcept {
+        if (!destStereo || numFrames == 0) return;
+        for (size_t f = 0; f < numFrames; ++f) {
+            int64_t s = timelinePosition + static_cast<int64_t>(f);
+            if (s < 0) continue;
+            size_t slot = static_cast<size_t>(s) & MASK;
+            if (timelinePositions[slot] == s) {
+                destStereo[f * 2]     += buffer[slot * 2];
+                destStereo[f * 2 + 1] += buffer[slot * 2 + 1];
+                timelinePositions[slot] = -1; // Потребление сэмпла для защиты от повторного чтения
+            }
+        }
+    }
+};
 
 /**
  * Класс Track - Дорожка микшера
@@ -39,6 +94,9 @@ public:
 
     // Набор клипов дорожки (резервируется заранее во избежание аллокаций)
     std::vector<Clip> clips;
+
+    // Встроенный потоковый кольцевой буфер для стриминга длинных дорожек
+    StreamingRingBuffer streamingRingBuffer;
 
     // Встроенная цепочка студийной обработки VocalRack
     VocalRack vocalRack;
@@ -85,6 +143,14 @@ public:
     void clearClips() noexcept;
     bool removeClip(uint32_t clipId) noexcept;
     Clip* getClip(uint32_t clipId) noexcept;
+
+    // --- Потоковая подкачка аудиоданных (Streaming Ring-Buffer) ---
+    void pushAudioChunk(const float* chunkPtr, int numFrames, int64_t startTimelineSample) noexcept {
+        streamingRingBuffer.push(chunkPtr, numFrames, startTimelineSample);
+    }
+    void resetStreamingBuffer() noexcept {
+        streamingRingBuffer.reset();
+    }
 
     // --- Управление VST-слотами дорожки ---
     void loadPlugin(int slotIdx, int pluginTypeId);

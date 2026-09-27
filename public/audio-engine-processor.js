@@ -53,6 +53,11 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
     this.outBufferPtr = 0;
     this.outBufferCapacity = 512; // Емкость выходного стереобуфера в float
 
+    // Scratch-буфер подкачки сэмплов в C++ ядро (Streaming Chunked Ring-Buffer)
+    this.scratchBufferCapacityFrames = 2048; // 2048 стереосэмплов (~16 КБ)
+    this.scratchBufferPtr = 0;
+    this.scratchBufferF32 = new Float32Array(this.scratchBufferCapacityFrames * 2);
+
     // Троттлинг и буфер дедупликации частых команд управления (Volume, Pan, VST Params)
     this.pendingTrackVolumes = new Map(); // trackId -> volumeDb
     this.pendingTrackPans = new Map();    // trackId -> pan
@@ -145,6 +150,33 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
   }
 
   /**
+   * Чистая реализация Base64-декодирования для AudioWorkletGlobalScope
+   */
+  fromBase64(b64) {
+    if (typeof atob === 'function') {
+      try {
+        return decodeURIComponent(escape(atob(b64)));
+      } catch (_) {}
+    }
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+    let output = '';
+    let buffer = 0;
+    let bits = 0;
+    for (let i = 0; i < b64.length; i++) {
+      const c = b64.charAt(i);
+      const val = chars.indexOf(c);
+      if (val === -1 || c === '=') continue;
+      buffer = (buffer << 6) | val;
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        output += String.fromCharCode((buffer >> bits) & 0xff);
+      }
+    }
+    return output;
+  }
+
+  /**
    * Инициализация WebAssembly ядра в контексте AudioWorklet
    */
   async initWasm(wasmBytes) {
@@ -193,6 +225,12 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         this.outBufferPtr = this.wasmModule._malloc(this.outBufferCapacity * 4);
       }
 
+      // Выделяем ОДИН общий временный scratch-буфер подкачки размером 2048 фреймов (~16 КБ)
+      this.scratchBufferCapacityFrames = 2048;
+      if (this.wasmModule._malloc) {
+        this.scratchBufferPtr = this.wasmModule._malloc(this.scratchBufferCapacityFrames * 2 * 4);
+      }
+
       this.isWasmReady = true;
 
       // Применяем текущие глобальные настройки
@@ -223,10 +261,16 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
 
   /**
    * Безопасное выделение памяти в куче WASM и копирование Float32Array данных.
-   * Без искусственных ограничений по размеру (поддерживает многоминутные 24+ мин сессии).
+   * OOM Guard: файлы более 10 секунд (480 000 сэмплов) не аллоцируются в куче,
+   * а подкачиваются через Streaming Chunked Ring-Buffer.
    */
   allocateWasmBuffer(pcmData) {
     if (!this.wasmModule || !this.wasmModule._malloc || !pcmData || pcmData.length === 0) {
+      return 0;
+    }
+    // OOM Guard: предотвращение переполнения 32-битной кучи WASM при воспроизведении длинных дорожек (24+ мин)
+    const MAX_STATIC_WASM_BUFFER_SAMPLES = 480000; // 10 секунд @ 48 кГц
+    if (pcmData.length > MAX_STATIC_WASM_BUFFER_SAMPLES) {
       return 0;
     }
     try {
@@ -896,6 +940,48 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           instanceId,
           chunk: chunkBase64
         });
+        break;
+      }
+
+      case 'RESTORE_VST_CHUNK':
+      case 'LOAD_VST_CHUNK': {
+        const { instanceId, chunk } = msg;
+        if (!chunk || !instanceId) break;
+
+        try {
+          const jsonStr = this.fromBase64(chunk);
+          const chunkData = JSON.parse(jsonStr);
+          const targetInfo = this.findPluginByInstanceId(instanceId);
+
+          if (targetInfo && targetInfo.plugin && chunkData) {
+            const p = targetInfo.plugin;
+            if (typeof chunkData.enabled === 'boolean') {
+              p.enabled = chunkData.enabled;
+              p.targetBypassGain = p.enabled ? 1.0 : 0.0;
+            }
+            if (typeof chunkData.wetDry === 'number') {
+              p.wetDry = chunkData.wetDry;
+              p.targetWetDry = chunkData.wetDry;
+            }
+            if (chunkData.parameters && typeof chunkData.parameters === 'object') {
+              p.parameters = { ...chunkData.parameters };
+              if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
+                const isMaster = (targetInfo.target === 'master' || targetInfo.trackId === 1000);
+                for (const [k, v] of Object.entries(chunkData.parameters)) {
+                  const numId = this.getParamIdAsNumber(p.pluginId, k);
+                  const normVal = Math.max(0.0, Math.min(1.0, Number(v) || 0.0));
+                  if (isMaster && this.wasmModule._setMasterPluginParam) {
+                    this.wasmModule._setMasterPluginParam(this.mixerPtr, targetInfo.slotIdx, numId, normVal);
+                  } else if (this.wasmModule._setTrackPluginParam) {
+                    this.wasmModule._setTrackPluginParam(this.mixerPtr, targetInfo.trackId, targetInfo.slotIdx, numId, normVal);
+                  }
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('[AudioEngineProcessor] Ошибка RESTORE_VST_CHUNK:', e);
+        }
         break;
       }
 
@@ -1836,7 +1922,10 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         trPanR = Math.sin(angle);
 
         for (const [, cl] of tr.clips.entries()) {
-          const pcm = cl.pcm;
+          let pcm = cl.pcm;
+          if (!pcm || pcm.length === 0) {
+            pcm = this.clipBufferCache.get(cl.id);
+          }
           if (!pcm || pcm.length === 0) continue;
 
           const clipStart = cl.offsetSamples || 0;
@@ -1907,6 +1996,125 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
 
     try {
       this.flushPendingControlUpdates();
+
+      // 1. Потоковая подкачка сэмплов из JS-памяти (clipBufferCache) в C++ AudioWorklet (Streaming Chunked Ring-Buffer)
+      const pushChunkFn = this.wasmModule._pushTrackAudioChunk || this.wasmModule.pushTrackAudioChunk;
+
+      if (pushChunkFn && numFrames <= this.scratchBufferCapacityFrames) {
+        if (!this.scratchBufferPtr && this.wasmModule._malloc) {
+          this.scratchBufferPtr = this.wasmModule._malloc(this.scratchBufferCapacityFrames * 2 * 4);
+        }
+
+        if (this.scratchBufferPtr) {
+          if (this.wasmModule.memory && (!this.wasmModule.HEAPF32 || this.wasmModule.HEAPF32.buffer !== this.wasmModule.memory.buffer)) {
+            this.wasmModule.HEAPF32 = new Float32Array(this.wasmModule.memory.buffer);
+          }
+          const heapF32 = this.wasmModule.HEAPF32;
+          const scratchOffset = this.scratchBufferPtr >> 2;
+          const scratchF32 = this.scratchBufferF32;
+          const currentPos = this.currentTimelineSample;
+
+          for (const [trackId, track] of this.jsTracks.entries()) {
+            if (!track) continue;
+
+            let hasAudio = false;
+            scratchF32.fill(0, 0, numFrames * 2);
+
+            if (track.clips && track.clips.size > 0) {
+              for (const [clipId, cl] of track.clips.entries()) {
+                if (!cl) continue;
+
+                // Если клип уже аллоцирован статически в WASM (короткий клип <= 10 сек),
+                // он рендерится внутри C++ через renderClipsToBuffer -> пропускаем дублирование
+                const staticWasmPtr = this.clipWasmPtrs.get(clipId);
+                if (staticWasmPtr && staticWasmPtr > 0) {
+                  continue;
+                }
+
+                let pcm = cl.pcm;
+                if (!pcm || pcm.length === 0) {
+                  pcm = this.clipBufferCache.get(clipId);
+                }
+                if (!pcm && cl.parentClipId) {
+                  pcm = this.clipBufferCache.get(cl.parentClipId);
+                }
+                if (!pcm || pcm.length === 0) continue;
+
+                const isStereo = cl.isStereo !== undefined ? !!cl.isStereo : (pcm.length >= (cl.lengthSamples || 0) * 2);
+                const clipStart = cl.offsetSamples || 0;
+                const clipLen = cl.lengthSamples || (isStereo ? Math.floor(pcm.length / 2) : pcm.length);
+                const clipEnd = clipStart + clipLen;
+
+                // Проверка пересечения с текущим блоком
+                if (currentPos + numFrames <= clipStart || currentPos >= clipEnd) {
+                  continue;
+                }
+
+                const overlapStart = Math.max(currentPos, clipStart);
+                const overlapEnd = Math.min(currentPos + numFrames, clipEnd);
+                const overlapLen = overlapEnd - overlapStart;
+                const destOffset = overlapStart - currentPos;
+                const srcStart = (overlapStart - clipStart) + (cl.bufferOffsetSamples || 0);
+
+                const clipGain = typeof cl.gain === 'number' ? cl.gain : 1.0;
+                const clipPan = typeof cl.pan === 'number' ? cl.pan : 0.0;
+                const angle = (clipPan + 1.0) * (Math.PI / 4.0);
+                const clipPanL = Math.cos(angle);
+                const clipPanR = Math.sin(angle);
+                const fadeIn = cl.fadeInSamples || 0;
+                const fadeOut = cl.fadeOutSamples || 0;
+
+                hasAudio = true;
+
+                for (let f = 0; f < overlapLen; f++) {
+                  const sampleIdxInClip = (overlapStart - clipStart) + f;
+                  let fade = 1.0;
+                  if (fadeIn > 0 && sampleIdxInClip < fadeIn) {
+                    fade = sampleIdxInClip / fadeIn;
+                  } else if (fadeOut > 0 && sampleIdxInClip >= clipLen - fadeOut) {
+                    fade = Math.max(0, (clipLen - sampleIdxInClip) / fadeOut);
+                  }
+
+                  const gainL = clipGain * fade * clipPanL;
+                  const gainR = clipGain * fade * clipPanR;
+
+                  const srcIdx = srcStart + f;
+                  let sL = 0;
+                  let sR = 0;
+
+                  if (isStereo) {
+                    const pcmIdx = srcIdx * 2;
+                    if (pcmIdx + 1 < pcm.length) {
+                      sL = pcm[pcmIdx];
+                      sR = pcm[pcmIdx + 1];
+                    }
+                  } else {
+                    if (srcIdx < pcm.length) {
+                      sL = pcm[srcIdx];
+                      sR = sL;
+                    }
+                  }
+
+                  const outIdx = (destOffset + f) * 2;
+                  scratchF32[outIdx]     += sL * gainL;
+                  scratchF32[outIdx + 1] += sR * gainR;
+                }
+              }
+            }
+
+            // Если есть потоковые сэмплы для дорожки, копируем в scratch-буфер WASM и пушим в C++ кольцевой буфер
+            if (hasAudio) {
+              heapF32.set(scratchF32.subarray(0, numFrames * 2), scratchOffset);
+              const timelineSample = typeof BigInt !== 'undefined' ? BigInt(Math.floor(currentPos)) : Math.floor(currentPos);
+              try {
+                pushChunkFn(this.mixerPtr, trackId, this.scratchBufferPtr, numFrames, timelineSample);
+              } catch (_) {
+                pushChunkFn(this.mixerPtr, trackId, this.scratchBufferPtr, numFrames, Math.floor(currentPos));
+              }
+            }
+          }
+        }
+      }
 
       const neededFloatSamples = numFrames * 2;
       if (neededFloatSamples > this.outBufferCapacity) {

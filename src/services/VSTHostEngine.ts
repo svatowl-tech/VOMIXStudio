@@ -19,6 +19,7 @@ import {
   VSTScanDirectory,
   VSTScanStats,
   VSTPluginCategory,
+  VSTPluginFormat,
   VSTParameterDef
 } from '../audio/vstTypes';
 import { systemLogger } from './SystemLogger';
@@ -1361,6 +1362,62 @@ export class VSTHostEngine {
 
     this.saveCatalogToStorage();
     this.notify();
+  }
+
+  /**
+   * Импорт плагина напрямую из файла на диске (.vst3 / .dll / .clap)
+   */
+  public importPluginFromPath(filePath: string): VSTPluginDefinition {
+    const normalized = filePath.replace(/\\/g, '/');
+    const fileName = normalized.split('/').pop() || 'Plugin';
+    const baseName = fileName.replace(/\.(vst3|dll|clap|wasm|dylib|so)$/i, '');
+    const ext = fileName.split('.').pop()?.toLowerCase() || '';
+
+    let format: VSTPluginFormat = 'VST3';
+    if (ext === 'dll') format = 'VST2';
+    else if (ext === 'clap') format = 'CLAP';
+    else if (ext === 'wasm') format = 'Native/WASM';
+
+    const lower = baseName.toLowerCase();
+    let category: VSTPluginCategory = 'Utility';
+    if (lower.includes('eq') || lower.includes('equalizer') || lower.includes('q3')) category = 'EQ';
+    else if (lower.includes('comp') || lower.includes('cla') || lower.includes('dyn') || lower.includes('ott')) category = 'Dynamics';
+    else if (lower.includes('verb') || lower.includes('room') || lower.includes('space')) category = 'Reverb';
+    else if (lower.includes('limit') || lower.includes('maxim') || lower.includes('l2')) category = 'Limiter';
+    else if (lower.includes('noise') || lower.includes('click') || lower.includes('rx') || lower.includes('de-')) category = 'Restoration';
+    else if (lower.includes('vocal') || lower.includes('tune') || lower.includes('rider') || lower.includes('nectar')) category = 'Vocal';
+    else if (lower.includes('sat') || lower.includes('tape') || lower.includes('drive') || lower.includes('decap')) category = 'Saturation';
+    else if (lower.includes('master') || lower.includes('ozone')) category = 'Mastering';
+
+    let vendor = 'Native VST Host';
+    if (lower.includes('fabfilter')) vendor = 'FabFilter';
+    else if (lower.includes('izotope') || lower.includes('ozone') || lower.includes('rx') || lower.includes('nectar') || lower.includes('neutron')) vendor = 'iZotope';
+    else if (lower.includes('waves') || lower.includes('cla') || lower.includes('l2') || lower.includes('vocal rider')) vendor = 'Waves Audio';
+    else if (lower.includes('soundtoys') || lower.includes('decapitator')) vendor = 'Soundtoys';
+    else if (lower.includes('valhalla')) vendor = 'Valhalla DSP';
+    else if (lower.includes('xfer') || lower.includes('ott')) vendor = 'Xfer Records';
+
+    const pluginId = `native_${baseName.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase()}_${Date.now()}`;
+
+    const def: VSTPluginDefinition = {
+      id: pluginId,
+      name: baseName,
+      vendor,
+      category,
+      format,
+      version: '1.0.0',
+      path: filePath,
+      is64Bit: true,
+      latencySamples: 0,
+      color: category === 'EQ' ? '#06b6d4' : category === 'Dynamics' ? '#f59e0b' : category === 'Mastering' ? '#ec4899' : '#10b981',
+      description: `Нативный VST-плагин ОС (${format} 64-bit) из ${fileName}`,
+      parameters: [],
+      presets: [],
+      isCustomInstalled: true
+    };
+
+    this.registerCustomPlugin(def);
+    return def;
   }
 }
 

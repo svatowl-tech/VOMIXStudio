@@ -247,15 +247,38 @@ export class RenderManager {
   }
 
   /**
+   * Безопасное чтение срендеренных данных из кучи C++ с обновлением ссылок памяти и защитой границ
+   */
+  public readWasmBytesSafely(byteOffset: number, byteLength: number): Uint8Array {
+    const bridge = globalNativeDAWBridge;
+    const mod = bridge.getModule();
+    if (mod && mod.memory) {
+      mod.HEAPF32 = new Float32Array(mod.memory.buffer);
+      mod.HEAPU8 = new Uint8Array(mod.memory.buffer);
+    }
+    const memBuffer = mod.memory?.buffer || mod.buffer || mod.wasmMemory?.buffer;
+    if (!memBuffer) {
+      throw new Error('[RenderManager] WebAssembly memory buffer недоступен');
+    }
+    const totalBufferBytes = memBuffer.byteLength;
+    if (byteOffset + byteLength > totalBufferBytes) {
+      throw new Error(`WASM Buffer Overflow: попытка прочесть [${byteOffset} .. ${byteOffset + byteLength}] при размере памяти ${totalBufferBytes}`);
+    }
+    // Использовать slice() для создания независимой копии в JS-памяти перед передачей в FFmpeg:
+    return new Uint8Array(memBuffer.slice(byteOffset, byteOffset + byteLength));
+  }
+
+  /**
    * Видео-муксинг и экспорт: вшивание сведенного WAV аудио в видеофайл с гибкой настройкой качества
    */
   public async muxAudioIntoVideo(
     sourceVideoFile: File,
-    masterWavBlob: Blob,
+    masterWavBlob: Blob | Uint8Array,
     outputFileName: string = 'final_dubbed_video.mp4',
     options?: {
       timelineHasOriginalAudio?: boolean;
       exportParams?: Partial<VideoExportParameters>;
+      wavPtr?: number;
     }
   ): Promise<Blob | null> {
     this.logs = [];
@@ -268,7 +291,8 @@ export class RenderManager {
     this.notifyProgress('muxing_video', 5, 'Проверка WebAssembly памяти и инициализация FFmpeg...');
 
     // Защита от переполнения памяти WebAssembly (2GB heap limit)
-    const totalSizeMb = (sourceVideoFile.size + masterWavBlob.size) / (1024 * 1024);
+    const audioByteLength = masterWavBlob instanceof Blob ? masterWavBlob.size : masterWavBlob.byteLength;
+    const totalSizeMb = (sourceVideoFile.size + audioByteLength) / (1024 * 1024);
     this.addLog(`Общий объем исходных медиафайлов: ${totalSizeMb.toFixed(1)} МБ`);
 
     if (totalSizeMb > 1500) {
@@ -289,8 +313,25 @@ export class RenderManager {
       await this.ffmpeg.writeFile('input_video.mp4', await fetchFile(sourceVideoFile));
 
       // Запись сведенного WAV
-      this.addLog('Запись сведенного мастер-аудио [audio.wav] в виртуальную ФС...');
-      await this.ffmpeg.writeFile('audio_mix.wav', await fetchFile(masterWavBlob));
+      this.addLog('Запись сведенного мастер-аудио [audio_mix.wav] в виртуальную ФС...');
+      const audioBlob = masterWavBlob instanceof Blob ? masterWavBlob : new Blob([masterWavBlob as unknown as BlobPart], { type: 'audio/wav' });
+      await this.ffmpeg.writeFile('audio_mix.wav', await fetchFile(audioBlob));
+
+      // Сразу после записи audio_mix.wav во внутреннюю ФС FFmpeg освобождаем промежуточный указатель в C++ куче через _free(wavPtr)
+      const wavPtr = options?.wavPtr ?? (masterWavBlob as any)?.wavPtr;
+      if (wavPtr && typeof wavPtr === 'number' && wavPtr > 0) {
+        try {
+          const mod = globalNativeDAWBridge.getModule();
+          if (mod && typeof mod._free === 'function') {
+            mod._free(wavPtr);
+          } else {
+            globalNativeDAWBridge.freeBytes(wavPtr);
+          }
+          this.addLog(`Освобожден временный указатель C++ кучи для WAV: 0x${wavPtr.toString(16)}`);
+        } catch (freeErr) {
+          console.warn('[RenderManager] Ошибка освобождения wavPtr в C++ куче:', freeErr);
+        }
+      }
 
       const hasTimelineOriginal = options?.timelineHasOriginalAudio ?? true;
       const isLossless = params.preset === 'lossless_original' || params.videoCodec === 'copy';

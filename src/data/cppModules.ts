@@ -31,6 +31,10 @@ export const CPP_FILES_METADATA: CppFileItem[] = [
   { path: 'editing/ClipEditor.cpp', name: 'ClipEditor.cpp', category: 'editing', description: 'Zero-copy разделение клипов с микро-фейдами и модификация в куче WASM' },
   { path: 'analysis/SpeechAligner.hpp', name: 'SpeechAligner.hpp', category: 'analysis', description: 'Интерфейсы FastLevenshtein (UTF-8), SpeechEnergyDetector (SIMD128 VAD) и SmartAligner' },
   { path: 'analysis/SpeechAligner.cpp', name: 'SpeechAligner.cpp', category: 'analysis', description: 'Реализация нормализации UTF-8, DP расстояния Левенштейна, ZCR/RMS VAD и выравнивания сценария' },
+  { path: 'analysis/SubtitleAligner.hpp', name: 'SubtitleAligner.hpp', category: 'analysis', description: 'Нативный парсер субтитров (SRT/ASS/VTT), тегоочистка и якорное выравнивание' },
+  { path: 'analysis/SubtitleAligner.cpp', name: 'SubtitleAligner.cpp', category: 'analysis', description: 'Потоковый zero-copy парсинг субтитров, string_view и якорная фиксация таймингов' },
+  { path: 'analysis/WaveformAnalyzer.hpp', name: 'WaveformAnalyzer.hpp', category: 'analysis', description: 'SIMD128 Min/Max децимация пиков и RMS профиль аудиосигнала (Zero Alloc)' },
+  { path: 'analysis/WaveformAnalyzer.cpp', name: 'WaveformAnalyzer.cpp', category: 'analysis', description: 'Реализация векторизованного вычисления пиков для моно и стерео сигналов' },
   { path: 'bindings/EmscriptenBindings.cpp', name: 'EmscriptenBindings.cpp', category: 'bindings', description: 'Embind экспорт классов и C-функций в JavaScript Heap' },
   { path: 'CMakeLists.txt', name: 'CMakeLists.txt', category: 'build', description: 'Скрипт CMake для нативной и Emscripten WASM сборки' },
   { path: 'build_wasm.sh', name: 'build_wasm.sh', category: 'build', description: 'Shell-скрипт компиляции через emcc (-O3, -msimd128, -flto)' }

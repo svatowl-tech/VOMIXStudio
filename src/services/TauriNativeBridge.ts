@@ -150,6 +150,22 @@ export class TauriNativeBridge {
   }
 
   /**
+   * Полное нативное индексирование проекта на диске через C++ модуль ProjectIndexer
+   */
+  public static async indexProjectDirectoryNative(rootPath: string, recursive: boolean = true): Promise<any> {
+    if (!this.isTauriEnvironment()) {
+      return null;
+    }
+
+    try {
+      return await invoke<any>('index_project_directory_native', { rootPath, recursive });
+    } catch (e) {
+      console.warn('[TauriNativeBridge] Ошибка index_project_directory_native:', e);
+      return null;
+    }
+  }
+
+  /**
    * Сканирование содержимого папки на диске через Tauri FS API или invoke команду
    */
   public static async listProjectFiles(dirPath: string): Promise<NativeFileEntry[]> {
@@ -272,5 +288,149 @@ export class TauriNativeBridge {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Нативная загрузка VST/VST3/CLAP бинарного модуля (C++ VST3 SDK / Desktop DLL Loader)
+   */
+  public static async loadPluginNative(
+    trackId: number,
+    slotIdx: number,
+    pluginPath: string,
+    sampleRate: number = 48000,
+    blockSize: number = 512,
+    classUid?: string
+  ): Promise<{ success: boolean; instanceId: string; latencySamples: number; numParams: number }> {
+    if (!this.isTauriEnvironment()) {
+      return { success: false, instanceId: '', latencySamples: 0, numParams: 0 };
+    }
+
+    try {
+      return await invoke<{ success: boolean; instanceId: string; latencySamples: number; numParams: number }>(
+        'load_vst_plugin_native',
+        {
+          trackId: Number(trackId),
+          slotIdx: Number(slotIdx),
+          pluginPath,
+          sampleRate: Number(sampleRate),
+          blockSize: Number(blockSize),
+          classUid: classUid || ''
+        }
+      );
+    } catch (e) {
+      console.warn('[TauriNativeBridge] Ошибка loadPluginNative:', e);
+      return { success: false, instanceId: '', latencySamples: 0, numParams: 0 };
+    }
+  }
+
+  /**
+   * Отправка нормализованного значения параметра (0.0 .. 1.0) по paramId в активный нативный C++ инстанс
+   */
+  public static async setPluginParameterNative(
+    instanceId: string,
+    paramId: number,
+    value: number
+  ): Promise<boolean> {
+    if (!this.isTauriEnvironment()) {
+      return false;
+    }
+
+    try {
+      await invoke('set_vst_parameter_native', {
+        instanceId,
+        paramId: Number(paramId),
+        value: Number(value)
+      });
+      return true;
+    } catch (e) {
+      console.warn('[TauriNativeBridge] Ошибка setPluginParameterNative:', e);
+      return false;
+    }
+  }
+
+  /**
+   * Выгрузка бинарного состояния плагина в Base64 (IComponent::getState() -> Base64)
+   */
+  public static async savePluginChunkNative(instanceId: string): Promise<string> {
+    if (!this.isTauriEnvironment()) {
+      return '';
+    }
+
+    try {
+      return await invoke<string>('save_vst_chunk_native', { instanceId });
+    } catch (e) {
+      console.warn('[TauriNativeBridge] Ошибка savePluginChunkNative:', e);
+      return '';
+    }
+  }
+
+  /**
+   * Восстановление бинарного состояния плагина из Base64 (Base64 -> IComponent::setState())
+   */
+  public static async restorePluginChunkNative(instanceId: string, chunkBase64: string): Promise<boolean> {
+    if (!this.isTauriEnvironment()) {
+      return false;
+    }
+
+    try {
+      await invoke('restore_vst_chunk_native', {
+        instanceId,
+        chunk: chunkBase64
+      });
+      return true;
+    } catch (e) {
+      console.warn('[TauriNativeBridge] Ошибка restorePluginChunkNative:', e);
+      return false;
+    }
+  }
+
+  /**
+   * Нативный системный диалог выбора файла плагина (.vst3 / .dll / .clap) через Tauri dialog plugin
+   */
+  public static async pickPluginFileNative(): Promise<string | null> {
+    if (this.isTauriEnvironment()) {
+      try {
+        const { open: openDialog } = await import('@tauri-apps/plugin-dialog');
+        const selected = await openDialog({
+          multiple: false,
+          directory: false,
+          title: 'Выберите VST3 / VST2 / CLAP плагин на диске',
+          filters: [
+            {
+              name: 'Audio Plugins (*.vst3, *.dll, *.clap)',
+              extensions: ['vst3', 'dll', 'clap', 'dylib', 'so', 'wasm']
+            }
+          ]
+        });
+        if (typeof selected === 'string') {
+          return selected;
+        }
+      } catch (e) {
+        console.warn('[TauriNativeBridge] Ошибка диалога pickPluginFileNative:', e);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Нативный системный диалог выбора папки для сканирования плагинов
+   */
+  public static async pickDirectoryNative(): Promise<string | null> {
+    if (this.isTauriEnvironment()) {
+      try {
+        const { open: openDialog } = await import('@tauri-apps/plugin-dialog');
+        const selected = await openDialog({
+          multiple: false,
+          directory: true,
+          title: 'Выберите директорию с VST/CLAP плагинами для сканирования'
+        });
+        if (typeof selected === 'string') {
+          return selected;
+        }
+      } catch (e) {
+        console.warn('[TauriNativeBridge] Ошибка диалога pickDirectoryNative:', e);
+      }
+    }
+    return null;
   }
 }

@@ -34,6 +34,7 @@ import {
   VSTPluginFormat
 } from '../audio/vstTypes';
 import { globalVSTHostEngine } from '../services/VSTHostEngine';
+import { TauriNativeBridge } from '../services/TauriNativeBridge';
 import { systemLogger } from '../services/SystemLogger';
 import { toSafeArray } from '../utils/safeIterables';
 
@@ -114,38 +115,41 @@ export const VSTPluginManager: React.FC = () => {
     setCatalog(toSafeArray<VSTPluginDefinition>(globalVSTHostEngine.getAllPlugins()));
   };
 
-  // Ручная загрузка бинарного VST3/CLAP/WASM файла плагина
-  const handleManualPluginUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      const ext = file.name.split('.').pop()?.toLowerCase() || '';
-      const format: VSTPluginFormat = ext === 'clap' ? 'CLAP' : ext === 'wasm' ? 'Native/WASM' : 'VST3';
-      const newDef: VSTPluginDefinition = {
-        id: `custom_${file.name.replace(/[^a-zA-Z0-9_-]/g, '_')}_${Date.now()}`,
-        name: file.name.replace(/\.[^/.]+$/, ''),
-        vendor: 'Custom Upload',
-        category: 'Utility',
-        format,
-        version: '1.0.0',
-        path: `/CustomPlugins/${file.name}`,
-        is64Bit: true,
-        latencySamples: 0,
-        color: '#8b5cf6',
-        description: `Пользовательский бинарный плагин (${format})`,
-        parameters: [
-          { id: 'param_gain', name: 'Gain', defaultValue: 0, min: -24, max: 12, unit: 'dB', step: 0.5 },
-          { id: 'param_mix', name: 'Mix', defaultValue: 100, min: 0, max: 100, unit: '%', step: 1 }
-        ],
-        presets: []
-      };
-      globalVSTHostEngine.registerCustomPlugin(newDef);
-      setCatalog(toSafeArray<VSTPluginDefinition>(globalVSTHostEngine.getAllPlugins()));
-      showNotice(`Плагин "${file.name}" успешно импортирован в библиотеку!`);
-    } catch (err: any) {
-      alert(`Ошибка загрузки плагина: ${err.message}`);
+  // Загрузка плагина через нативный диалог или файловый инпут
+  const handleSelectPluginFile = async () => {
+    if (TauriNativeBridge.isTauriEnvironment()) {
+      const selectedPath = await TauriNativeBridge.pickPluginFileNative();
+      if (selectedPath) {
+        const def = globalVSTHostEngine.importPluginFromPath(selectedPath);
+        setCatalog(toSafeArray<VSTPluginDefinition>(globalVSTHostEngine.getAllPlugins()));
+        showNotice(`Плагин "${def.name}" (${def.format}) успешно добавлен из "${selectedPath}"!`);
+      }
+      return;
     }
-    e.target.value = '';
+
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.vst3,.dll,.clap,.wasm,.dylib,.so';
+    input.onchange = (e: any) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const def = globalVSTHostEngine.importPluginFromPath(`/NativePlugins/${file.name}`);
+      setCatalog(toSafeArray<VSTPluginDefinition>(globalVSTHostEngine.getAllPlugins()));
+      showNotice(`Плагин "${file.name}" зарегистрирован в реестре!`);
+    };
+    input.click();
+  };
+
+  // Выбор папки для сканирования через нативный проводник
+  const handleBrowseFolder = async () => {
+    if (TauriNativeBridge.isTauriEnvironment()) {
+      const selectedDir = await TauriNativeBridge.pickDirectoryNative();
+      if (selectedDir) {
+        globalVSTHostEngine.addScanDirectory(selectedDir);
+        setScanDirs(toSafeArray<VSTScanDirectory>(globalVSTHostEngine.getScanDirectories()));
+        showNotice(`Добавлена папка для сканирования: "${selectedDir}"`);
+      }
+    }
   };
 
   const safeCatalogList = toSafeArray<VSTPluginDefinition>(catalog);
@@ -189,17 +193,15 @@ export const VSTPluginManager: React.FC = () => {
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
-            {/* Ручная загрузка плагина */}
-            <label className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-slate-200 rounded-xl text-xs font-semibold flex items-center gap-2 cursor-pointer transition-all shadow-sm">
+            {/* Нативный диалог выбора файла плагина */}
+            <button
+              onClick={handleSelectPluginFile}
+              className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 border border-slate-700/80 hover:border-cyan-500/60 text-slate-200 rounded-xl text-xs font-semibold flex items-center gap-2 cursor-pointer transition-all shadow-sm"
+              title="Открыть системный диалог выбора файла плагина (.vst3, .dll, .clap)"
+            >
               <Upload size={14} className="text-cyan-400" />
-              <span>Загрузить .vst3 / .clap</span>
-              <input
-                type="file"
-                accept=".vst3,.clap,.wasm,.dll,.dylib"
-                onChange={handleManualPluginUpload}
-                className="hidden"
-              />
-            </label>
+              <span>Выбрать файл .vst3 / .dll</span>
+            </button>
 
             {/* Кнопка глубокого сканирования */}
             <button
@@ -295,11 +297,20 @@ export const VSTPluginManager: React.FC = () => {
               />
             </div>
             <button
+              type="button"
+              onClick={handleBrowseFolder}
+              className="px-3 py-2 bg-slate-900 hover:bg-slate-800 border border-slate-700 hover:border-cyan-500/50 text-cyan-300 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-sm"
+              title="Выбрать папку через проводник"
+            >
+              <FolderOpen size={13} />
+              <span>Обзор...</span>
+            </button>
+            <button
               type="submit"
               className="px-4 py-2 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-sm"
             >
               <Plus size={13} className="text-emerald-400" />
-              <span>Добавить папку</span>
+              <span>Добавить</span>
             </button>
           </form>
 

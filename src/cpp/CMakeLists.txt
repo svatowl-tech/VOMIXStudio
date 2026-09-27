@@ -60,15 +60,38 @@ set(EDITING_HEADERS
     editing/SilenceStripper.hpp
 )
 
-# 5. Speech Analysis, Levenshtein, VAD, Smart Aligner & Stem Separation
+# 5. Speech Analysis, Levenshtein, VAD, Waveform Peaks, Subtitle Parsing & Stem Separation
 set(ANALYSIS_SOURCES
     analysis/SpeechAligner.cpp
+    analysis/SubtitleAligner.cpp
     analysis/StemSeparator.cpp
+    analysis/WaveformAnalyzer.cpp
 )
 
 set(ANALYSIS_HEADERS
     analysis/SpeechAligner.hpp
+    analysis/SubtitleAligner.hpp
     analysis/StemSeparator.hpp
+    analysis/WaveformAnalyzer.hpp
+)
+
+# 6. VST3/VST2/CLAP Scanner & Host Integration
+set(VST_SOURCES
+    vst/VSTScanner.cpp
+)
+
+set(VST_HEADERS
+    vst/VSTScanner.hpp
+    vst/NativeDSPPlugins.hpp
+)
+
+# 7. Project Indexer & Manifest Validation
+set(PROJECT_SOURCES
+    project/ProjectIndexer.cpp
+)
+
+set(PROJECT_HEADERS
+    project/ProjectIndexer.hpp
 )
 
 set(ALL_SOURCES
@@ -77,6 +100,8 @@ set(ALL_SOURCES
     ${ENGINE_SOURCES}
     ${EDITING_SOURCES}
     ${ANALYSIS_SOURCES}
+    ${VST_SOURCES}
+    ${PROJECT_SOURCES}
 )
 
 set(ALL_HEADERS
@@ -85,6 +110,8 @@ set(ALL_HEADERS
     ${ENGINE_HEADERS}
     ${EDITING_HEADERS}
     ${ANALYSIS_HEADERS}
+    ${VST_HEADERS}
+    ${PROJECT_HEADERS}
 )
 
 # Поддержка нативной статической библиотеки (для юнит-тестов и нативного хоста)

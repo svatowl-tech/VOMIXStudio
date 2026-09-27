@@ -23,6 +23,7 @@
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.0.0",
     "@tauri-apps/api": "~2.11.0",
+    "@tauri-apps/plugin-dialog": "^2.8.0",
     "@tauri-apps/plugin-fs": "^2.5.2",
     "@vitejs/plugin-react": "^4.3.4",
     "dotenv": "^17.2.3",

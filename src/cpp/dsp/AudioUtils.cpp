@@ -147,21 +147,22 @@ size_t NativeWavPacker::packWav(
         return 0;
     }
 
-    uint16_t bytesPerSample = static_cast<uint16_t>(bitDepth / 8);
-    uint32_t dataBytes = static_cast<uint32_t>(numFrames * numChannels * bytesPerSample);
-    uint32_t totalFileSize = 44 + dataBytes;
+    size_t channels = static_cast<size_t>(numChannels);
+    size_t bytesPerSample = static_cast<size_t>(bitDepth / 8);
+    size_t dataBytes = numFrames * channels * bytesPerSample;
+    size_t requiredBytes = 44 + dataBytes;
 
-    if (totalFileSize > maxOutputBytes) {
-        return 0; // Недостаточный размер выходного буфера
+    if (maxOutputBytes < requiredBytes) {
+        return 0; // Недостаточный размер выходного буфера во избежание выхода за границы
     }
 
     uint16_t audioFormat = (bitDepth == 32) ? 3 : 1; // 3 = IEEE Float, 1 = PCM Integer
-    uint32_t byteRate = sampleRate * numChannels * bytesPerSample;
-    uint16_t blockAlign = numChannels * bytesPerSample;
+    uint32_t byteRate = static_cast<uint32_t>(sampleRate * channels * bytesPerSample);
+    uint16_t blockAlign = static_cast<uint16_t>(channels * bytesPerSample);
 
     // RIFF Chunk Descriptor
     std::memcpy(outWavBuffer, "RIFF", 4);
-    uint32_t chunkSize = 36 + dataBytes;
+    uint32_t chunkSize = static_cast<uint32_t>(dataBytes > 0xFFFFFFE0 ? 0xFFFFFFFF : 36 + dataBytes);
     std::memcpy(outWavBuffer + 4, &chunkSize, 4);
     std::memcpy(outWavBuffer + 8, "WAVE", 4);
 
@@ -181,10 +182,11 @@ size_t NativeWavPacker::packWav(
 
     // "data" Sub-chunk
     std::memcpy(outWavBuffer + 36, "data", 4);
-    std::memcpy(outWavBuffer + 40, &dataBytes, 4);
+    uint32_t dataBytes32 = static_cast<uint32_t>(dataBytes > 0xFFFFFFFF ? 0xFFFFFFFF : dataBytes);
+    std::memcpy(outWavBuffer + 40, &dataBytes32, 4);
 
     uint8_t* dataPtr = outWavBuffer + 44;
-    size_t totalSamples = numFrames * numChannels;
+    size_t totalSamples = numFrames * channels;
 
     if (bitDepth == 16) {
         int16_t* pcm16 = reinterpret_cast<int16_t*>(dataPtr);
@@ -205,7 +207,7 @@ size_t NativeWavPacker::packWav(
         std::memcpy(dataPtr, interleavedBuffer, dataBytes);
     }
 
-    return totalFileSize;
+    return requiredBytes;
 }
 
 } // namespace DAWCore

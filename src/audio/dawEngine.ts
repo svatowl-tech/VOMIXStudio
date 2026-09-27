@@ -556,6 +556,20 @@ export class LiveDAWEngine {
       return 0;
     }
 
+    // OOM Guard: длинные файлы (> 10 сек / 480 000 сэмплов) НЕ аллоцируются статически в куче WASM.
+    // Аудиоданные воспроизводятся через потоковый StreamingRingBuffer без переполнения 32-битной кучи.
+    const MAX_STATIC_WASM_BUFFER_SAMPLES = 480000; // 10 секунд @ 48 кГц
+    if (clip.buffer.length > MAX_STATIC_WASM_BUFFER_SAMPLES) {
+      if (existingPtr) {
+        try {
+          globalNativeDAWBridge.freeFloats(existingPtr);
+        } catch (_) {}
+        this.activeWasmPointers.delete(clip.id);
+      }
+      clip.wasmBufferPtr = 0;
+      return 0;
+    }
+
     // Если указатель уже существует и активен для этого клипа, повторно НЕ дублируем выделение памяти!
     if (existingPtr && clip.wasmBufferPtr === existingPtr) {
       return existingPtr;

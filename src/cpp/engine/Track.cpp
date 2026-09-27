@@ -30,6 +30,7 @@ Track::Track(uint32_t trackId, std::string trackName, float sr)
     std::memset(vstChanR, 0, sizeof(vstChanR));
     std::memset(vstOutL, 0, sizeof(vstOutL));
     std::memset(vstOutR, 0, sizeof(vstOutR));
+    streamingRingBuffer.reset();
     vocalRack.setup(sr);
 }
 
@@ -109,57 +110,61 @@ void Track::renderClipsToBuffer(size_t timelinePosition, size_t numFrames) noexc
     size_t safeFrames = std::min(numFrames, MAX_BUFFER_SIZE);
     std::memset(trackBuffer, 0, safeFrames * 2 * sizeof(float));
 
-    if (clips.empty()) return;
+    // 1. Отрисовка статических клипов из кучи (для коротких клипов <= 10 сек)
+    if (!clips.empty()) {
+        size_t windowStart = timelinePosition;
+        size_t windowEnd = timelinePosition + safeFrames;
 
-    size_t windowStart = timelinePosition;
-    size_t windowEnd = timelinePosition + safeFrames;
+        for (const auto& clip : clips) {
+            if (!clip.active || !clip.sampleBuffer || clip.lengthSamples == 0) continue;
 
-    for (const auto& clip : clips) {
-        if (!clip.active || !clip.sampleBuffer || clip.lengthSamples == 0) continue;
+            size_t clipStart = clip.offsetSamples;
+            size_t clipEnd = clipStart + clip.lengthSamples;
 
-        size_t clipStart = clip.offsetSamples;
-        size_t clipEnd = clipStart + clip.lengthSamples;
+            // Проверка пересечения временного окна блока с клипом
+            if (clipEnd <= windowStart || clipStart >= windowEnd) continue;
 
-        // Проверка пересечения временного окна блока с клипом
-        if (clipEnd <= windowStart || clipStart >= windowEnd) continue;
+            size_t overlapStart = std::max(windowStart, clipStart);
+            size_t overlapEnd = std::min(windowEnd, clipEnd);
+            size_t overlapFrames = overlapEnd - overlapStart;
 
-        size_t overlapStart = std::max(windowStart, clipStart);
-        size_t overlapEnd = std::min(windowEnd, clipEnd);
-        size_t overlapFrames = overlapEnd - overlapStart;
+            size_t destOffset = overlapStart - windowStart;
+            size_t clipLocalSampleStart = overlapStart - clipStart;
 
-        size_t destOffset = overlapStart - windowStart;
-        size_t clipLocalSampleStart = overlapStart - clipStart;
+            float clipPanL = 1.0f, clipPanR = 1.0f;
+            calculateConstantPowerPan(clip.pan, clipPanL, clipPanR);
 
-        float clipPanL = 1.0f, clipPanR = 1.0f;
-        calculateConstantPowerPan(clip.pan, clipPanL, clipPanR);
+            for (size_t f = 0; f < overlapFrames; ++f) {
+                size_t clipSampleIdx = clipLocalSampleStart + f;
+                if (clip.bufferSizeSamples > 0) {
+                    size_t maxFrames = clip.isStereo ? (clip.bufferSizeSamples / 2) : clip.bufferSizeSamples;
+                    if (clipSampleIdx >= maxFrames) break;
+                } else if (clipSampleIdx >= clip.lengthSamples) {
+                    break;
+                }
 
-        for (size_t f = 0; f < overlapFrames; ++f) {
-            size_t clipSampleIdx = clipLocalSampleStart + f;
-            if (clip.bufferSizeSamples > 0) {
-                size_t maxFrames = clip.isStereo ? (clip.bufferSizeSamples / 2) : clip.bufferSizeSamples;
-                if (clipSampleIdx >= maxFrames) break;
-            } else if (clipSampleIdx >= clip.lengthSamples) {
-                break;
+                float fade = clip.getFadeGain(clipSampleIdx);
+                float totalGainL = clip.gain * fade * clipPanL;
+                float totalGainR = clip.gain * fade * clipPanR;
+
+                float smpL = 0.0f;
+                float smpR = 0.0f;
+
+                if (clip.isStereo) {
+                    smpL = clip.sampleBuffer[clipSampleIdx * 2];
+                    smpR = clip.sampleBuffer[clipSampleIdx * 2 + 1];
+                } else {
+                    smpL = smpR = clip.sampleBuffer[clipSampleIdx];
+                }
+
+                trackBuffer[(destOffset + f) * 2]     += smpL * totalGainL;
+                trackBuffer[(destOffset + f) * 2 + 1] += smpR * totalGainR;
             }
-
-            float fade = clip.getFadeGain(clipSampleIdx);
-            float totalGainL = clip.gain * fade * clipPanL;
-            float totalGainR = clip.gain * fade * clipPanR;
-
-            float smpL = 0.0f;
-            float smpR = 0.0f;
-
-            if (clip.isStereo) {
-                smpL = clip.sampleBuffer[clipSampleIdx * 2];
-                smpR = clip.sampleBuffer[clipSampleIdx * 2 + 1];
-            } else {
-                smpL = smpR = clip.sampleBuffer[clipSampleIdx];
-            }
-
-            trackBuffer[(destOffset + f) * 2]     += smpL * totalGainL;
-            trackBuffer[(destOffset + f) * 2 + 1] += smpR * totalGainR;
         }
     }
+
+    // 2. Считывание потоковых сэмплов из StreamingRingBuffer (для непрерывного воспроизведения 24+ мин сессий)
+    streamingRingBuffer.read(trackBuffer, safeFrames, static_cast<int64_t>(timelinePosition));
 }
 
 void Track::processVocalRack(const float* sidechainMono, size_t numFrames) noexcept {
