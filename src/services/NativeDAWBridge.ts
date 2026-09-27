@@ -305,7 +305,7 @@ export class NativeDAWBridge {
   public static readonly TARGET_SAMPLE_RATE = 48000;
   public static readonly MIN_DB_FLOOR = -120.0;
   public static readonly SILENCE_THRESHOLD_DB = -80.0;
-  public static readonly MAX_SAFE_ALLOCATION_FLOATS = 480000; // 10 секунд стерео при 48 кГц (240 000 кадров = 480 000 сэмплов / ~1.92 МБ)
+  public static readonly MAX_SAFE_ALLOCATION_FLOATS = 16000000; // До 16 000 000 сэмплов (~64 МБ) за одну аллокацию для защиты от OOM и падения abort()
 
   public get isReady(): boolean {
     return this.isModuleReady;
@@ -794,10 +794,10 @@ export class NativeDAWBridge {
   public allocateFloats(count: number): number {
     if (count <= 0) return 0;
 
-    // Защита от OOM: запрет единовременного выделения более 480 000 сэмплов (~1.92 МБ)
+    // Защита от OOM: запрет единовременного выделения более 16 000 000 сэмплов (~64 МБ)
     if (count > NativeDAWBridge.MAX_SAFE_ALLOCATION_FLOATS) {
       console.warn(
-        `[NativeDAWBridge OOM Guard] Попытка аллокации ${count} сэмплов (> 10 сек / ${(count * 4 / (1024 * 1024)).toFixed(1)} МБ) отклонена. ` +
+        `[NativeDAWBridge OOM Guard] Попытка аллокации ${count} сэмплов (> ${(count * 4 / (1024 * 1024)).toFixed(1)} МБ) отклонена во избежание OOM. ` +
         `Максимально допустимый безопасный размер: ${NativeDAWBridge.MAX_SAFE_ALLOCATION_FLOATS} сэмплов.`
       );
       return 0;
@@ -926,10 +926,10 @@ export class NativeDAWBridge {
   public writeFloat32Direct(data: Float32Array): number {
     if (!data || data.length === 0) return 0;
     
-    // Защита от OOM: запрет прямой записи буферов длиннее 480 000 сэмплов (> 10 сек)
+    // Защита от OOM: запрет прямой записи буферов длиннее 16 000 000 сэмплов (> 64 МБ)
     if (data.length > NativeDAWBridge.MAX_SAFE_ALLOCATION_FLOATS) {
       console.warn(
-        `[NativeDAWBridge OOM Guard] Попытка записи ${data.length} сэмплов (> 10 сек) в кучу WASM отклонена во избежание OOM. Буфер остается в памяти JS/AudioContext.`
+        `[NativeDAWBridge OOM Guard] Попытка записи ${data.length} сэмплов (> ${(data.length * 4 / (1024 * 1024)).toFixed(1)} МБ) в кучу WASM отклонена во избежание OOM. Буфер остается в памяти JS/AudioContext.`
       );
       return 0;
     }

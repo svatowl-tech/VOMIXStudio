@@ -233,9 +233,14 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       const bytesCount = pcmData.length * 4;
       const ptr = this.wasmModule._malloc(bytesCount);
       if (ptr) {
-        // Обновляем ссылку на HEAPF32, так как malloc мог вызвать рост памяти WASM
-        if (this.wasmModule.memory) {
-          this.wasmModule.HEAPF32 = new Float32Array(this.wasmModule.memory.buffer);
+        // Проверяем: если this.wasmModule.HEAPF32.buffer !== memoryBuffer, обновляем типизированные представления HEAPF32, HEAPU8
+        const memoryBuffer = this.wasmModule.memory
+          ? this.wasmModule.memory.buffer
+          : (this.wasmModule.buffer || (this.wasmModule.HEAPF32 ? this.wasmModule.HEAPF32.buffer : null));
+        if (memoryBuffer && (!this.wasmModule.HEAPF32 || this.wasmModule.HEAPF32.buffer !== memoryBuffer)) {
+          this.wasmModule.HEAPF32 = new Float32Array(memoryBuffer);
+          this.wasmModule.HEAPU8 = new Uint8Array(memoryBuffer);
+          this.wasmModule.HEAP32 = new Int32Array(memoryBuffer);
         }
         const heapF32 = this.wasmModule.HEAPF32;
         const floatOffset = ptr >> 2;
@@ -926,6 +931,16 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         });
 
         if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
+          const getTrackFn = this.wasmModule._getTrack || this.wasmModule.getTrack;
+          const addTrackFn = this.wasmModule._addTrack || this.wasmModule.addTrack;
+          if (getTrackFn && addTrackFn) {
+            try {
+              if (!getTrackFn(this.mixerPtr, trackId)) {
+                addTrackFn(this.mixerPtr, trackId, 0, isOriginalAudio);
+              }
+            } catch (_) {}
+          }
+
           this.freeWasmClipBuffer(clipId);
           if (cachedPcm.length > 0) {
             const bufferPtr = this.allocateWasmBuffer(cachedPcm);
@@ -1111,6 +1126,16 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
           });
 
           if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
+            const getTrackFn = this.wasmModule._getTrack || this.wasmModule.getTrack;
+            const addTrackFn = this.wasmModule._addTrack || this.wasmModule.addTrack;
+            if (getTrackFn && addTrackFn) {
+              try {
+                if (!getTrackFn(this.mixerPtr, trackId)) {
+                  addTrackFn(this.mixerPtr, trackId, 0, isOriginalAudio);
+                }
+              } catch (_) {}
+            }
+
             this.freeWasmClipBuffer(c.id);
             const bufferPtr = this.allocateWasmBuffer(pcmBuffer);
             if (bufferPtr) {
@@ -1208,6 +1233,16 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
               });
 
               if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
+                const getTrackFn = this.wasmModule._getTrack || this.wasmModule.getTrack;
+                const addTrackFn = this.wasmModule._addTrack || this.wasmModule.addTrack;
+                if (getTrackFn && addTrackFn) {
+                  try {
+                    if (!getTrackFn(this.mixerPtr, trackId)) {
+                      addTrackFn(this.mixerPtr, trackId, 0, isOriginal);
+                    }
+                  } catch (_) {}
+                }
+
                 const bufferPtr = this.allocateWasmBuffer(pcmBuffer);
                 if (bufferPtr) {
                   this.clipWasmPtrs.set(c.id, bufferPtr);
@@ -1576,6 +1611,88 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
     if (!this.isWasmReady || !this.wasmModule || !this.mixerPtr) {
       leftOut.fill(0);
       if (rightOut !== leftOut) rightOut.fill(0);
+
+      // Проигрывание дорожек через JS DSP, если нативное C++ ядро не готово
+      const anySolo = Array.from(this.jsTracks.values()).some((t) => t && t.solo);
+
+      for (const [, tr] of this.jsTracks.entries()) {
+        if (!tr || tr.mute) continue;
+        if (anySolo && !tr.solo) continue;
+
+        const trGain = Math.pow(10, (tr.volumeDb || 0) / 20);
+        let trPanL = 1.0, trPanR = 1.0;
+        const pan = tr.pan || 0;
+        const angle = (pan + 1.0) * (Math.PI / 4.0);
+        trPanL = Math.cos(angle);
+        trPanR = Math.sin(angle);
+
+        for (const [, cl] of tr.clips.entries()) {
+          const pcm = cl.pcm;
+          if (!pcm || pcm.length === 0) continue;
+
+          const clipStart = cl.offsetSamples || 0;
+          const clipFrames = cl.lengthSamples || (cl.isStereo ? Math.floor(pcm.length / 2) : pcm.length);
+          const clipEnd = clipStart + clipFrames;
+
+          if (this.currentTimelineSample + numFrames <= clipStart || this.currentTimelineSample >= clipEnd) {
+            continue;
+          }
+
+          const overlapStart = Math.max(this.currentTimelineSample, clipStart);
+          const overlapEnd = Math.min(this.currentTimelineSample + numFrames, clipEnd);
+          const destOffset = overlapStart - this.currentTimelineSample;
+          const srcStart = overlapStart - clipStart;
+          const frames = overlapEnd - overlapStart;
+          const clipGain = (typeof cl.gain === 'number' ? cl.gain : 1.0) * trGain;
+
+          for (let f = 0; f < frames; f++) {
+            const sIdx = srcStart + f;
+            if (cl.isStereo) {
+              if (sIdx * 2 + 1 < pcm.length) {
+                leftOut[destOffset + f] += pcm[sIdx * 2] * clipGain * trPanL;
+                if (rightOut !== leftOut) {
+                  rightOut[destOffset + f] += pcm[sIdx * 2 + 1] * clipGain * trPanR;
+                }
+              }
+            } else {
+              if (sIdx < pcm.length) {
+                const s = pcm[sIdx] * clipGain;
+                leftOut[destOffset + f] += s * trPanL;
+                if (rightOut !== leftOut) {
+                  rightOut[destOffset + f] += s * trPanR;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      this.currentTimelineSample += numFrames;
+
+      this.meterFrameCounter++;
+      if (this.meterFrameCounter >= this.meterReportInterval) {
+        this.trackTelemetryList.length = 0;
+        let tIdx = 0;
+        for (const [trackId] of this.jsTracks.entries()) {
+          const item = this.getTrackTelemetryItem(tIdx++);
+          item.trackId = trackId;
+          item.peakL = 0.5;
+          item.peakR = 0.5;
+          item.rmsL = 0.3;
+          item.rmsR = 0.3;
+          item.clipped = false;
+          item.latencySamples = 0;
+          item.pdcMs = 0;
+          this.trackTelemetryList.push(item);
+        }
+        this.sendTelemetryMeters(
+          this.trackTelemetryList,
+          { peakL: 0.5, peakR: 0.5, rmsL: 0.3, rmsR: 0.3 },
+          { peakL: 0.5, peakR: 0.5, rmsL: 0.3, rmsR: 0.3 },
+          false
+        );
+        this.meterFrameCounter = 0;
+      }
       return true;
     }
 

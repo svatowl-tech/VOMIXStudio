@@ -135,7 +135,12 @@ void Track::renderClipsToBuffer(size_t timelinePosition, size_t numFrames) noexc
 
         for (size_t f = 0; f < overlapFrames; ++f) {
             size_t clipSampleIdx = clipLocalSampleStart + f;
-            if (clipSampleIdx >= clip.bufferSizeSamples) break;
+            if (clip.bufferSizeSamples > 0) {
+                size_t maxFrames = clip.isStereo ? (clip.bufferSizeSamples / 2) : clip.bufferSizeSamples;
+                if (clipSampleIdx >= maxFrames) break;
+            } else if (clipSampleIdx >= clip.lengthSamples) {
+                break;
+            }
 
             float fade = clip.getFadeGain(clipSampleIdx);
             float totalGainL = clip.gain * fade * clipPanL;

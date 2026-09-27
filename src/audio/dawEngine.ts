@@ -425,6 +425,10 @@ export function populateTrackDSPDefaults(track: Partial<TrackState> & { id: numb
   return {
     ...d,
     ...track,
+    volumeDb: typeof track.volumeDb === 'number' ? track.volumeDb : 0.0,
+    mute: track.mute !== undefined ? Boolean(track.mute) : false,
+    solo: track.solo !== undefined ? Boolean(track.solo) : false,
+    pan: typeof track.pan === 'number' ? track.pan : 0.0,
     isOriginalAudio: isOriginal,
     eq: track.eq ? { ...baseEq, ...track.eq } : baseEq,
     compressor: track.compressor ? { ...baseComp, ...track.compressor } : baseComp,
@@ -530,21 +534,20 @@ export class LiveDAWEngine {
 
   // --- Управление памятью WebAssembly кучи (HEAPF32) ---
   /**
-   * Безопасная синхронизация буфера клипа с WASM:
-   * Не аллоцирует статические указатели в куче activeWasmPointers для файлов длиннее 10 сек (> 480 000 сэмплов).
-   * Сырой PCM буфер остается в памяти JS/AudioContext и передается потоково в AudioWorklet.
+   * Синхронизация буфера клипа с WASM:
+   * Связывает clip.id с C++ указателем через globalNativeDAWBridge.
+   * Без искусственных ограничений длины аудиофайлов.
    */
   public syncClipBufferToWasm(clip: ClipConfig): number {
     if (!clip || !clip.id) return 0;
 
     const existingPtr = this.activeWasmPointers.get(clip.id);
 
-    // Если размер буфера превышает 10 секунд (480 000 сэмплов / ~1.9 МБ),
-    // НЕ аллоцируем статический указатель в куче activeWasmPointers.
-    // Сырой PCM буфер должен оставаться в JS/AudioContext памяти во избежание OOM на 24-минутных сессиях.
-    if (!clip.buffer || clip.buffer.length === 0 || clip.buffer.length > 480000) {
+    if (!clip.buffer || clip.buffer.length === 0) {
       if (existingPtr) {
-        globalNativeDAWBridge.freeFloats(existingPtr);
+        try {
+          globalNativeDAWBridge.freeFloats(existingPtr);
+        } catch (_) {}
         this.activeWasmPointers.delete(clip.id);
       }
       clip.wasmBufferPtr = 0;
@@ -558,7 +561,9 @@ export class LiveDAWEngine {
 
     // Если для этого clipId выделялся старый указатель в WASM — освобождаем его перед повторной аллокацией
     if (existingPtr) {
-      globalNativeDAWBridge.freeFloats(existingPtr);
+      try {
+        globalNativeDAWBridge.freeFloats(existingPtr);
+      } catch (_) {}
       this.activeWasmPointers.delete(clip.id);
     }
 
@@ -571,6 +576,7 @@ export class LiveDAWEngine {
       return ptr;
     } catch (err) {
       console.warn(`[LiveDAWEngine] Ошибка аллокации памяти WASM для клипа #${clip.id}:`, err);
+      clip.wasmBufferPtr = 0;
       return 0;
     }
   }
@@ -578,7 +584,9 @@ export class LiveDAWEngine {
   public releaseClipWasmBuffer(clipId: number): void {
     const ptr = this.activeWasmPointers.get(clipId);
     if (ptr) {
-      globalNativeDAWBridge.freeFloats(ptr);
+      try {
+        globalNativeDAWBridge.freeFloats(ptr);
+      } catch (_) {}
       this.activeWasmPointers.delete(clipId);
     }
   }
@@ -618,17 +626,14 @@ export class LiveDAWEngine {
   }
 
   /**
-   * Синхронизация клипов конкретной дорожки:
-   * Передаются легковесные дескрипторы треков и метаданные (offsetSamples, lengthSamples, громкость, панорама).
-   * Принудительное копирование полных аудиофайлов в кучу WASM отключено во избежание OOM.
+   * Синхронизация клипов конкретной дорожки
    */
   public syncTrackClips(trackId: number, clips: ClipConfig[]): void {
     const track = this.tracks.find((t) => t.id === trackId);
     if (track) {
       track.clips = clips;
-      // В память C++ ядра передаются только короткие сэмплы (< 10 сек), длинные файлы остаются в JS памяти
       for (const clip of clips) {
-        if (clip && clip.buffer && clip.buffer.length <= 480000 && (!clip.wasmBufferPtr || !this.activeWasmPointers.has(clip.id))) {
+        if (clip && clip.buffer && (!clip.wasmBufferPtr || !this.activeWasmPointers.has(clip.id))) {
           this.syncClipBufferToWasm(clip);
         }
       }
@@ -638,15 +643,14 @@ export class LiveDAWEngine {
   }
 
   /**
-   * Синхронизация всех дорожек проекта:
-   * Делегирует метаданные треков и клипов без копирования тяжелых буферов в кучу WASM.
+   * Синхронизация всех дорожек проекта
    */
   public syncAllTracks(tracks: TrackState[]): void {
     this.tracks = tracks;
     for (const track of tracks) {
       if (track && Array.isArray(track.clips)) {
         for (const clip of track.clips) {
-          if (clip && clip.buffer && clip.buffer.length <= 480000 && (!clip.wasmBufferPtr || !this.activeWasmPointers.has(clip.id))) {
+          if (clip && clip.buffer && (!clip.wasmBufferPtr || !this.activeWasmPointers.has(clip.id))) {
             this.syncClipBufferToWasm(clip);
           }
         }

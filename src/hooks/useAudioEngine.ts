@@ -768,27 +768,33 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
         for (const c of safeClips) {
           if (!c) continue;
           const prevBuf = syncedClipBuffersRef.current.get(c.id);
-          if (c.buffer instanceof Float32Array && c.buffer.length > 0 && prevBuf !== c.buffer) {
+          const currentBuf = (c.buffer instanceof Float32Array && c.buffer.length > 0) ? c.buffer : prevBuf;
+          if (c.buffer instanceof Float32Array && c.buffer.length > 0) {
+            syncedClipBuffersRef.current.set(c.id, c.buffer);
+          }
+          if (currentBuf && prevBuf !== c.buffer) {
             // Перед отправкой новых pcmBuffer в WASM жестко проверяем мапу clipWasmPtrs
             // и вызываем принудительное освобождение _free для перезаписываемых ID клипов
             if (clipWasmPtrs.current.has(c.id)) {
               freeClipWasmPointer(c.id);
             }
-            syncedClipBuffersRef.current.set(c.id, c.buffer);
+            const isStereo = currentBuf.length >= (c.lengthSamples || 0) * 2;
+            const lengthSamples = c.lengthSamples || (isStereo ? Math.floor(currentBuf.length / 2) : currentBuf.length);
             workletNodeRef.current.port.postMessage({
               type: 'LOAD_TRACK_CLIP',
               trackId,
               clipId: c.id,
-              audioData: c.buffer,
+              audioData: currentBuf,
               offsetSamples: c.offsetSamples || 0,
+              lengthSamples,
               gain: typeof c.gain === 'number' ? c.gain : 1.0,
               pan: typeof c.pan === 'number' ? c.pan : 0.0,
-              isStereo: c.buffer.length >= (c.lengthSamples || 0) * 2
+              isStereo
             });
           }
         }
 
-        // Синхронизируем ТОЛЬКО легковесные метаданные без повторного клонирования сотен мегабайт аудио
+        // Синхронизируем метаданные дорожки и гарантируем передачу буферов
         workletNodeRef.current.port.postMessage({
           type: 'SET_TRACK_CLIPS',
           trackId,
@@ -801,9 +807,13 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             pan: typeof c.pan === 'number' ? c.pan : 0.0,
             fadeInSamples: c.fadeInSamples || 0,
             fadeOutSamples: c.fadeOutSamples || 0,
-            isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true
+            isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true,
+            buffer: c.buffer || syncedClipBuffersRef.current.get(c.id)
           }))
         });
+
+        // Синхронизируем состояние в LiveDAWEngine
+        globalLiveDAWEngine.syncTrackClips(trackId, safeClips);
 
         // Сборка мусора осиротевших указателей WASM после syncTrackClips
         garbageCollectWasm();
@@ -824,20 +834,23 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
           for (const c of toSafeArray<ClipConfig>(t.clips)) {
             if (!c) continue;
             const prevBuf = syncedClipBuffersRef.current.get(c.id);
-            if (c.buffer instanceof Float32Array && c.buffer.length > 0 && prevBuf !== c.buffer) {
+            const currentBuf = (c.buffer instanceof Float32Array && c.buffer.length > 0) ? c.buffer : prevBuf;
+            if (c.buffer instanceof Float32Array && c.buffer.length > 0) {
+              syncedClipBuffersRef.current.set(c.id, c.buffer);
+            }
+            if (currentBuf && prevBuf !== c.buffer) {
               // Перед отправкой новых pcmBuffer в WASM жестко проверяем мапу clipWasmPtrs
               // и вызываем принудительное освобождение _free для перезаписываемых ID клипов
               if (clipWasmPtrs.current.has(c.id)) {
                 freeClipWasmPointer(c.id);
               }
-              syncedClipBuffersRef.current.set(c.id, c.buffer);
-              const isStereo = c.buffer.length >= (c.lengthSamples || 0) * 2;
-              const lengthSamples = c.lengthSamples || (isStereo ? Math.floor(c.buffer.length / 2) : c.buffer.length);
+              const isStereo = currentBuf.length >= (c.lengthSamples || 0) * 2;
+              const lengthSamples = c.lengthSamples || (isStereo ? Math.floor(currentBuf.length / 2) : currentBuf.length);
               workletNodeRef.current.port.postMessage({
                 type: 'LOAD_TRACK_CLIP',
                 trackId: t.id,
                 clipId: c.id,
-                audioData: c.buffer,
+                audioData: currentBuf,
                 offsetSamples: c.offsetSamples || 0,
                 lengthSamples,
                 gain: typeof c.gain === 'number' ? c.gain : 1.0,
@@ -853,8 +866,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
           }
         }
 
-        // Передаем ТОЛЬКО чистые метаданные дорожек и параметров микшера.
-        // Буферы PCM хранятся в кэше AudioWorklet и никогда не передаются повторно в SET_ALL_TRACKS.
+        // Передаем полную структуру дорожек в AudioWorklet
         workletNodeRef.current.port.postMessage({
           type: 'SET_ALL_TRACKS',
           tracks: safeTracks.map((t) => ({
@@ -883,10 +895,14 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
               pan: typeof c.pan === 'number' ? c.pan : 0.0,
               fadeInSamples: c.fadeInSamples || 0,
               fadeOutSamples: c.fadeOutSamples || 0,
-              isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true
+              isStereo: c.buffer ? c.buffer.length >= c.lengthSamples * 2 : true,
+              buffer: c.buffer || syncedClipBuffersRef.current.get(c.id)
             }))
           }))
         });
+
+        // Синхронизируем состояние в LiveDAWEngine
+        globalLiveDAWEngine.syncAllTracks(safeTracks);
 
         // Сборка мусора осиротевших указателей WASM после syncAllTracks
         garbageCollectWasm(safeTracks);
