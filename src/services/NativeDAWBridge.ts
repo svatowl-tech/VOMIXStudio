@@ -305,6 +305,7 @@ export class NativeDAWBridge {
   public static readonly TARGET_SAMPLE_RATE = 48000;
   public static readonly MIN_DB_FLOOR = -120.0;
   public static readonly SILENCE_THRESHOLD_DB = -80.0;
+  public static readonly MAX_SAFE_ALLOCATION_FLOATS = 480000; // 10 секунд стерео при 48 кГц (240 000 кадров = 480 000 сэмплов / ~1.92 МБ)
 
   public get isReady(): boolean {
     return this.isModuleReady;
@@ -788,16 +789,32 @@ export class NativeDAWBridge {
 
   /**
    * Выделение памяти под Float32 сэмплы через C++ Module._malloc()
-   * С защитой от Null Pointer, принудительной сборкой мусора при OOM и ровно одной повторной попыткой.
+   * С защитой от переполнения кучи WASM32 (OOM Guard), Null Pointer и возвратом 0 при отказе.
    */
   public allocateFloats(count: number): number {
     if (count <= 0) return 0;
+
+    // Защита от OOM: запрет единовременного выделения более 480 000 сэмплов (~1.92 МБ)
+    if (count > NativeDAWBridge.MAX_SAFE_ALLOCATION_FLOATS) {
+      console.warn(
+        `[NativeDAWBridge OOM Guard] Попытка аллокации ${count} сэмплов (> 10 сек / ${(count * 4 / (1024 * 1024)).toFixed(1)} МБ) отклонена. ` +
+        `Максимально допустимый безопасный размер: ${NativeDAWBridge.MAX_SAFE_ALLOCATION_FLOATS} сэмплов.`
+      );
+      return 0;
+    }
+
     const bytesNeeded = count * 4;
     const mod = this.getModule();
 
-    let ptr = mod.allocateAudioBuffer
-      ? mod.allocateAudioBuffer(count)
-      : mod._malloc(bytesNeeded);
+    let ptr = 0;
+    try {
+      ptr = mod.allocateAudioBuffer
+        ? mod.allocateAudioBuffer(count)
+        : mod._malloc(bytesNeeded);
+    } catch (err) {
+      console.warn(`[NativeDAWBridge] Исключение при malloc(${bytesNeeded} B):`, err);
+      ptr = 0;
+    }
 
     // Если malloc вернул 0 (память исчерпана) — НЕ обращаться по нулевому адресу, а вызывать принудительную сборку мусора!
     if (!ptr || ptr === 0) {
@@ -810,16 +827,18 @@ export class NativeDAWBridge {
       }
 
       // Повторная попытка выделения памяти ровно один раз
-      ptr = mod.allocateAudioBuffer
-        ? mod.allocateAudioBuffer(count)
-        : mod._malloc(bytesNeeded);
+      try {
+        ptr = mod.allocateAudioBuffer
+          ? mod.allocateAudioBuffer(count)
+          : mod._malloc(bytesNeeded);
+      } catch (err) {
+        ptr = 0;
+      }
 
-      // Если память по-прежнему недоступна — выбрасываем контролируемую ошибку JavaScript без сброса инстанса WASM
+      // Если память по-прежнему недоступна — возвращаем 0 вместо падения с abort() или ошибки
       if (!ptr || ptr === 0) {
-        const memoryInfo = this.getMemoryUsageInfo();
-        throw new Error(
-          `[NativeDAWBridge OOM] Превышен лимит памяти WebAssembly (OOM). Не удалось выделить ${(bytesNeeded / (1024 * 1024)).toFixed(1)} МБ Float32 сэмплов (Текущий размер кучи: ${memoryInfo.heapSizeMb} МБ).`
-        );
+        console.warn(`[NativeDAWBridge OOM] Не удалось выделить ${(bytesNeeded / (1024 * 1024)).toFixed(1)} МБ Float32 сэмплов. Возвращен 0.`);
+        return 0;
       }
     }
 
@@ -902,15 +921,24 @@ export class NativeDAWBridge {
 
   /**
    * Прямая запись Float32Array PCM аудиоданных в C++ кучу (Module.HEAPF32.set)
-   * Для длинных файлов (> 15 минут) передает данные чанками без создания дубликатов массивов.
+   * С защитой от OOM: запрет записи > 480 000 сэмплов и безопасный возврат 0 при отказе выделения.
    */
   public writeFloat32Direct(data: Float32Array): number {
     if (!data || data.length === 0) return 0;
     
+    // Защита от OOM: запрет прямой записи буферов длиннее 480 000 сэмплов (> 10 сек)
+    if (data.length > NativeDAWBridge.MAX_SAFE_ALLOCATION_FLOATS) {
+      console.warn(
+        `[NativeDAWBridge OOM Guard] Попытка записи ${data.length} сэмплов (> 10 сек) в кучу WASM отклонена во избежание OOM. Буфер остается в памяти JS/AudioContext.`
+      );
+      return 0;
+    }
+
     // Безопасное выделение памяти в WASM с проверкой OOM
     const ptr = this.allocateFloats(data.length);
     if (!ptr || ptr === 0) {
-      throw new Error('[NativeDAWBridge] Ошибка выделения памяти в куче WASM для записи Float32Array.');
+      console.warn('[NativeDAWBridge] malloc вернул 0 (или превышен лимит). Запись Float32Array отменена, возвращен 0.');
+      return 0;
     }
 
     const mod = this.getModule();
@@ -926,23 +954,11 @@ export class NativeDAWBridge {
 
     if (!heapF32) {
       this.freeFloats(ptr);
-      throw new Error('[NativeDAWBridge] HEAPF32 не найден при записи Float32.');
+      console.warn('[NativeDAWBridge] HEAPF32 не найден при записи Float32.');
+      return 0;
     }
 
-    // Для длинных файлов (> 15 минут / > 43.2M сэмплов) отдаем обработку потоково чанками по 1M сэмплов (~4МБ)
-    const CHUNK_SIZE = 1048576; // 1,048,576 сэмплов (~4 МБ)
-    if (data.length > CHUNK_SIZE) {
-      const totalSamples = data.length;
-      let written = 0;
-      while (written < totalSamples) {
-        const chunkSize = Math.min(CHUNK_SIZE, totalSamples - written);
-        const chunk = data.subarray(written, written + chunkSize);
-        heapF32.set(chunk, floatOffset + written);
-        written += chunkSize;
-      }
-    } else {
-      heapF32.set(data, floatOffset);
-    }
+    heapF32.set(data, floatOffset);
 
     return ptr;
   }
@@ -1026,6 +1042,19 @@ export class NativeDAWBridge {
     }
     const numFrames = Math.floor(samples.length / channels);
     const ptr = this.writeFloat32Direct(samples);
+    if (!ptr || ptr === 0) {
+      // Безопасный расчет метрик громкости через JS SpeechGatedLoudness без аллокации в WASM
+      const res = NativeDAWBridge.calculateSpeechGatedLoudness(samples, 48000, targetRmsDb, maxPeakDb);
+      return {
+        peakLinear: res.peakLinear,
+        peakDb: res.peakDb,
+        rmsLinear: res.speechRmsLinear,
+        rmsDb: res.speechRmsDb,
+        gainDeltaToTargetDb: res.gainDeltaToTargetDb,
+        isClipping: res.peakDb >= maxPeakDb,
+        numSamples: samples.length
+      };
+    }
     try {
       return mod.calculateLoudnessStats(ptr, numFrames, channels, targetRmsDb, maxPeakDb);
     } finally {
@@ -1789,8 +1818,55 @@ export class NativeDAWBridge {
     const outChannels = 2;
     const outFloats = outFrames * outChannels;
 
+    // Для буферов длиннее 240 000 сэмплов выполняем потоковый чанковый ресэмплинг,
+    // чтобы каждый вызов гарантированно укладывался в лимит MAX_SAFE_ALLOCATION_FLOATS
+    const maxChunkFloats = 240000;
+    if (inputPcm.length > maxChunkFloats) {
+      const totalOutFrames = Math.ceil(inFrames * ratio);
+      const result = new Float32Array(totalOutFrames * outChannels);
+
+      const chunkInFrames = Math.floor(maxChunkFloats / channels);
+      let inFrameOffset = 0;
+      let outFrameOffset = 0;
+
+      while (inFrameOffset < inFrames) {
+        const currentInFrames = Math.min(chunkInFrames, inFrames - inFrameOffset);
+        const chunkIn = inputPcm.subarray(inFrameOffset * channels, (inFrameOffset + currentInFrames) * channels);
+        const chunkOut = this.resampleBufferTo48k(chunkIn, inSampleRate, channels);
+        result.set(chunkOut, outFrameOffset * outChannels);
+        inFrameOffset += currentInFrames;
+        outFrameOffset += Math.floor(chunkOut.length / outChannels);
+      }
+
+      return result.subarray(0, outFrameOffset * outChannels);
+    }
+
     const inPtr = this.writeFloat32Direct(inputPcm);
-    const outPtr = this.allocateFloats(outFloats);
+    const outPtr = inPtr > 0 ? this.allocateFloats(outFloats) : 0;
+
+    if (!inPtr || !outPtr) {
+      if (inPtr) this.freeFloats(inPtr);
+      if (outPtr) this.freeFloats(outPtr);
+      // JS-интерполяция при невозможности аллокации в WASM
+      const resampled = new Float32Array(outFloats);
+      for (let i = 0; i < outFrames; i++) {
+        const srcIdx = i / ratio;
+        const idx1 = Math.floor(srcIdx);
+        const idx2 = Math.min(inFrames - 1, idx1 + 1);
+        const t = srcIdx - idx1;
+        if (channels === 1) {
+          const s = inputPcm[idx1] * (1 - t) + inputPcm[idx2] * t;
+          resampled[i * 2] = s;
+          resampled[i * 2 + 1] = s;
+        } else {
+          for (let ch = 0; ch < 2; ch++) {
+            const s = inputPcm[idx1 * 2 + ch] * (1 - t) + inputPcm[idx2 * 2 + ch] * t;
+            resampled[i * 2 + ch] = s;
+          }
+        }
+      }
+      return resampled;
+    }
 
     try {
       let actualFrames = outFrames;
@@ -1916,8 +1992,18 @@ export class NativeDAWBridge {
     const rightFrames = totalFrames - splitFrameOffset;
 
     const inPtr = this.writeFloat32Direct(input);
-    const outLeftPtr = this.allocateFloats(leftFrames * channels);
-    const outRightPtr = this.allocateFloats(rightFrames * channels);
+    const outLeftPtr = inPtr > 0 ? this.allocateFloats(leftFrames * channels) : 0;
+    const outRightPtr = inPtr > 0 ? this.allocateFloats(rightFrames * channels) : 0;
+
+    if (!inPtr || !outLeftPtr || !outRightPtr) {
+      if (inPtr) this.freeFloats(inPtr);
+      if (outLeftPtr) this.freeFloats(outLeftPtr);
+      if (outRightPtr) this.freeFloats(outRightPtr);
+      // Безопасный JS fallback для длинных файлов без аллокации в WASM
+      const left = input.slice(0, leftFrames * channels);
+      const right = input.slice(leftFrames * channels, (leftFrames + rightFrames) * channels);
+      return { left, right };
+    }
 
     try {
       const success = splitFn(inPtr, totalFrames, splitFrameOffset, outLeftPtr, outRightPtr, channels);
@@ -1958,6 +2044,10 @@ export class NativeDAWBridge {
     }
 
     const inPtr = this.writeFloat32Direct(input);
+    if (!inPtr || inPtr === 0) {
+      // Безопасный возврат сэмпла через JS slice для файлов длиннее 10 секунд
+      return input.slice(startIdx, startIdx + len);
+    }
     const subPtr = inPtr + startIdx * 4; // 4 байта на float
 
     try {

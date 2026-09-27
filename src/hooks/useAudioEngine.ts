@@ -283,7 +283,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
    */
   const garbageCollectWasm = useCallback((currentTracks?: TrackState[]) => {
     if (currentTracks) {
-      globalLiveDAWEngine.syncAllTracks(currentTracks);
+      globalLiveDAWEngine.setTracks(currentTracks);
     } else {
       globalLiveDAWEngine.garbageCollectWasm();
     }
