@@ -8,6 +8,7 @@
 
 #include "SubtitleAligner.hpp"
 #include <sstream>
+#include <iomanip>
 #include <cctype>
 
 namespace DAWCore {
