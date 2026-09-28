@@ -66,10 +66,10 @@ struct PhraseNormalizerResult {
 };
 
 /**
- * Класс PhraseLoudnessNormalizer
- * Выполняет двухпроходный потоковый анализ и выравнивание фраз на дорожке
+ * Класс OfflinePhraseNormalizer
+ * Выполняет двухпроходный пакетный анализ и выравнивание фраз на дорожке
  */
-class PhraseLoudnessNormalizer {
+class OfflinePhraseNormalizer {
 public:
     /**
      * Основной метод обработки аудиодорожки с изменением сэмплов in-place

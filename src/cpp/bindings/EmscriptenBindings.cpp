@@ -35,6 +35,7 @@
 #include "../dsp/SpectralDeReverb.hpp"
 #include "../dsp/HeadroomRecovery.hpp"
 #include "../dsp/SpeechLeveler.hpp"
+#include "../dsp/PhraseLoudnessNormalizer.hpp"
 #include "../vst/NativeDSPPlugins.hpp"
 #include "../vocal/VocalRack.hpp"
 #include "../engine/Clip.hpp"

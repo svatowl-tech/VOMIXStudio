@@ -30,6 +30,7 @@ SOURCES=(
     "dsp/BiquadFilter.cpp"
     "dsp/Dynamics.cpp"
     "dsp/AudioUtils.cpp"
+    "dsp/PhraseLoudnessNormalizer.cpp"
     "dsp/DeEsserPro.cpp"
     "dsp/DePlosivePro.cpp"
     "dsp/VocalThickener.cpp"

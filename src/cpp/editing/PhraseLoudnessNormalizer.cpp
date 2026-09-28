@@ -29,7 +29,7 @@ struct RawPhraseBoundary {
     size_t endFrame = 0;
 };
 
-void PhraseLoudnessNormalizer::calculateEnergySIMD(
+void OfflinePhraseNormalizer::calculateEnergySIMD(
     const float* samples,
     size_t numSamples,
     float& outSumSquares,
@@ -83,7 +83,7 @@ void PhraseLoudnessNormalizer::calculateEnergySIMD(
     outPeak = peak;
 }
 
-void PhraseLoudnessNormalizer::applyGainSIMD(
+void OfflinePhraseNormalizer::applyGainSIMD(
     float* samples,
     size_t numSamples,
     float gainLinear
@@ -108,7 +108,7 @@ void PhraseLoudnessNormalizer::applyGainSIMD(
     }
 }
 
-void PhraseLoudnessNormalizer::applyFadeRamp(
+void OfflinePhraseNormalizer::applyFadeRamp(
     float* buffer,
     size_t startFrame,
     size_t numFrames,
@@ -134,7 +134,7 @@ void PhraseLoudnessNormalizer::applyFadeRamp(
     }
 }
 
-bool PhraseLoudnessNormalizer::processTrackPhrases(
+bool OfflinePhraseNormalizer::processTrackPhrases(
     float* buffer,
     size_t totalFrames,
     int channels,
@@ -149,7 +149,7 @@ bool PhraseLoudnessNormalizer::processTrackPhrases(
     return (result.totalPhrases > 0);
 }
 
-PhraseNormalizerResult PhraseLoudnessNormalizer::processTrackPhrasesWithStats(
+PhraseNormalizerResult OfflinePhraseNormalizer::processTrackPhrasesWithStats(
     float* buffer,
     size_t totalFrames,
     int channels,
@@ -353,7 +353,7 @@ PhraseNormalizerResult PhraseLoudnessNormalizer::processTrackPhrasesWithStats(
     return result;
 }
 
-PhraseNormalizerResult PhraseLoudnessNormalizer::processTrackPhrasesNative(
+PhraseNormalizerResult OfflinePhraseNormalizer::processTrackPhrasesNative(
     uintptr_t bufferPtr,
     size_t totalFrames,
     int channels,
