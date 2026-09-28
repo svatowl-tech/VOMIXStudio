@@ -293,7 +293,6 @@ size_t NativeWavBuilder::buildWav(
         bytesPerSample = 4;
     }
 
-    const size_t bytesPerSample = (format == FormatType::PCM_24BIT) ? 3 : (format == FormatType::FLOAT_32BIT ? 4 : 2);
     const size_t dataBytes = numFrames * static_cast<size_t>(numChannels) * bytesPerSample;
     const size_t requiredBytes = 44 + dataBytes;
 
@@ -368,7 +367,7 @@ size_t NativeWavBuilder::buildWav(
         }
     }
 
-    return totalWavSize;
+    return requiredBytes;
 }
 
 // ============================================================================

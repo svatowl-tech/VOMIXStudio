@@ -42,6 +42,8 @@ SOURCES=(
     "analysis/SubtitleAligner.cpp"
     "analysis/StemSeparator.cpp"
     "analysis/WaveformAnalyzer.cpp"
+    "vst/VSTScanner.cpp"
+    "project/ProjectIndexer.cpp"
     "bindings/EmscriptenBindings.cpp"
 )
 
