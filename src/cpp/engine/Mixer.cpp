@@ -9,6 +9,11 @@
  * 4. Выполняется автоматический сайдчейн-даккинг оригинального звука от вокальной шины.
  * 5. Итоговый мастер-микс = originalBusBuffer + vocalBusBuffer -> Master VST -> SoftLimiter.
  * 6. Замер пиков вокальной шины (ID 999) и мастера (ID 1000).
+ * 
+ * Стандартизация размерностей (Строго во ФРЕЙМАХ):
+ * - offsetSamples / getOffsetFrames() — это ВСЕГДА смещение во ФРЕЙМАХ (1 сек = 48 000).
+ * - lengthSamples / getLengthFrames() — это ВСЕГДА длина во ФРЕЙМАХ (1 сек = 48 000).
+ * - При обращении к float* buffer: size_t sampleIndex = frameOffset * channels.
  * ============================================================================
  */
 
@@ -65,8 +70,8 @@ void Mixer::setSampleRate(float sr) noexcept {
     vocalBusCompressor.setup(sr);
 }
 
-void Mixer::setTimelinePosition(size_t pos) noexcept {
-    currentTimelineSample = pos;
+void Mixer::setTimelinePosition(size_t posFrames) noexcept {
+    currentTimelineSample = posFrames;
     for (auto& track : tracks) {
         if (track) {
             track->resetStreamingBuffer();
@@ -99,6 +104,55 @@ Track* Mixer::getTrack(uint32_t trackId) noexcept {
 
 void Mixer::removeAllTracks() noexcept {
     tracks.clear();
+}
+
+// --- Управление цепочкой нативных инсерт-эффектов дорожки (TrackInsertChain) ---
+int Mixer::addTrackEffect(uint32_t trackId, int effectTypeId) noexcept {
+    Track* t = getTrack(trackId);
+    if (!t) return -1;
+    return t->addEffect(effectTypeId);
+}
+
+bool Mixer::removeTrackEffect(uint32_t trackId, int slotIdx) noexcept {
+    Track* t = getTrack(trackId);
+    if (!t) return false;
+    return t->removeEffect(slotIdx);
+}
+
+void Mixer::setTrackEffectParam(uint32_t trackId, int slotIdx, int paramId, float value) noexcept {
+    Track* t = getTrack(trackId);
+    if (!t) return;
+    t->setEffectParam(slotIdx, paramId, value);
+}
+
+float Mixer::getTrackEffectParam(uint32_t trackId, int slotIdx, int paramId) const noexcept {
+    for (const auto& t : tracks) {
+        if (t && t->id == trackId) {
+            return t->getEffectParam(slotIdx, paramId);
+        }
+    }
+    return 0.0f;
+}
+
+void Mixer::setTrackEffectBypass(uint32_t trackId, int slotIdx, bool bypass) noexcept {
+    Track* t = getTrack(trackId);
+    if (!t) return;
+    t->setEffectBypass(slotIdx, bypass);
+}
+
+bool Mixer::isTrackEffectBypassed(uint32_t trackId, int slotIdx) const noexcept {
+    for (const auto& t : tracks) {
+        if (t && t->id == trackId) {
+            return t->isEffectBypassed(slotIdx);
+        }
+    }
+    return false;
+}
+
+bool Mixer::reorderTrackEffects(uint32_t trackId, int fromIdx, int toIdx) noexcept {
+    Track* t = getTrack(trackId);
+    if (!t) return false;
+    return t->reorderEffects(fromIdx, toIdx);
 }
 
 // --- Управление плагинами вокальной шины ---
@@ -211,7 +265,8 @@ size_t Mixer::calculateProjectLengthSamples(int isolateTrackId) const noexcept {
 
         for (const auto& clip : track->clips) {
             if (clip.active) {
-                size_t endPos = clip.offsetSamples + clip.lengthSamples;
+                // Размерности строго во ФРЕЙМАХ:
+                size_t endPos = clip.getOffsetFrames() + clip.getLengthFrames();
                 if (endPos > maxLength) {
                     maxLength = endPos;
                 }
@@ -263,7 +318,7 @@ void Mixer::processBlock(float* outputBuffer, size_t numFrames) noexcept {
             }
         }
 
-        // 1. Отрисовка сэмплов клипов в локальный буфер дорожки (Zero Malloc)
+        // 1. Отрисовка сэмплов клипов в локальный буфер дорожки (во ФРЕЙМАХ)
         track->renderClipsToBuffer(currentTimelineSample, safeFrames);
 
         // 2. Проверка сайдчейн-источника для AutoDucker
@@ -280,6 +335,9 @@ void Mixer::processBlock(float* outputBuffer, size_t numFrames) noexcept {
 
         // 3. Вокальный процессор (VocalRack)
         track->processVocalRack(scPtr, safeFrames);
+
+        // 3.5. Цепочка нативных инсерт-эффектов дорожки (TrackInsertChain - 16 DSP модулей)
+        track->processInsertChain(safeFrames);
 
         // 4. Последовательный прогон дорожки через активные плагины слотов VST
         track->processVSTSlots(safeFrames);
@@ -465,8 +523,91 @@ void Mixer::processBlock(float* outputBuffer, size_t numFrames) noexcept {
     // Копирование в выходной буфер
     std::memcpy(outputBuffer, masterMixBuffer, safeFrames * 2 * sizeof(float));
 
-    // Сдвиг курсора таймлайна
+    // Сдвиг курсора таймлайна во ФРЕЙМАХ
     currentTimelineSample += safeFrames;
+}
+
+void Mixer::renderOfflineBlock(float* destStereo, size_t startFrame, size_t numFrames, int isolateTrackId) noexcept {
+    if (!destStereo || numFrames == 0) return;
+
+    size_t savedTimelinePos = currentTimelineSample;
+    currentTimelineSample = startFrame;
+
+    processBlock(destStereo, numFrames);
+
+    currentTimelineSample = savedTimelinePos;
+}
+
+void Mixer::renderMasterMix(float* outputStereoBuffer, size_t startFrame, size_t numFrames, int isolateTrackId) noexcept {
+    if (!outputStereoBuffer || numFrames == 0) return;
+
+    // Инициализируем выходной стереобуфер нулями
+    std::memset(outputStereoBuffer, 0, numFrames * 2 * sizeof(float));
+
+    // Пакетный рендеринг дорожек и клипов с точным условием нахождения во времени
+    for (const auto& track : tracks) {
+        if (!track) continue;
+        if (track->mute) continue;
+        if (isolateTrackId > 0 && static_cast<int>(track->id) != isolateTrackId) continue;
+
+        float trackGain = dbToGain(track->volumeDb);
+        float trackPanL = 1.0f, trackPanR = 1.0f;
+        calculateConstantPowerPan(track->pan, trackPanL, trackPanR);
+        float effTrackGainL = trackGain * trackPanL;
+        float effTrackGainR = trackGain * trackPanR;
+
+        for (const auto& clip : track->clips) {
+            if (!clip.active || !clip.sampleBuffer || clip.lengthSamples == 0) continue;
+
+            // Корректное условие нахождения клипа во времени:
+            size_t clipStartFrame = clip.getOffsetFrames();
+            size_t clipEndFrame = clipStartFrame + clip.getLengthFrames();
+
+            float clipPanL = 1.0f, clipPanR = 1.0f;
+            calculateConstantPowerPan(clip.pan, clipPanL, clipPanR);
+
+            for (size_t frameIdx = 0; frameIdx < numFrames; ++frameIdx) {
+                size_t currentFrame = startFrame + frameIdx;
+
+                if (currentFrame >= clipStartFrame && currentFrame < clipEndFrame) {
+                    size_t frameInClip = currentFrame - clipStartFrame;
+
+                    float fade = clip.getFadeGain(frameInClip);
+                    float totalGainL = clip.gain * fade * clipPanL * effTrackGainL;
+                    float totalGainR = clip.gain * fade * clipPanR * effTrackGainR;
+
+                    // Чтение стерео / моно сэмпла:
+                    float sL = 0.0f;
+                    float sR = 0.0f;
+
+                    if (clip.isStereo) {
+                        sL = clip.sampleBuffer[frameInClip * 2];
+                        sR = clip.sampleBuffer[frameInClip * 2 + 1];
+                    } else {
+                        sL = sR = clip.sampleBuffer[frameInClip];
+                    }
+
+                    // Суммирование в мастер-шину с учетом громкости клипа и трека
+                    outputStereoBuffer[frameIdx * 2]     += sL * totalGainL;
+                    outputStereoBuffer[frameIdx * 2 + 1] += sR * totalGainR;
+                }
+            }
+        }
+    }
+
+    // Применение мастер-фейдера и лимитера
+    float masterGain = dbToGain(masterVolumeDb);
+    float panL = 1.0f, panR = 1.0f;
+    calculateConstantPowerPan(masterPan, panL, panR);
+    float finalL = masterGain * panL;
+    float finalR = masterGain * panR;
+
+    for (size_t f = 0; f < numFrames; ++f) {
+        outputStereoBuffer[f * 2]     *= finalL;
+        outputStereoBuffer[f * 2 + 1] *= finalR;
+    }
+
+    masterLimiter.processBuffer(outputStereoBuffer, numFrames);
 }
 
 size_t Mixer::renderProjectOffline(float* outputBuffer, size_t maxFrames, int isolateTrackId) noexcept {
@@ -552,4 +693,3 @@ void Mixer::autoMatchAllTracks(float targetRmsDb, float maxPeakDb) noexcept {
 }
 
 } // namespace DAWCore
-

@@ -442,6 +442,16 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       case 'vst-denoise': return 7;
       case 'vst-limiter':
       case 'vst-l2': return 8;
+      case 'vst-deplosive-pro':
+      case 'vst-deplosive': return 9;
+      case 'vst-vocal-thickener':
+      case 'vst-thickener': return 10;
+      case 'vst-spectral-dereverb':
+      case 'vst-dereverb': return 11;
+      case 'vst-headroom-recovery':
+      case 'vst-headroom': return 12;
+      case 'vst-speech-leveler':
+      case 'vst-leveler': return 13;
       default: return 1;
     }
   }
@@ -455,6 +465,124 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
     if (!isNaN(parsed)) return parsed;
 
     switch (pluginId) {
+      case 'vst-speech-leveler':
+      case 'vst-leveler':
+        switch (paramName) {
+          case 'bypass': return 0;
+          case 'targetLevel':
+          case 'targetLevelDb':
+          case 'target_level':
+          case 'target_db': return 1;
+          case 'levelingSpeed':
+          case 'levelingSpeedMs':
+          case 'speed':
+          case 'speedMs':
+          case 'speed_ms': return 2;
+          case 'maxBoost':
+          case 'maxBoostDb':
+          case 'max_boost':
+          case 'max_boost_db': return 3;
+          case 'maxCut':
+          case 'maxCutDb':
+          case 'max_cut':
+          case 'max_cut_db': return 4;
+          case 'silenceGate':
+          case 'silenceGateDb':
+          case 'silence_gate':
+          case 'gate':
+          case 'gateDb':
+          case 'gate_db': return 5;
+          case 'peakCeiling':
+          case 'peakCeilingDb':
+          case 'ceiling':
+          case 'ceilingDb':
+          case 'ceiling_db': return 6;
+          case 'mix':
+          case 'wetDry':
+          case 'wet_dry': return 7;
+        }
+        break;
+      case 'vst-headroom-recovery':
+      case 'vst-headroom':
+        switch (paramName) {
+          case 'bypass': return 0;
+          case 'targetPeak':
+          case 'targetPeakDb':
+          case 'target_peak':
+          case 'target_db': return 1;
+          case 'maxBoost':
+          case 'maxBoostDb':
+          case 'max_boost': return 2;
+          case 'manualGain':
+          case 'manualGainDb':
+          case 'gain_db': return 3;
+          case 'auto':
+          case 'autoHeadroom':
+          case 'auto_headroom': return 4;
+          case 'lookahead':
+          case 'lookaheadMs':
+          case 'lookahead_ms': return 5;
+          case 'mix':
+          case 'wetDry':
+          case 'wet_dry': return 6;
+        }
+        break;
+      case 'vst-spectral-dereverb':
+      case 'vst-dereverb':
+        switch (paramName) {
+          case 'bypass': return 0;
+          case 'reduction':
+          case 'reductionDb':
+          case 'reduction_db': return 1;
+          case 'decay':
+          case 'decayTimeEstMs':
+          case 'decay_ms': return 2;
+          case 'clarity': return 3;
+          case 'mix':
+          case 'wetDry':
+          case 'wet_dry': return 4;
+        }
+        break;
+      case 'vst-vocal-thickener':
+      case 'vst-thickener':
+        switch (paramName) {
+          case 'bypass': return 0;
+          case 'body':
+          case 'bodyDrive':
+          case 'body_drive': return 1;
+          case 'presence':
+          case 'presenceClarity':
+          case 'presence_clarity': return 2;
+          case 'tape':
+          case 'tapeDensity':
+          case 'tape_density': return 3;
+          case 'mix':
+          case 'wetDry':
+          case 'wet_dry': return 4;
+        }
+        break;
+      case 'vst-deplosive-pro':
+      case 'vst-deplosive':
+        switch (paramName) {
+          case 'bypass': return 0;
+          case 'threshold':
+          case 'thresholdDb':
+          case 'threshold_db': return 1;
+          case 'frequencyLimit':
+          case 'frequency':
+          case 'frequency_hz': return 2;
+          case 'suppressionDepth':
+          case 'suppressionDepthDb':
+          case 'suppression_depth':
+          case 'depth_db': return 3;
+          case 'recovery':
+          case 'recoveryMs':
+          case 'recovery_ms': return 4;
+          case 'mix':
+          case 'wetDry':
+          case 'wet_dry': return 5;
+        }
+        break;
       case 'vst-pro-q3':
         switch (paramName) {
           case 'bypass': return 0;
@@ -1820,6 +1948,180 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
             }
           }
         });
+        break;
+      }
+
+      case 'SET_TRACK_PLUGIN_PARAM':
+      case 'UPDATE_TRACK_VST_PARAM': {
+        const trackId = Number(msg.trackId) || 0;
+        const slotIdx = Number(msg.slotIdx) || 0;
+        const pluginId = msg.pluginId || '';
+        const paramId = msg.paramId;
+        const value = typeof msg.value === 'number' ? msg.value : 0.0;
+        const numId = this.getParamIdAsNumber(pluginId, paramId);
+
+        const slots = this.getSlotsArray('track', trackId);
+        if (slots[slotIdx]) {
+          if (!slots[slotIdx].parameters) slots[slotIdx].parameters = {};
+          slots[slotIdx].parameters[paramId] = value;
+        }
+
+        if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._setTrackPluginParam) {
+          try {
+            this.wasmModule._setTrackPluginParam(this.mixerPtr, trackId, slotIdx, numId, value);
+          } catch (_) {}
+        }
+        break;
+      }
+
+      case 'SET_TRACK_PLUGIN_BYPASS':
+      case 'UPDATE_TRACK_VST_BYPASS': {
+        const trackId = Number(msg.trackId) || 0;
+        const slotIdx = Number(msg.slotIdx) || 0;
+        const bypass = msg.bypass !== undefined ? !!msg.bypass : (msg.enabled === false);
+
+        const slots = this.getSlotsArray('track', trackId);
+        if (slots[slotIdx]) {
+          slots[slotIdx].enabled = !bypass;
+          slots[slotIdx].targetBypassGain = bypass ? 0.0 : 1.0;
+        }
+
+        if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._setTrackPluginBypass) {
+          try {
+            this.wasmModule._setTrackPluginBypass(this.mixerPtr, trackId, slotIdx, bypass ? 1 : 0);
+          } catch (_) {}
+        }
+        break;
+      }
+
+      case 'SET_TRACK_PLUGIN_WETDRY':
+      case 'UPDATE_TRACK_VST_WETDRY': {
+        const trackId = Number(msg.trackId) || 0;
+        const slotIdx = Number(msg.slotIdx) || 0;
+        const wetDry = typeof msg.wetDry === 'number' ? msg.wetDry : 1.0;
+
+        const slots = this.getSlotsArray('track', trackId);
+        if (slots[slotIdx]) {
+          slots[slotIdx].targetWetDry = wetDry;
+        }
+
+        if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._setTrackPluginWetDry) {
+          try {
+            this.wasmModule._setTrackPluginWetDry(this.mixerPtr, trackId, slotIdx, wetDry);
+          } catch (_) {}
+        }
+        break;
+      }
+
+      case 'SET_MASTER_PLUGIN_PARAM':
+      case 'UPDATE_MASTER_VST_PARAM': {
+        const slotIdx = Number(msg.slotIdx) || 0;
+        const pluginId = msg.pluginId || '';
+        const paramId = msg.paramId;
+        const value = typeof msg.value === 'number' ? msg.value : 0.0;
+        const numId = this.getParamIdAsNumber(pluginId, paramId);
+
+        if (this.masterVstSlots[slotIdx]) {
+          if (!this.masterVstSlots[slotIdx].parameters) this.masterVstSlots[slotIdx].parameters = {};
+          this.masterVstSlots[slotIdx].parameters[paramId] = value;
+        }
+
+        if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._setMasterPluginParam) {
+          try {
+            this.wasmModule._setMasterPluginParam(this.mixerPtr, slotIdx, numId, value);
+          } catch (_) {}
+        }
+        break;
+      }
+
+      case 'SET_MASTER_PLUGIN_BYPASS':
+      case 'UPDATE_MASTER_VST_BYPASS': {
+        const slotIdx = Number(msg.slotIdx) || 0;
+        const bypass = msg.bypass !== undefined ? !!msg.bypass : (msg.enabled === false);
+
+        if (this.masterVstSlots[slotIdx]) {
+          this.masterVstSlots[slotIdx].enabled = !bypass;
+          this.masterVstSlots[slotIdx].targetBypassGain = bypass ? 0.0 : 1.0;
+        }
+
+        if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._setMasterPluginBypass) {
+          try {
+            this.wasmModule._setMasterPluginBypass(this.mixerPtr, slotIdx, bypass ? 1 : 0);
+          } catch (_) {}
+        }
+        break;
+      }
+
+      case 'SET_MASTER_PLUGIN_WETDRY':
+      case 'UPDATE_MASTER_VST_WETDRY': {
+        const slotIdx = Number(msg.slotIdx) || 0;
+        const wetDry = typeof msg.wetDry === 'number' ? msg.wetDry : 1.0;
+
+        if (this.masterVstSlots[slotIdx]) {
+          this.masterVstSlots[slotIdx].targetWetDry = wetDry;
+        }
+
+        if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._setMasterPluginWetDry) {
+          try {
+            this.wasmModule._setMasterPluginWetDry(this.mixerPtr, slotIdx, wetDry);
+          } catch (_) {}
+        }
+        break;
+      }
+
+      case 'SET_VOCAL_BUS_PLUGIN_PARAM':
+      case 'UPDATE_VOCAL_BUS_VST_PARAM': {
+        const slotIdx = Number(msg.slotIdx) || 0;
+        const pluginId = msg.pluginId || '';
+        const paramId = msg.paramId;
+        const value = typeof msg.value === 'number' ? msg.value : 0.0;
+        const numId = this.getParamIdAsNumber(pluginId, paramId);
+
+        if (this.vocalBusVstSlots[slotIdx]) {
+          if (!this.vocalBusVstSlots[slotIdx].parameters) this.vocalBusVstSlots[slotIdx].parameters = {};
+          this.vocalBusVstSlots[slotIdx].parameters[paramId] = value;
+        }
+
+        if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._setTrackPluginParam) {
+          try {
+            this.wasmModule._setTrackPluginParam(this.mixerPtr, 999, slotIdx, numId, value);
+          } catch (_) {}
+        }
+        break;
+      }
+
+      case 'SET_VOCAL_BUS_PLUGIN_BYPASS':
+      case 'UPDATE_VOCAL_BUS_VST_BYPASS': {
+        const slotIdx = Number(msg.slotIdx) || 0;
+        const bypass = msg.bypass !== undefined ? !!msg.bypass : (msg.enabled === false);
+
+        if (this.vocalBusVstSlots[slotIdx]) {
+          this.vocalBusVstSlots[slotIdx].enabled = !bypass;
+          this.vocalBusVstSlots[slotIdx].targetBypassGain = bypass ? 0.0 : 1.0;
+        }
+
+        if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._setTrackPluginBypass) {
+          try {
+            this.wasmModule._setTrackPluginBypass(this.mixerPtr, 999, slotIdx, bypass ? 1 : 0);
+          } catch (_) {}
+        }
+        break;
+      }
+
+      case 'SET_VOCAL_BUS_PLUGIN_WETDRY':
+      case 'UPDATE_VOCAL_BUS_VST_WETDRY': {
+        const slotIdx = Number(msg.slotIdx) || 0;
+        const wetDry = typeof msg.wetDry === 'number' ? msg.wetDry : 1.0;
+
+        if (this.vocalBusVstSlots[slotIdx]) {
+          this.vocalBusVstSlots[slotIdx].targetWetDry = wetDry;
+        }
+
+        if (this.isWasmReady && this.wasmModule && this.mixerPtr && this.wasmModule._setTrackPluginWetDry) {
+          try {
+            this.wasmModule._setTrackPluginWetDry(this.mixerPtr, 999, slotIdx, wetDry);
+          } catch (_) {}
+        }
         break;
       }
 

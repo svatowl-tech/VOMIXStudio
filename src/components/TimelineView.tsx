@@ -1576,6 +1576,139 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     }
   };
 
+  // ==========================================================================
+  // АБСОЛЮТНЫЙ ЯКОРНЫЙ АВТОТАЙМИНГ ПО СУБТИТРАМ (Anchor-Based Time Alignment)
+  // ==========================================================================
+  const handleAnchorBasedAutoTiming = useCallback(
+    (targetTrackId?: number) => {
+      if (!globalNativeDAWBridge.isReady) {
+        handleNativeError(
+          new Error('C++ WebAssembly ядро не инициализировано.'),
+          'автотайминга (processWSOLA)'
+        );
+        return;
+      }
+
+      const safeSubtitles = toSafeArray<SubtitleCue>(subtitles);
+      if (safeSubtitles.length === 0) {
+        showNotice('Для автотайминга добавьте или импортируйте дорожку субтитров', 'warn');
+        return;
+      }
+
+      const currentTracks = tracksRef.current || [];
+      const updatedTracks: TrackState[] = [];
+      let alignedCount = 0;
+      let stretchedCount = 0;
+      let naturalCount = 0;
+
+      for (const track of toSafeArray<TrackState>(currentTracks)) {
+        if (!track || !track.clips || track.clips.length === 0) {
+          if (track) updatedTracks.push(track);
+          continue;
+        }
+
+        // Если указан конкретный trackId, другие дорожки не меняем
+        if (targetTrackId !== undefined && track.id !== targetTrackId) {
+          updatedTracks.push(track);
+          continue;
+        }
+
+        // Оригинальную дорожку видео не сдвигаем
+        if (track.isOriginalAudio || /оригинал|original|видео|video/i.test(track.name)) {
+          updatedTracks.push(track);
+          continue;
+        }
+
+        // 1. Для каждой фразы актера ищем субтитр с минимальным расстоянием по таймкоду: abs(phrase.originalTimeSec - cue.startSec)
+        const updatedClips: ClipConfig[] = (track.clips || []).map((clip) => {
+          if (!clip || !clip.buffer || clip.lengthSamples <= 0) return clip;
+
+          const baseBuffer = clip.originalBuffer || clip.buffer;
+          const baseLength = clip.originalLengthSamples || clip.lengthSamples;
+          const isStereo = clip.buffer.length >= clip.lengthSamples * 2;
+
+          // Фактическое исходное время фразы на таймлайне во ФРЕЙМАХ (1 сек = 48 000)
+          const phraseOriginalTimeSec = clip.offsetSamples / sampleRate;
+          const phraseDurationSec = baseLength / sampleRate;
+
+          // Ищем ближайший субтитр cue: abs(phrase.originalTimeSec - cue.startSec) минимален
+          let bestCue: SubtitleCue | null = null;
+          let minDelta = Infinity;
+
+          for (const cue of safeSubtitles) {
+            const delta = Math.abs(phraseOriginalTimeSec - cue.startSec);
+            if (delta < minDelta) {
+              minDelta = delta;
+              bestCue = cue;
+            }
+          }
+
+          if (!bestCue) return clip;
+
+          // Якорная фиксация начала фразы: offsetSamples жестко выставляется во ФРЕЙМАХ
+          const targetOffsetSamples = Math.max(0, Math.round(bestCue.startSec * sampleRate));
+          const cueDurationSec = Math.max(0.2, bestCue.endSec - bestCue.startSec);
+          const rawRatio = cueDurationSec / phraseDurationSec;
+
+          let clampedRatio = 1.0;
+          let targetLength = baseLength;
+          let newBuffer = baseBuffer;
+
+          // Правила WSOLA Time-Stretch:
+          // - Если разница в пределах ±20%: применить WSOLA только к телу фразы (ratio от 0.80 до 1.20)
+          // - Если разница больше 25%: НЕ растягивать фразу до абсурда, а оставить естественный темп (ratio = 1.0)
+          if (rawRatio >= 0.80 && rawRatio <= 1.20) {
+            clampedRatio = rawRatio;
+            targetLength = Math.round(baseLength * clampedRatio);
+            if (Math.abs(clampedRatio - 1.0) > 0.02) {
+              newBuffer = globalNativeDAWBridge.processWSOLA(baseBuffer, clampedRatio, isStereo);
+              stretchedCount++;
+            }
+          } else if (rawRatio < 0.75 || rawRatio > 1.25) {
+            clampedRatio = 1.0;
+            targetLength = baseLength;
+            newBuffer = baseBuffer;
+            naturalCount++;
+          } else {
+            clampedRatio = Math.min(1.20, Math.max(0.80, rawRatio));
+            targetLength = Math.round(baseLength * clampedRatio);
+            newBuffer = globalNativeDAWBridge.processWSOLA(baseBuffer, clampedRatio, isStereo);
+            stretchedCount++;
+          }
+
+          alignedCount++;
+
+          return {
+            ...clip,
+            offsetSamples: targetOffsetSamples,
+            lengthSamples: targetLength,
+            buffer: newBuffer,
+            originalBuffer: baseBuffer,
+            originalLengthSamples: baseLength,
+            timeStretchRatio: Math.round(clampedRatio * 100) / 100,
+            name: `${clip.name.replace(/\s*\[Sub #\d+\].*$/, '')} [Sub #${bestCue.index}]`
+          };
+        });
+
+        // Строгая монотонность расстановки фраз на дорожке
+        const monotonicClips = enforceMonotonicClips(updatedClips, 10);
+        const updatedTrack = { ...track, clips: monotonicClips };
+        updatedTracks.push(updatedTrack);
+
+        onUpdateTrack?.(updatedTrack);
+        handleUploadClipsBatch(track.id, monotonicClips);
+      }
+
+      handleSyncAllTracks(updatedTracks);
+
+      showNotice(
+        `✓ Якорный автотайминг C++: выровнено ${alignedCount} фраз по субтитрам (WSOLA подгонка: ${stretchedCount}, естественный темп: ${naturalCount})`,
+        'success'
+      );
+    },
+    [subtitles, sampleRate, enforceMonotonicClips, onUpdateTrack, handleUploadClipsBatch, handleSyncAllTracks, showNotice, handleNativeError]
+  );
+
   // Применение численного коэффициента Time Stretch
   const handleApplyStretchRatio = (ratio: number) => {
     if (selectedClipId === null) return;
@@ -2252,6 +2385,23 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
           >
             <Zap size={13} className="text-amber-300" />
             <span>Удалить тишину (C++)</span>
+          </button>
+
+          {/* ЯКОРНЫЙ АВТОТАЙМИНГ КНОПКА */}
+          <button
+            id="btn-auto-timing-anchors"
+            onClick={() => {
+              if (selectedClip) {
+                handleAnchorBasedAutoTiming(selectedClip.track.id);
+              } else {
+                handleAnchorBasedAutoTiming();
+              }
+            }}
+            title="Абсолютный якорный автотайминг по субтитрам (привязка начала к таймкоду cue.startSec и WSOLA ±20%)"
+            className="px-3 py-1 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold rounded-xl text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-md shadow-blue-950/40"
+          >
+            <Sparkles size={13} className="text-cyan-300" />
+            <span>⚡ Автотайминг (C++)</span>
           </button>
 
           {/* Кнопка добавления субтитра на плейхед */}

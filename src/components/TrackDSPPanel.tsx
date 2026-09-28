@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { TrackState, createNewTrack, isOriginalTrackName } from '../audio/dawEngine';
 import { EqCurveVisualizer } from './EqCurveVisualizer';
+import { TrackInsertRack } from './TrackInsertRack';
+import { globalNativeDAWBridge } from '../services/NativeDAWBridge';
 import { toSafeArray } from '../utils/safeIterables';
 import { globalMVPPresetManager, MVPPreset } from '../services/MVPPresetManager';
 import {
@@ -36,7 +38,7 @@ export const TrackDSPPanel: React.FC<TrackDSPPanelProps> = ({
   onUpdateTrack,
   onClose
 }) => {
-  const [activeTab, setActiveTab] = useState<'eq' | 'comp' | 'gate' | 'repair' | 'deesser' | 'ducking'>('eq');
+  const [activeTab, setActiveTab] = useState<'rack' | 'eq' | 'comp' | 'gate' | 'repair' | 'deesser' | 'ducking'>('rack');
 
   // Preset Handlers
   const applySubPresetDsp = (preset: MVPPreset) => {
@@ -373,6 +375,20 @@ export const TrackDSPPanel: React.FC<TrackDSPPanelProps> = ({
       {/* Tab bar */}
       <div className="flex items-center gap-1 border-b border-slate-900 pb-1.5 overflow-x-auto">
         <button
+          onClick={() => setActiveTab('rack')}
+          className={`px-3 py-1 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
+            activeTab === 'rack'
+              ? 'bg-emerald-600/20 text-emerald-400 border border-emerald-800/50 font-extrabold shadow-sm shadow-emerald-500/10'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/40'
+          }`}
+        >
+          <Layers size={12} className="text-emerald-400" />
+          <span>Нативный Рэк (16 DSP)</span>
+          <span className="text-[10px] px-1.5 py-0.2 rounded font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+            {(track.insertEffects || []).length}
+          </span>
+        </button>
+        <button
           onClick={() => setActiveTab('eq')}
           className={`px-3 py-1 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
             activeTab === 'eq'
@@ -448,6 +464,35 @@ export const TrackDSPPanel: React.FC<TrackDSPPanelProps> = ({
 
       {/* Tab Contents - Dense & scrolling-free layouts */}
       <div className="bg-slate-950 p-4 rounded-xl border border-slate-900">
+        {/* Native Insert FX Rack Tab */}
+        {activeTab === 'rack' && (
+          <div className="space-y-4 animate-fadeIn">
+            <TrackInsertRack
+              trackId={track.id}
+              trackName={track.name}
+              trackColor={track.color}
+              effects={track.insertEffects || []}
+              onUpdateEffects={(updated) => {
+                onUpdateTrack({ ...track, insertEffects: updated });
+              }}
+              onSetEffectParam={(slotIdx, paramId, val) => {
+                try {
+                  globalNativeDAWBridge.setTrackEffectParam(track.id, slotIdx, paramId, val);
+                } catch {
+                  // Ignore
+                }
+              }}
+              onSetEffectBypass={(slotIdx, bypass) => {
+                try {
+                  globalNativeDAWBridge.setTrackEffectBypass(track.id, slotIdx, bypass);
+                } catch {
+                  // Ignore
+                }
+              }}
+            />
+          </div>
+        )}
+
         {/* EQ Tab */}
         {activeTab === 'eq' && (
           <div className="space-y-4">

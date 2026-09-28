@@ -23,11 +23,18 @@
 #include "../dsp/AudioMath.hpp"
 #include "../dsp/BiquadFilter.hpp"
 #include "../dsp/Dynamics.hpp"
+#include "../dsp/DeEsserPro.hpp"
+#include "../dsp/DePlosivePro.hpp"
+#include "../dsp/VocalThickener.hpp"
+#include "../dsp/SpectralDeReverb.hpp"
+#include "../dsp/HeadroomRecovery.hpp"
+#include "../dsp/SpeechLeveler.hpp"
 #include <cmath>
 #include <cstring>
 #include <algorithm>
 #include <vector>
 #include <string>
+#include <memory>
 
 namespace DAWCore {
 
@@ -1115,6 +1122,392 @@ public:
 };
 
 // ============================================================================
+// 15. De-Plosive Pro (PluginTypeId = 9) - Устранение задувов и взрывных согласных
+// ============================================================================
+class NativeDePlosiveProPlugin : public NativePluginBase {
+    DAWCore::DePlosivePro dePlosive;
+
+public:
+    NativeDePlosiveProPlugin()
+        : NativePluginBase("De-Plosive Pro", "Restoration", "vst-deplosive-pro", 0)
+    {
+        registerParam(0, "Bypass", "", 0.0f);
+        registerParam(1, "Threshold", "dB", -24.0f);            // -60.0 .. 0.0 dB
+        registerParam(2, "Frequency", "Hz", 120.0f);            // 40.0 .. 350.0 Hz
+        registerParam(3, "Suppression Depth", "dB", -18.0f);    // -48.0 .. 0.0 dB
+        registerParam(4, "Recovery", "ms", 35.0f);              // 5.0 .. 300.0 ms
+        registerParam(5, "Mix", "%", 1.0f);                     // 0.0 .. 1.0 (0 .. 100%)
+        dePlosive.setSampleRate(static_cast<float>(sampleRate));
+        updateDePlosive();
+    }
+
+    void updateDePlosive() {
+        DAWCore::DePlosiveProParams p;
+        p.bypass = paramValues[0] > 0.5f;
+
+        // Threshold dB
+        float t = paramValues[1];
+        if (t > 0.0f && t <= 1.0f) {
+            p.thresholdDb = -60.0f + t * 60.0f;
+        } else {
+            p.thresholdDb = t;
+        }
+
+        // Frequency Limit Hz
+        float f = paramValues[2];
+        if (f >= 0.0f && f <= 1.0f) {
+            p.frequencyLimit = 40.0f + f * 310.0f;
+        } else {
+            p.frequencyLimit = f;
+        }
+
+        // Suppression Depth dB
+        float d = paramValues[3];
+        if (d > 0.0f && d <= 1.0f) {
+            p.suppressionDepthDb = -48.0f + d * 48.0f;
+        } else {
+            p.suppressionDepthDb = d;
+        }
+
+        // Recovery Time ms
+        float r = paramValues[4];
+        if (r >= 0.0f && r <= 1.0f) {
+            p.recoveryMs = 5.0f + r * 295.0f;
+        } else {
+            p.recoveryMs = r;
+        }
+
+        // Wet / Dry
+        float m = paramValues[5];
+        if (m > 1.0f) m /= 100.0f;
+        p.wetDry = std::clamp(m, 0.0f, 1.0f);
+
+        dePlosive.setParams(p);
+    }
+
+    void onParamChanged(uint32_t paramId, float) override {
+        if (paramId == 0) {
+            setBypass(paramValues[0] > 0.5f);
+        }
+        updateDePlosive();
+    }
+
+    void reset() override {
+        dePlosive.setSampleRate(static_cast<float>(sampleRate));
+        dePlosive.reset();
+        updateDePlosive();
+    }
+
+    void processBlock(float** inputs, float** outputs, int32_t numFrames) override {
+        if (!inputs || !outputs || numFrames <= 0) return;
+        dePlosive.processBlockSplit(inputs, outputs, static_cast<size_t>(numFrames));
+    }
+};
+
+// ============================================================================
+// 16. Vocal Thickener & Tape Sat (PluginTypeId = 10)
+// ============================================================================
+class NativeVocalThickenerPlugin : public NativePluginBase {
+    DAWCore::VocalThickener thickener;
+
+public:
+    NativeVocalThickenerPlugin()
+        : NativePluginBase("Vocal Thickener & Tape Sat", "Dynamics", "vst-vocal-thickener", 0)
+    {
+        registerParam(0, "Bypass", "", 0.0f);
+        registerParam(1, "Body Drive", "%", 0.5f);            // 0.0 .. 1.0 (0 .. 100%)
+        registerParam(2, "Presence Clarity", "%", 0.4f);      // 0.0 .. 1.0 (0 .. 100%)
+        registerParam(3, "Tape Density", "%", 0.45f);         // 0.0 .. 1.0 (0 .. 100%)
+        registerParam(4, "Mix", "%", 1.0f);                   // 0.0 .. 1.0 (0 .. 100%)
+        thickener.setSampleRate(static_cast<float>(sampleRate));
+        updateThickener();
+    }
+
+    void updateThickener() {
+        DAWCore::VocalThickenerParams p;
+        p.bypass = paramValues[0] > 0.5f;
+
+        float body = paramValues[1];
+        if (body > 1.0f) body /= 100.0f;
+        p.bodyDrive = std::clamp(body, 0.0f, 1.0f);
+
+        float pres = paramValues[2];
+        if (pres > 1.0f) pres /= 100.0f;
+        p.presenceClarity = std::clamp(pres, 0.0f, 1.0f);
+
+        float tape = paramValues[3];
+        if (tape > 1.0f) tape /= 100.0f;
+        p.tapeDensity = std::clamp(tape, 0.0f, 1.0f);
+
+        float mixVal = paramValues[4];
+        if (mixVal > 1.0f) mixVal /= 100.0f;
+        p.mix = std::clamp(mixVal, 0.0f, 1.0f);
+
+        thickener.setParams(p);
+    }
+
+    void onParamChanged(uint32_t paramId, float) override {
+        if (paramId == 0) {
+            setBypass(paramValues[0] > 0.5f);
+        }
+        updateThickener();
+    }
+
+    void reset() override {
+        thickener.setSampleRate(static_cast<float>(sampleRate));
+        thickener.reset();
+        updateThickener();
+    }
+
+    void processBlock(float** inputs, float** outputs, int32_t numFrames) override {
+        if (!inputs || !outputs || numFrames <= 0) return;
+        thickener.processBlockSplit(inputs, outputs, static_cast<size_t>(numFrames));
+    }
+};
+
+// ============================================================================
+// 17. Spectral De-Reverb Lite (PluginTypeId = 11)
+// ============================================================================
+class NativeSpectralDeReverbPlugin : public NativePluginBase {
+    DAWCore::SpectralDeReverb deReverb;
+
+public:
+    NativeSpectralDeReverbPlugin()
+        : NativePluginBase("Spectral De-Reverb Lite", "Restoration", "vst-spectral-dereverb", 0)
+    {
+        registerParam(0, "Bypass", "", 0.0f);
+        registerParam(1, "Reduction", "dB", -9.0f);          // -18.0 .. 0.0 dB
+        registerParam(2, "Decay Est", "ms", 350.0f);        // 100.0 .. 800.0 ms
+        registerParam(3, "Clarity", "%", 70.0f);            // 0.0 .. 1.0 (0 .. 100%)
+        registerParam(4, "Mix", "%", 100.0f);               // 0.0 .. 1.0 (0 .. 100%)
+        deReverb.setSampleRate(static_cast<float>(sampleRate));
+        updateDeReverb();
+    }
+
+    void updateDeReverb() {
+        DAWCore::SpectralDeReverbParams p;
+        p.bypass = paramValues[0] > 0.5f;
+
+        float red = paramValues[1];
+        if (red > 0.0f && red <= 1.0f) {
+            p.reductionDb = -18.0f + red * 18.0f;
+        } else {
+            p.reductionDb = red;
+        }
+
+        float decay = paramValues[2];
+        if (decay >= 0.0f && decay <= 1.0f) {
+            p.decayTimeEstMs = 100.0f + decay * 700.0f;
+        } else {
+            p.decayTimeEstMs = decay;
+        }
+
+        float clar = paramValues[3];
+        if (clar > 1.0f) clar /= 100.0f;
+        p.clarity = std::clamp(clar, 0.0f, 1.0f);
+
+        float mixVal = paramValues[4];
+        if (mixVal > 1.0f) mixVal /= 100.0f;
+        p.mix = std::clamp(mixVal, 0.0f, 1.0f);
+
+        deReverb.setParams(p);
+    }
+
+    void onParamChanged(uint32_t paramId, float) override {
+        if (paramId == 0) {
+            setBypass(paramValues[0] > 0.5f);
+        }
+        updateDeReverb();
+    }
+
+    void reset() override {
+        deReverb.setSampleRate(static_cast<float>(sampleRate));
+        deReverb.reset();
+        updateDeReverb();
+    }
+
+    void processBlock(float** inputs, float** outputs, int32_t numFrames) override {
+        if (!inputs || !outputs || numFrames <= 0) return;
+        deReverb.processBlockSplit(inputs, outputs, static_cast<size_t>(numFrames));
+    }
+};
+
+// ============================================================================
+// 18. Headroom Recovery & Gain (PluginTypeId = 12)
+// ============================================================================
+class NativeHeadroomRecoveryPlugin : public NativePluginBase {
+    DAWCore::HeadroomRecovery recovery;
+
+public:
+    NativeHeadroomRecoveryPlugin()
+        : NativePluginBase("Headroom Recovery & Gain", "Dynamics", "vst-headroom-recovery", 0)
+    {
+        registerParam(0, "Bypass", "", 0.0f);
+        registerParam(1, "Target Peak", "dBFS", -6.0f);     // -24 .. 0 dBFS
+        registerParam(2, "Max Boost", "dB", 36.0f);         // 6 .. 48 dB
+        registerParam(3, "Manual Gain", "dB", 0.0f);        // -24 .. +48 dB
+        registerParam(4, "Auto Headroom", "", 1.0f);        // 0 or 1
+        registerParam(5, "Lookahead", "ms", 3.0f);          // 0 .. 10 ms
+        registerParam(6, "Mix", "%", 100.0f);               // 0 .. 100%
+        recovery.setSampleRate(static_cast<float>(sampleRate));
+        updateRecovery();
+    }
+
+    void updateRecovery() {
+        DAWCore::HeadroomRecoveryParams p;
+        p.bypass = paramValues[0] > 0.5f;
+
+        float target = paramValues[1];
+        if (target > 0.0f && target <= 1.0f) {
+            p.targetPeakDb = -24.0f + target * 24.0f;
+        } else {
+            p.targetPeakDb = target;
+        }
+
+        float maxB = paramValues[2];
+        if (maxB > 0.0f && maxB <= 1.0f) {
+            p.maxBoostDb = 6.0f + maxB * 42.0f;
+        } else {
+            p.maxBoostDb = maxB;
+        }
+
+        float manG = paramValues[3];
+        if (manG >= 0.0f && manG <= 1.0f && manG != 0.0f) {
+            p.manualGainDb = -24.0f + manG * 72.0f;
+        } else {
+            p.manualGainDb = manG;
+        }
+
+        p.autoHeadroom = paramValues[4] > 0.5f;
+
+        float look = paramValues[5];
+        if (look >= 0.0f && look <= 1.0f && look != 0.0f) {
+            p.lookaheadMs = look * 10.0f;
+        } else {
+            p.lookaheadMs = look;
+        }
+
+        float mixVal = paramValues[6];
+        if (mixVal > 1.0f) mixVal /= 100.0f;
+        p.mix = std::clamp(mixVal, 0.0f, 1.0f);
+
+        recovery.setParams(p);
+    }
+
+    void onParamChanged(uint32_t paramId, float) override {
+        if (paramId == 0) {
+            setBypass(paramValues[0] > 0.5f);
+        }
+        updateRecovery();
+    }
+
+    void reset() override {
+        recovery.setSampleRate(static_cast<float>(sampleRate));
+        recovery.reset();
+        updateRecovery();
+    }
+
+    void processBlock(float** inputs, float** outputs, int32_t numFrames) override {
+        if (!inputs || !outputs || numFrames <= 0) return;
+        recovery.processBlockSplit(inputs, outputs, static_cast<size_t>(numFrames));
+    }
+};
+
+// ============================================================================
+// 19. Speech Dynamic Leveler (PluginTypeId = 13)
+// ============================================================================
+class NativeSpeechLevelerPlugin : public NativePluginBase {
+    DAWCore::SpeechLeveler leveler;
+
+public:
+    NativeSpeechLevelerPlugin()
+        : NativePluginBase("Speech Dynamic Leveler", "Dynamics", "vst-speech-leveler", 0)
+    {
+        registerParam(0, "Bypass", "", 0.0f);
+        registerParam(1, "Target Level", "dBFS", -18.0f);   // -36 .. 0 dBFS
+        registerParam(2, "Leveling Speed", "ms", 300.0f);   // 20 .. 1000 ms
+        registerParam(3, "Max Boost", "dB", 12.0f);         // 0 .. 24 dB
+        registerParam(4, "Max Cut", "dB", -18.0f);          // -36 .. 0 dB
+        registerParam(5, "Silence Gate", "dBFS", -45.0f);   // -70 .. -20 dBFS
+        registerParam(6, "Peak Ceiling", "dBFS", -2.0f);    // -12 .. 0 dBFS
+        registerParam(7, "Mix", "%", 100.0f);               // 0 .. 100%
+        leveler.setSampleRate(static_cast<float>(sampleRate));
+        updateLeveler();
+    }
+
+    void updateLeveler() {
+        DAWCore::SpeechLevelerParams p;
+        p.bypass = paramValues[0] > 0.5f;
+
+        float target = paramValues[1];
+        if (target > 0.0f && target <= 1.0f) {
+            p.targetLevelDb = -36.0f + target * 36.0f;
+        } else {
+            p.targetLevelDb = target;
+        }
+
+        float speed = paramValues[2];
+        if (speed > 0.0f && speed <= 1.0f) {
+            p.levelingSpeedMs = 20.0f + speed * 980.0f;
+        } else {
+            p.levelingSpeedMs = speed;
+        }
+
+        float maxB = paramValues[3];
+        if (maxB > 0.0f && maxB <= 1.0f) {
+            p.maxBoostDb = maxB * 24.0f;
+        } else {
+            p.maxBoostDb = maxB;
+        }
+
+        float maxC = paramValues[4];
+        if (maxC > 0.0f && maxC <= 1.0f) {
+            p.maxCutDb = -36.0f + maxC * 36.0f;
+        } else {
+            p.maxCutDb = maxC;
+        }
+
+        float gate = paramValues[5];
+        if (gate > 0.0f && gate <= 1.0f) {
+            p.silenceGateDb = -70.0f + gate * 50.0f;
+        } else {
+            p.silenceGateDb = gate;
+        }
+
+        float ceil = paramValues[6];
+        if (ceil > 0.0f && ceil <= 1.0f) {
+            p.peakCeilingDb = -12.0f + ceil * 12.0f;
+        } else {
+            p.peakCeilingDb = ceil;
+        }
+
+        float mixVal = paramValues[7];
+        if (mixVal > 1.0f) mixVal /= 100.0f;
+        p.mix = std::clamp(mixVal, 0.0f, 1.0f);
+
+        leveler.setParams(p);
+    }
+
+    void onParamChanged(uint32_t paramId, float) override {
+        if (paramId == 0) {
+            setBypass(paramValues[0] > 0.5f);
+        }
+        updateLeveler();
+    }
+
+    void reset() override {
+        leveler.setSampleRate(static_cast<float>(sampleRate));
+        leveler.reset();
+        updateLeveler();
+    }
+
+    void processBlock(float** inputs, float** outputs, int32_t numFrames) override {
+        if (!inputs || !outputs || numFrames <= 0) return;
+        leveler.processBlockSplit(inputs, outputs, static_cast<size_t>(numFrames));
+    }
+};
+
+// ============================================================================
 // Factory Helper (Поддержка создания по TypeID, ClassUID и SubPluginID)
 // ============================================================================
 inline std::unique_ptr<vomix::vst::IVSTPluginInstance> createNativePluginInstance(
@@ -1130,20 +1523,30 @@ inline std::unique_ptr<vomix::vst::IVSTPluginInstance> createNativePluginInstanc
         std::string uidStr(classUid);
         std::transform(uidStr.begin(), uidStr.end(), uidStr.begin(), ::tolower);
 
-        if (uidStr.find("cla76") != std::string::npos || uidStr.find("cla-76") != std::string::npos) {
+        if (uidStr.find("leveler") != std::string::npos || uidStr.find("speech-leveler") != std::string::npos || uidStr.find("speechleveler") != std::string::npos) {
+            effectiveTypeId = 13;
+        } else if (uidStr.find("headroom") != std::string::npos || uidStr.find("recovery") != std::string::npos || uidStr.find("preamp") != std::string::npos) {
+            effectiveTypeId = 12;
+        } else if (uidStr.find("dereverb") != std::string::npos || uidStr.find("de-reverb") != std::string::npos || uidStr.find("spectral-dereverb") != std::string::npos) {
+            effectiveTypeId = 11;
+        } else if (uidStr.find("thickener") != std::string::npos || uidStr.find("vocal-thickener") != std::string::npos || uidStr.find("tape-sat") != std::string::npos) {
+            effectiveTypeId = 10;
+        } else if (uidStr.find("deplosive") != std::string::npos || uidStr.find("de-plosive") != std::string::npos || uidStr.find("plosive") != std::string::npos) {
+            effectiveTypeId = 9;
+        } else if (uidStr.find("cla76") != std::string::npos || uidStr.find("cla-76") != std::string::npos) {
             effectiveTypeId = 3;
         } else if (uidStr.find("vocal") != std::string::npos || uidStr.find("rider") != std::string::npos) {
             effectiveTypeId = 2;
         } else if (uidStr.find("rvox") != std::string::npos || uidStr.find("r-vox") != std::string::npos || uidStr.find("renaissance vox") != std::string::npos) {
-            effectiveTypeId = 9;
+            effectiveTypeId = 15;
         } else if (uidStr.find("cla2a") != std::string::npos || uidStr.find("cla-2a") != std::string::npos) {
-            effectiveTypeId = 10;
+            effectiveTypeId = 16;
         } else if (uidStr.find("ssl") != std::string::npos) {
-            effectiveTypeId = 11;
+            effectiveTypeId = 17;
         } else if (uidStr.find("tune") != std::string::npos) {
-            effectiveTypeId = 12;
+            effectiveTypeId = 18;
         } else if (uidStr.find("hdelay") != std::string::npos || uidStr.find("h-delay") != std::string::npos) {
-            effectiveTypeId = 13;
+            effectiveTypeId = 19;
         } else if (uidStr.find("deesser") != std::string::npos || uidStr.find("de-esser") != std::string::npos) {
             effectiveTypeId = 14;
         } else if (uidStr.find("l2") != std::string::npos || uidStr.find("limiter") != std::string::npos) {
@@ -1163,13 +1566,18 @@ inline std::unique_ptr<vomix::vst::IVSTPluginInstance> createNativePluginInstanc
 
     if (effectiveTypeId <= 0 && subPluginId > 0) {
         // Проверка шелл-идентификатора Waves
-        if (subPluginId == 0x434c3736 /* 'CL76' */ || subPluginId == 3) effectiveTypeId = 3;
+        if (subPluginId == 0x53504c56 /* 'SPLV' */ || subPluginId == 13) effectiveTypeId = 13;
+        else if (subPluginId == 0x48454144 /* 'HEAD' */ || subPluginId == 12) effectiveTypeId = 12;
+        else if (subPluginId == 0x44524556 /* 'DREV' */ || subPluginId == 11) effectiveTypeId = 11;
+        else if (subPluginId == 0x54484943 /* 'THIC' */ || subPluginId == 10) effectiveTypeId = 10;
+        else if (subPluginId == 0x44504c53 /* 'DPLS' */ || subPluginId == 9) effectiveTypeId = 9;
+        else if (subPluginId == 0x434c3736 /* 'CL76' */ || subPluginId == 3) effectiveTypeId = 3;
         else if (subPluginId == 0x56435244 /* 'VCRD' */ || subPluginId == 2) effectiveTypeId = 2;
-        else if (subPluginId == 0x52564f58 /* 'RVOX' */ || subPluginId == 9) effectiveTypeId = 9;
-        else if (subPluginId == 0x434c3241 /* 'CL2A' */ || subPluginId == 10) effectiveTypeId = 10;
-        else if (subPluginId == 0x53534c47 /* 'SSLG' */ || subPluginId == 11) effectiveTypeId = 11;
-        else if (subPluginId == 0x5754554e /* 'WTUN' */ || subPluginId == 12) effectiveTypeId = 12;
-        else if (subPluginId == 0x48444c59 /* 'HDLY' */ || subPluginId == 13) effectiveTypeId = 13;
+        else if (subPluginId == 0x52564f58 /* 'RVOX' */ || subPluginId == 15) effectiveTypeId = 15;
+        else if (subPluginId == 0x434c3241 /* 'CL2A' */ || subPluginId == 16) effectiveTypeId = 16;
+        else if (subPluginId == 0x53534c47 /* 'SSLG' */ || subPluginId == 17) effectiveTypeId = 17;
+        else if (subPluginId == 0x5754554e /* 'WTUN' */ || subPluginId == 18) effectiveTypeId = 18;
+        else if (subPluginId == 0x48444c59 /* 'HDLY' */ || subPluginId == 19) effectiveTypeId = 19;
         else if (subPluginId == 0x44455353 /* 'DESS' */ || subPluginId == 14) effectiveTypeId = 14;
         else if (subPluginId == 0x57564c32 /* 'WVL2' */ || subPluginId == 8) effectiveTypeId = 8;
     }
@@ -1184,12 +1592,17 @@ inline std::unique_ptr<vomix::vst::IVSTPluginInstance> createNativePluginInstanc
         case 6: inst = std::make_unique<NativeSaturationPlugin>(); break;
         case 7: inst = std::make_unique<NativeRestorationPlugin>(); break;
         case 8: inst = std::make_unique<NativeLimiterPlugin>(); break;
-        case 9: inst = std::make_unique<NativeRVoxPlugin>(); break;
-        case 10: inst = std::make_unique<NativeCLA2APlugin>(); break;
-        case 11: inst = std::make_unique<NativeSSLGCompPlugin>(); break;
-        case 12: inst = std::make_unique<NativeWavesTunePlugin>(); break;
-        case 13: inst = std::make_unique<NativeHDelayPlugin>(); break;
+        case 9: inst = std::make_unique<NativeDePlosiveProPlugin>(); break;
+        case 10: inst = std::make_unique<NativeVocalThickenerPlugin>(); break;
+        case 11: inst = std::make_unique<NativeSpectralDeReverbPlugin>(); break;
+        case 12: inst = std::make_unique<NativeHeadroomRecoveryPlugin>(); break;
+        case 13: inst = std::make_unique<NativeSpeechLevelerPlugin>(); break;
         case 14: inst = std::make_unique<NativeDeEsserPlugin>(); break;
+        case 15: inst = std::make_unique<NativeRVoxPlugin>(); break;
+        case 16: inst = std::make_unique<NativeCLA2APlugin>(); break;
+        case 17: inst = std::make_unique<NativeSSLGCompPlugin>(); break;
+        case 18: inst = std::make_unique<NativeWavesTunePlugin>(); break;
+        case 19: inst = std::make_unique<NativeHDelayPlugin>(); break;
         default:
             inst = std::make_unique<NativeProQ3Plugin>(); break;
     }

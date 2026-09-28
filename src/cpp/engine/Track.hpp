@@ -11,6 +11,7 @@
  */
 
 #include "Clip.hpp"
+#include "TrackInsertChain.hpp"
 #include "../dsp/AudioMath.hpp"
 #include "../dsp/BiquadFilter.hpp"
 #include "../dsp/Dynamics.hpp"
@@ -101,6 +102,9 @@ public:
     // Встроенная цепочка студийной обработки VocalRack
     VocalRack vocalRack;
 
+    // Цепочка нативных инсерт-эффектов дорожки (16 DSP модулей)
+    TrackInsertChain insertChain;
+
     // Прямой доступ к компонентам для Embind и внешнего управления
     DeClicker& deClicker;
     DePlosive& dePlosive;
@@ -158,6 +162,20 @@ public:
     void setPluginBypass(int slotIdx, bool bypass);
     void setPluginWetDry(int slotIdx, float wetDry);
 
+    // --- Управление цепочкой нативных инсерт-эффектов (TrackInsertChain) ---
+    int addEffect(int effectTypeId) noexcept { return insertChain.addEffect(effectTypeId); }
+    bool removeEffect(int slotIdx) noexcept { return insertChain.removeEffect(slotIdx); }
+    void setEffectParam(int slotIdx, int paramId, float value) noexcept { insertChain.setParam(slotIdx, paramId, value); }
+    float getEffectParam(int slotIdx, int paramId) const noexcept { return insertChain.getParam(slotIdx, paramId); }
+    void setEffectBypass(int slotIdx, bool bypass) noexcept { insertChain.setBypass(slotIdx, bypass); }
+    bool isEffectBypassed(int slotIdx) const noexcept { return insertChain.isBypassed(slotIdx); }
+    bool reorderEffects(int fromIdx, int toIdx) noexcept { return insertChain.reorderEffects(fromIdx, toIdx); }
+    size_t getEffectCount() const noexcept { return insertChain.getEffectCount(); }
+    int getEffectTypeId(int slotIdx) const noexcept { return insertChain.getEffectTypeId(slotIdx); }
+    const char* getEffectName(int slotIdx) const noexcept { return insertChain.getEffectName(slotIdx); }
+    void clearEffects() noexcept { insertChain.clear(); }
+    void loadVocalDefaultChain() noexcept { insertChain.loadVocalDefaultChain(); }
+
     // --- Пиковые и RMS уровни ---
     float getPeakL() const noexcept { return peakL; }
     float getPeakR() const noexcept { return peakR; }
@@ -175,6 +193,11 @@ public:
      * Обработка содержимого trackBuffer через встроенный вокальный процессор
      */
     void processVocalRack(const float* sidechainMono, size_t numFrames) noexcept;
+
+    /**
+     * Обработка содержимого trackBuffer через цепочку нативных инсерт-эффектов
+     */
+    void processInsertChain(size_t numFrames) noexcept;
 
     /**
      * Последовательная обработка буфера через активные VST-плагины слотов

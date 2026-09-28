@@ -807,7 +807,7 @@ export class AutoTimingService {
       }
     });
 
-    // 2. Сегментация дорожек и первоначальная привязка к субтитрам
+    // 2. Сегментация дорожек и якорная привязка к субтитрам по ближайшему таймкоду (Anchor-Based Time Alignment)
     interface PositionedPhrase {
       speaker: string;
       cue: SubtitleCue;
@@ -827,7 +827,8 @@ export class AutoTimingService {
         return c.text && c.text.toLowerCase().includes(mapping.speaker.toLowerCase());
       });
 
-      if (actorCues.length === 0) return;
+      const cuesToMatch = actorCues.length > 0 ? actorCues : safeSubtitles;
+      if (cuesToMatch.length === 0) return;
 
       const trackIndex = workingTracks.findIndex((t) => t.id === mapping.trackId);
       if (trackIndex === -1) return;
@@ -835,41 +836,81 @@ export class AutoTimingService {
       const track = workingTracks[trackIndex];
       const phrases = this.sliceTrackIntoPhrases(track, sampleRate);
 
-      actorCues.forEach((cue, cueIdx) => {
-        let phraseClip: ClipConfig | null = null;
+      phrases.forEach((phraseClip) => {
+        if (!phraseClip || phraseClip.lengthSamples <= 0) return;
 
-        if (cueIdx < phrases.length) {
-          phraseClip = phrases[cueIdx];
-        } else if (phrases.length > 0) {
-          // Если фраз меньше чем сабов, клонируем структуру клипа
-          const baseClip = phrases[phrases.length - 1];
-          phraseClip = {
-            ...baseClip,
-            id: Date.now() + cue.index + Math.floor(Math.random() * 1000)
-          };
+        const baseBuffer = phraseClip.originalBuffer || phraseClip.buffer;
+        const baseLength = phraseClip.originalLengthSamples || phraseClip.lengthSamples;
+        const phraseOriginalTimeSec = (phraseClip.offsetSamples || 0) / sampleRate;
+        const phraseDurationSec = baseLength / sampleRate;
+
+        // Поиск субтитра с минимальным расстоянием: abs(phrase.originalTimeSec - cue.startSec)
+        let matchedCue: SubtitleCue | null = null;
+        let minDelta = Infinity;
+
+        for (const cue of cuesToMatch) {
+          const delta = Math.abs(phraseOriginalTimeSec - cue.startSec);
+          if (delta < minDelta) {
+            minDelta = delta;
+            matchedCue = cue;
+          }
         }
 
-        if (phraseClip) {
-          const durationSec = phraseClip.lengthSamples / sampleRate;
-          const targetStartSec = Math.max(0, cue.startSec);
-          const targetOffsetSamples = Math.round(targetStartSec * sampleRate);
+        if (!matchedCue) return;
 
-          const updatedClip: ClipConfig = {
-            ...phraseClip,
-            name: `[${mapping.speaker} #${cue.index}] ${cue.text.substring(0, 24)}...`,
-            offsetSamples: targetOffsetSamples
-          };
+        // Якорная фиксация начала фразы: offsetSamples жестко выставляется в Math.round(matchedCue.startSec * sampleRate)
+        const targetStartSec = Math.max(0, matchedCue.startSec);
+        const targetOffsetSamples = Math.round(targetStartSec * sampleRate);
+        const cueDurationSec = Math.max(0.2, matchedCue.endSec - matchedCue.startSec);
+        const rawRatio = cueDurationSec / phraseDurationSec;
 
-          allPositionedPhrases.push({
-            speaker: mapping.speaker,
-            cue,
-            trackId: mapping.trackId,
-            clip: updatedClip,
-            scheduledStartSec: targetStartSec,
-            durationSec,
-            scheduledEndSec: targetStartSec + durationSec
-          });
+        let clampedRatio = 1.0;
+        let finalLength = baseLength;
+        let finalBuffer = baseBuffer;
+
+        const isStereo = phraseClip.buffer.length >= phraseClip.lengthSamples * 2;
+
+        // Применение правил растяжения/сжатия WSOLA:
+        // - Если разница в пределах ±20%: применить WSOLA (ratio от 0.80 до 1.20)
+        // - Если разница больше 25%: НЕ растягивать, сохранить естественный темп (ratio = 1.0)
+        if (rawRatio >= 0.80 && rawRatio <= 1.20) {
+          clampedRatio = rawRatio;
+          finalLength = Math.round(baseLength * clampedRatio);
+          if (Math.abs(clampedRatio - 1.0) > 0.02) {
+            finalBuffer = globalNativeDAWBridge.processWSOLA(baseBuffer, clampedRatio, isStereo);
+          }
+        } else if (rawRatio < 0.75 || rawRatio > 1.25) {
+          clampedRatio = 1.0;
+          finalLength = baseLength;
+          finalBuffer = baseBuffer;
+        } else {
+          clampedRatio = Math.min(1.20, Math.max(0.80, rawRatio));
+          finalLength = Math.round(baseLength * clampedRatio);
+          finalBuffer = globalNativeDAWBridge.processWSOLA(baseBuffer, clampedRatio, isStereo);
         }
+
+        const durationSec = finalLength / sampleRate;
+
+        const updatedClip: ClipConfig = {
+          ...phraseClip,
+          name: `[${mapping.speaker} #${matchedCue.index}] ${matchedCue.text.substring(0, 24)}...`,
+          offsetSamples: targetOffsetSamples,
+          lengthSamples: finalLength,
+          buffer: finalBuffer,
+          originalBuffer: baseBuffer,
+          originalLengthSamples: baseLength,
+          timeStretchRatio: Math.round(clampedRatio * 100) / 100
+        };
+
+        allPositionedPhrases.push({
+          speaker: mapping.speaker,
+          cue: matchedCue,
+          trackId: mapping.trackId,
+          clip: updatedClip,
+          scheduledStartSec: targetStartSec,
+          durationSec,
+          scheduledEndSec: targetStartSec + durationSec
+        });
       });
     });
 

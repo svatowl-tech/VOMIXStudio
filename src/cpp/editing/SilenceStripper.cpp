@@ -4,6 +4,11 @@
  * ============================================================================
  * Полная реализация алгоритма мгновенного удаления тишины из начитки.
  * 
+ * Стандартизация размерностей (Строго во ФРЕЙМАХ):
+ * - offsetSamples — это ВСЕГДА смещение во ФРЕЙМАХ (1 сек = 48 000 фреймов).
+ * - lengthSamples — это ВСЕГДА длина во ФРЕЙМАХ (1 сек = 48 000 фреймов).
+ * - При обращении к float* буферу: size_t sampleIndex = frameOffset * channels.
+ * 
  * Особенности реализации:
  * 1. SIMD128 векторизация (wasm_f32x4_add, wasm_f32x4_mul, wasm_f32x4_max).
  * 2. Анализ энергии блоками по 10 мс.
@@ -141,11 +146,12 @@ size_t SilenceStripper::detectSegments(
 
     const float sampleRate = (config.sampleRate > 8000.0f) ? config.sampleRate : 48000.0f;
     const size_t channels = config.isStereo ? 2 : 1;
+    // Размерность строго во ФРЕЙМАХ: totalFrames = totalSamples / channels
     const size_t totalFrames = totalSamples / channels;
 
     if (totalFrames == 0) return 0;
 
-    // Расчет длительностей в кадрах (сэмплах на канал)
+    // Расчет длительностей во ФРЕЙМАХ (frames)
     const size_t frameSizeFrames = std::max<size_t>(16, static_cast<size_t>(config.frameSizeMs * 0.001f * sampleRate));
     const size_t minSilenceFrames = static_cast<size_t>(config.minSilenceMs * 0.001f * sampleRate);
     const size_t paddingFrames = static_cast<size_t>(config.paddingMs * 0.001f * sampleRate);
@@ -164,10 +170,11 @@ size_t SilenceStripper::detectSegments(
     double currentSegmentSumSq = 0.0;
     size_t currentSegmentSampleCount = 0;
 
-    // Линейный проход по PCM блоками по 10 мс без динамических аллокаций
+    // Линейный проход по PCM блоками по 10 мс во ФРЕЙМАХ
     for (size_t frameOffset = 0; frameOffset < totalFrames; frameOffset += frameSizeFrames) {
         const size_t currentBlockFrames = std::min(frameSizeFrames, totalFrames - frameOffset);
         const size_t currentBlockSamples = currentBlockFrames * channels;
+        // Доступ к сырому float* PCM буферу: индекс = frameOffset * channels
         const float* blockPtr = &inPcm[frameOffset * channels];
 
         // Векторизованный SIMD128 расчет энергии 10 мс блока
@@ -208,6 +215,7 @@ size_t SilenceStripper::detectSegments(
 
                     // Добавляем сегмент только если он длиннее минимальной реплики (70 мс)
                     if (segLengthFrames >= minSpeechFrames && segmentCount < maxSegments) {
+                        // Сохраняем offsetSamples и lengthSamples строго во ФРЕЙМАХ
                         outSegments[segmentCount].offsetSamples = currentSegmentStartFrame;
                         outSegments[segmentCount].lengthSamples = segLengthFrames;
                         outSegments[segmentCount].peakLevel = currentSegmentPeak;
@@ -238,6 +246,7 @@ size_t SilenceStripper::detectSegments(
             : 0;
 
         if (segLengthFrames >= minSpeechFrames) {
+            // Сохраняем offsetSamples и lengthSamples строго во ФРЕЙМАХ
             outSegments[segmentCount].offsetSamples = currentSegmentStartFrame;
             outSegments[segmentCount].lengthSamples = segLengthFrames;
             outSegments[segmentCount].peakLevel = currentSegmentPeak;

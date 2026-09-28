@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { MasterState } from '../audio/dawEngine';
+import { MasterState, TrackInsertEffect } from '../audio/dawEngine';
 import { VSTPluginInstance } from '../audio/vstTypes';
 import { VSTRackSlot } from './VSTRackSlot';
+import { TrackInsertRack } from './TrackInsertRack';
 import { Play, Pause, RotateCcw, Volume2, ShieldCheck, Activity, Layers, Sliders } from 'lucide-react';
 import { toSafeArray } from '../utils/safeIterables';
 
@@ -28,6 +29,7 @@ export const MasterSection: React.FC<MasterSectionProps> = ({
   onUpdateVstBypass,
   onUpdateVstWetDry
 }) => {
+  const [activeInsertTab, setActiveInsertTab] = useState<'fx' | 'vst'>('fx');
   const peakLevel = Math.max(master.peakL || 0, master.peakR || 0);
   const peakDb = peakLevel > 1e-4 ? 20 * Math.log10(peakLevel) : -120;
 
@@ -155,31 +157,96 @@ export const MasterSection: React.FC<MasterSectionProps> = ({
         </div>
       </div>
 
-      {/* VST Plugin Insert Rack for Master */}
-      <div className="pt-2 border-t border-slate-800/60">
-        <VSTRackSlot
-          plugins={toSafeArray<VSTPluginInstance>(master?.vstPlugins)}
-          title="Master Bus VST Inserts"
-          badge="Master FX"
-          color="#10b981"
-          onUpdateChain={(newChain) => {
-            const safeChain = toSafeArray<VSTPluginInstance>(newChain);
-            if (onUpdateVstChain) {
-              onUpdateVstChain(safeChain);
-            } else {
-              onUpdateMaster({ ...master, vstPlugins: safeChain });
-            }
-          }}
-          onUpdateParam={(instId, pId, val) => {
-            if (onUpdateVstParam) onUpdateVstParam(instId, pId, val);
-          }}
-          onUpdateBypass={(instId, enabled) => {
-            if (onUpdateVstBypass) onUpdateVstBypass(instId, enabled);
-          }}
-          onUpdateWetDry={(instId, wetDry) => {
-            if (onUpdateVstWetDry) onUpdateVstWetDry(instId, wetDry);
-          }}
-        />
+      {/* Нативные DSP модули (16 C++) и VST-инсерты мастер-секции */}
+      <div className="pt-2 border-t border-slate-800/60 space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs">
+            <button
+              onClick={() => setActiveInsertTab('fx')}
+              className={`px-3 py-1 rounded-lg font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                activeInsertTab === 'fx'
+                  ? 'bg-emerald-600 text-white shadow-md'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Sliders size={13} />
+              <span>DSP Инсерты ({(master.insertEffects || []).length})</span>
+            </button>
+            <button
+              onClick={() => setActiveInsertTab('vst')}
+              className={`px-3 py-1 rounded-lg font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                activeInsertTab === 'vst'
+                  ? 'bg-emerald-600 text-white shadow-md'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Layers size={13} />
+              <span>VST Плагины ({(master.vstPlugins || []).length})</span>
+            </button>
+          </div>
+          <span className="text-[10px] text-emerald-400 font-mono">
+            {activeInsertTab === 'fx' ? '16 C++ DSP модулей' : 'Мастеринг VST3 хост'}
+          </span>
+        </div>
+
+        {activeInsertTab === 'fx' ? (
+          <TrackInsertRack
+            trackId={1000}
+            trackName="Master Output"
+            trackColor="#10b981"
+            effects={master.insertEffects || []}
+            onUpdateEffects={(updated) => {
+              onUpdateMaster({ ...master, insertEffects: updated });
+            }}
+            onSetEffectParam={(slotIdx, paramId, val) => {
+              const currentEffects = [...(master.insertEffects || [])];
+              if (currentEffects[slotIdx]) {
+                currentEffects[slotIdx] = {
+                  ...currentEffects[slotIdx],
+                  params: {
+                    ...currentEffects[slotIdx].params,
+                    [paramId]: val
+                  }
+                };
+                onUpdateMaster({ ...master, insertEffects: currentEffects });
+              }
+            }}
+            onSetEffectBypass={(slotIdx, bypass) => {
+              const currentEffects = [...(master.insertEffects || [])];
+              if (currentEffects[slotIdx]) {
+                currentEffects[slotIdx] = {
+                  ...currentEffects[slotIdx],
+                  bypassed: bypass
+                };
+                onUpdateMaster({ ...master, insertEffects: currentEffects });
+              }
+            }}
+          />
+        ) : (
+          <VSTRackSlot
+            plugins={toSafeArray<VSTPluginInstance>(master?.vstPlugins)}
+            title="Master Bus VST Inserts"
+            badge="Master FX"
+            color="#10b981"
+            onUpdateChain={(newChain) => {
+              const safeChain = toSafeArray<VSTPluginInstance>(newChain);
+              if (onUpdateVstChain) {
+                onUpdateVstChain(safeChain);
+              } else {
+                onUpdateMaster({ ...master, vstPlugins: safeChain });
+              }
+            }}
+            onUpdateParam={(instId, pId, val) => {
+              if (onUpdateVstParam) onUpdateVstParam(instId, pId, val);
+            }}
+            onUpdateBypass={(instId, enabled) => {
+              if (onUpdateVstBypass) onUpdateVstBypass(instId, enabled);
+            }}
+            onUpdateWetDry={(instId, wetDry) => {
+              if (onUpdateVstWetDry) onUpdateVstWetDry(instId, wetDry);
+            }}
+          />
+        )}
       </div>
     </div>
   );

@@ -20,7 +20,12 @@ import {
   VSTScanStats,
   VSTPluginCategory,
   VSTPluginFormat,
-  VSTParameterDef
+  VSTParameterDef,
+  DE_PLOSIVE_PRO_DESCRIPTOR,
+  VOCAL_THICKENER_DESCRIPTOR,
+  SPECTRAL_DEREVERB_DESCRIPTOR,
+  HEADROOM_RECOVERY_DESCRIPTOR,
+  SPEECH_LEVELER_DESCRIPTOR
 } from '../audio/vstTypes';
 import { systemLogger } from './SystemLogger';
 import { TauriNativeBridge } from './TauriNativeBridge';
@@ -76,6 +81,11 @@ export const DEFAULT_VST_DIRECTORIES: VSTScanDirectory[] = [
 ];
 
 export const BUILT_IN_VST_LIBRARY: VSTPluginDefinition[] = [
+  SPEECH_LEVELER_DESCRIPTOR,
+  HEADROOM_RECOVERY_DESCRIPTOR,
+  DE_PLOSIVE_PRO_DESCRIPTOR,
+  VOCAL_THICKENER_DESCRIPTOR,
+  SPECTRAL_DEREVERB_DESCRIPTOR,
   {
     id: 'vst-pro-q3',
     name: 'FabFilter Pro-Q 3 (Parametric EQ)',

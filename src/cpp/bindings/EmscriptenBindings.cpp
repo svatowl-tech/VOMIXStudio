@@ -14,14 +14,37 @@
 #include "../dsp/AudioMath.hpp"
 #include "../dsp/BiquadFilter.hpp"
 #include "../dsp/Dynamics.hpp"
+#include "../dsp/StudioCompressor.hpp"
+#include "../dsp/ParametricEQPro.hpp"
+#include "../dsp/StudioReverb.hpp"
+#include "../dsp/FFTSpectralFilter.hpp"
+#include "../dsp/TransientShaper.hpp"
+#include "../dsp/GraphicEQ31.hpp"
+#include "../dsp/DynamicEQ.hpp"
+#include "../dsp/LinearPhaseFilter.hpp"
+#include "../dsp/ResonanceSuppressor.hpp"
+#include "../dsp/TapeSaturation.hpp"
+#include "../dsp/SmartBreathController.hpp"
+#include "../dsp/MouthDeClicker.hpp"
+#include "../dsp/ProximityControl.hpp"
+#include "../dsp/AutoPhaseAligner.hpp"
 #include "../dsp/AudioUtils.hpp"
+#include "../dsp/DeEsserPro.hpp"
+#include "../dsp/DePlosivePro.hpp"
+#include "../dsp/VocalThickener.hpp"
+#include "../dsp/SpectralDeReverb.hpp"
+#include "../dsp/HeadroomRecovery.hpp"
+#include "../dsp/SpeechLeveler.hpp"
+#include "../vst/NativeDSPPlugins.hpp"
 #include "../vocal/VocalRack.hpp"
 #include "../engine/Clip.hpp"
 #include "../engine/Track.hpp"
+#include "../engine/TrackInsertChain.hpp"
 #include "../engine/Mixer.hpp"
 #include "../editing/WSOLATimeStretch.hpp"
 #include "../editing/ClipEditor.hpp"
 #include "../editing/SilenceStripper.hpp"
+#include "../editing/PhraseLoudnessNormalizer.hpp"
 #include "../analysis/SpeechAligner.hpp"
 #include "../analysis/SubtitleAligner.hpp"
 #include "../analysis/StemSeparator.hpp"
@@ -645,7 +668,19 @@ EMSCRIPTEN_BINDINGS(daw_core_module) {
         .property("deEsser", &Track::getDeEsser, allow_raw_pointers())
         .property("compressor", &Track::getCompressor, allow_raw_pointers())
         .property("autoDucker", &Track::getAutoDucker, allow_raw_pointers())
-        .function("clearClips", &Track::clearClips);
+        .function("clearClips", &Track::clearClips)
+        .function("addEffect", &Track::addEffect)
+        .function("removeEffect", &Track::removeEffect)
+        .function("setEffectParam", &Track::setEffectParam)
+        .function("getEffectParam", &Track::getEffectParam)
+        .function("setEffectBypass", &Track::setEffectBypass)
+        .function("isEffectBypassed", &Track::isEffectBypassed)
+        .function("reorderEffects", &Track::reorderEffects)
+        .function("getEffectCount", &Track::getEffectCount)
+        .function("getEffectTypeId", &Track::getEffectTypeId)
+        .function("getEffectName", &Track::getEffectName, allow_raw_pointers())
+        .function("clearEffects", &Track::clearEffects)
+        .function("loadVocalDefaultChain", &Track::loadVocalDefaultChain);
 
     class_<Mixer>("Mixer")
         .constructor<float>()
@@ -658,6 +693,13 @@ EMSCRIPTEN_BINDINGS(daw_core_module) {
         .function("addTrack", &Mixer::addTrack, allow_raw_pointers())
         .function("getTrack", &Mixer::getTrack, allow_raw_pointers())
         .function("removeAllTracks", &Mixer::removeAllTracks)
+        .function("addTrackEffect", &Mixer::addTrackEffect)
+        .function("removeTrackEffect", &Mixer::removeTrackEffect)
+        .function("setTrackEffectParam", &Mixer::setTrackEffectParam)
+        .function("getTrackEffectParam", &Mixer::getTrackEffectParam)
+        .function("setTrackEffectBypass", &Mixer::setTrackEffectBypass)
+        .function("isTrackEffectBypassed", &Mixer::isTrackEffectBypassed)
+        .function("reorderTrackEffects", &Mixer::reorderTrackEffects)
         .function("setTimelinePosition", &Mixer::setTimelinePosition)
         .function("processBlock", &Mixer::processBlock, allow_raw_pointers())
         .function("renderProjectOffline", &Mixer::renderProjectOffline, allow_raw_pointers())
@@ -984,6 +1026,491 @@ EMSCRIPTEN_BINDINGS(daw_core_module) {
         MediaFileType type = ProjectIndexer::detectFileType(fileName);
         return ProjectIndexer::detectMimeType(fileName, type);
     }));
+
+    // PhraseLoudnessNormalizer bindings
+    value_object<PhraseNormalizerConfig>("PhraseNormalizerConfig")
+        .field("targetLufs", &PhraseNormalizerConfig::targetLufs)
+        .field("maxGainDb", &PhraseNormalizerConfig::maxGainDb)
+        .field("minGainDb", &PhraseNormalizerConfig::minGainDb)
+        .field("minSilenceDurationMs", &PhraseNormalizerConfig::minSilenceDurationMs)
+        .field("thresholdDb", &PhraseNormalizerConfig::thresholdDb)
+        .field("fadeTimeMs", &PhraseNormalizerConfig::fadeTimeMs)
+        .field("prePaddingMs", &PhraseNormalizerConfig::prePaddingMs)
+        .field("postPaddingMs", &PhraseNormalizerConfig::postPaddingMs)
+        .field("maxPeakDb", &PhraseNormalizerConfig::maxPeakDb);
+
+    value_object<PhraseInfo>("PhraseInfo")
+        .field("startFrame", &PhraseInfo::startFrame)
+        .field("endFrame", &PhraseInfo::endFrame)
+        .field("durationSec", &PhraseInfo::durationSec)
+        .field("measuredLufs", &PhraseInfo::measuredLufs)
+        .field("targetLufs", &PhraseInfo::targetLufs)
+        .field("appliedGainDb", &PhraseInfo::appliedGainDb)
+        .field("peakBeforeDb", &PhraseInfo::peakBeforeDb)
+        .field("peakAfterDb", &PhraseInfo::peakAfterDb);
+
+    register_vector<PhraseInfo>("VectorPhraseInfo");
+
+    value_object<PhraseNormalizerResult>("PhraseNormalizerResult")
+        .field("totalPhrases", &PhraseNormalizerResult::totalPhrases)
+        .field("averageInputLufs", &PhraseNormalizerResult::averageInputLufs)
+        .field("averageOutputLufs", &PhraseNormalizerResult::averageOutputLufs)
+        .field("maxBoostDb", &PhraseNormalizerResult::maxBoostDb)
+        .field("maxAttenuationDb", &PhraseNormalizerResult::maxAttenuationDb)
+        .field("phrases", &PhraseNormalizerResult::phrases);
+
+    function("normalizeTrackPhrasesNative", optional_override([](
+        uintptr_t bufferPtr,
+        size_t totalFrames,
+        int channels,
+        float sampleRate,
+        const PhraseNormalizerConfig& config
+    ) {
+        return PhraseLoudnessNormalizer::processTrackPhrasesNative(
+            bufferPtr, totalFrames, channels, sampleRate, config
+        );
+    }));
+
+    // StudioCompressor bindings
+    enum_<CompressorDetectionMode>("CompressorDetectionMode")
+        .value("Peak", CompressorDetectionMode::Peak)
+        .value("RMS", CompressorDetectionMode::RMS);
+
+    value_object<CompressorParams>("CompressorParams")
+        .field("thresholdDb", &CompressorParams::thresholdDb)
+        .field("ratio", &CompressorParams::ratio)
+        .field("attackMs", &CompressorParams::attackMs)
+        .field("releaseMs", &CompressorParams::releaseMs)
+        .field("kneeDb", &CompressorParams::kneeDb)
+        .field("makeupGainDb", &CompressorParams::makeupGainDb)
+        .field("stereoLink", &CompressorParams::stereoLink)
+        .field("dryWet", &CompressorParams::dryWet)
+        .field("enabled", &CompressorParams::enabled);
+
+    class_<StudioCompressor>("StudioCompressor")
+        .constructor<float>()
+        .function("setSampleRate", &StudioCompressor::setSampleRate)
+        .function("setParams", &StudioCompressor::setParams)
+        .function("getParams", &StudioCompressor::getParams)
+        .function("reset", &StudioCompressor::reset)
+        .function("getGainReductionDb", &StudioCompressor::getGainReductionDb)
+        .function("getPeakGainReductionDb", &StudioCompressor::getPeakGainReductionDb)
+        .function("resetMetering", &StudioCompressor::resetMetering)
+        .function("processBlockNative", optional_override([](
+            StudioCompressor& comp,
+            uintptr_t bufferPtr,
+            size_t numFrames,
+            int channels
+        ) {
+            float* buf = reinterpret_cast<float*>(bufferPtr);
+            comp.processBlock(buf, numFrames, channels);
+        }));
+
+    // ParametricEQPro bindings
+    enum_<EQFilterType>("EQFilterType")
+        .value("LowShelf", EQFilterType::LowShelf)
+        .value("Peaking", EQFilterType::Peaking)
+        .value("HighShelf", EQFilterType::HighShelf)
+        .value("HighPass", EQFilterType::HighPass)
+        .value("LowPass", EQFilterType::LowPass)
+        .value("Notch", EQFilterType::Notch);
+
+    value_object<EQBandParams>("EQBandParams")
+        .field("type", &EQBandParams::type)
+        .field("frequency", &EQBandParams::frequency)
+        .field("gainDb", &EQBandParams::gainDb)
+        .field("Q", &EQBandParams::Q)
+        .field("enabled", &EQBandParams::enabled);
+
+    class_<ParametricEQPro>("ParametricEQPro")
+        .constructor<double>()
+        .function("setSampleRate", &ParametricEQPro::setSampleRate)
+        .function("getSampleRate", &ParametricEQPro::getSampleRate)
+        .function("setBandParams", &ParametricEQPro::setBandParams)
+        .function("getBandParams", &ParametricEQPro::getBandParams)
+        .function("setOutputGainDb", &ParametricEQPro::setOutputGainDb)
+        .function("getOutputGainDb", &ParametricEQPro::getOutputGainDb)
+        .function("setEnabled", &ParametricEQPro::setEnabled)
+        .function("isEnabled", &ParametricEQPro::isEnabled)
+        .function("updateCoefficients", &ParametricEQPro::updateCoefficients)
+        .function("reset", &ParametricEQPro::reset)
+        .function("processBlockNative", optional_override([](
+            ParametricEQPro& eq,
+            uintptr_t bufferPtr,
+            size_t numFrames,
+            int channels
+        ) {
+            float* buf = reinterpret_cast<float*>(bufferPtr);
+            eq.processBlock(buf, numFrames, channels);
+        }));
+
+    // StudioReverb bindings
+    value_object<ReverbParams>("ReverbParams")
+        .field("roomSize", &ReverbParams::roomSize)
+        .field("damping", &ReverbParams::damping)
+        .field("wetDryMix", &ReverbParams::wetDryMix)
+        .field("preDelayMs", &ReverbParams::preDelayMs)
+        .field("stereoWidth", &ReverbParams::stereoWidth)
+        .field("lowCutHz", &ReverbParams::lowCutHz)
+        .field("enabled", &ReverbParams::enabled);
+
+    class_<StudioReverb>("StudioReverb")
+        .constructor<float>()
+        .function("setSampleRate", &StudioReverb::setSampleRate)
+        .function("setParams", &StudioReverb::setParams)
+        .function("getParams", &StudioReverb::getParams)
+        .function("reset", &StudioReverb::reset)
+        .function("processBlockNative", optional_override([](
+            StudioReverb& rev,
+            uintptr_t bufferPtr,
+            size_t numFrames,
+            int channels
+        ) {
+            float* buf = reinterpret_cast<float*>(bufferPtr);
+            rev.processBlock(buf, numFrames, channels);
+        }));
+
+    // FFTSpectralFilter bindings
+    register_vector<float>("VectorFloat");
+
+    class_<FFTSpectralFilter>("FFTSpectralFilter")
+        .constructor<size_t, float>()
+        .function("init", &FFTSpectralFilter::init)
+        .function("reset", &FFTSpectralFilter::reset)
+        .function("setFrequencyMask", &FFTSpectralFilter::setFrequencyMask)
+        .function("setBandGain", &FFTSpectralFilter::setBandGain)
+        .function("resetFrequencyMask", &FFTSpectralFilter::resetFrequencyMask)
+        .function("getFftSize", &FFTSpectralFilter::getFftSize)
+        .function("getHopSize", &FFTSpectralFilter::getHopSize)
+        .function("getLatencyFrames", &FFTSpectralFilter::getLatencyFrames)
+        .function("processBlockNative", optional_override([](
+            FFTSpectralFilter& filter,
+            uintptr_t bufferPtr,
+            size_t numFrames,
+            int channels
+        ) {
+            float* buf = reinterpret_cast<float*>(bufferPtr);
+            filter.processBlock(buf, numFrames, channels);
+        }));
+
+    // TransientShaper bindings
+    value_object<TransientShaperParams>("TransientShaperParams")
+        .field("attackGainDb", &TransientShaperParams::attackGainDb)
+        .field("sustainGainDb", &TransientShaperParams::sustainGainDb)
+        .field("fastWindowMs", &TransientShaperParams::fastWindowMs)
+        .field("slowWindowMs", &TransientShaperParams::slowWindowMs)
+        .field("outputGainDb", &TransientShaperParams::outputGainDb)
+        .field("softClip", &TransientShaperParams::softClip)
+        .field("enabled", &TransientShaperParams::enabled);
+
+    class_<TransientShaper>("TransientShaper")
+        .constructor<float>()
+        .function("setSampleRate", &TransientShaper::setSampleRate)
+        .function("setParams", &TransientShaper::setParams)
+        .function("getParams", &TransientShaper::getParams)
+        .function("reset", &TransientShaper::reset)
+        .function("getCurrentTransientLevel", &TransientShaper::getCurrentTransientLevel)
+        .function("getCurrentSustainLevel", &TransientShaper::getCurrentSustainLevel)
+        .function("processBlockNative", optional_override([](
+            TransientShaper& shaper,
+            uintptr_t bufferPtr,
+            size_t numFrames,
+            int channels
+        ) {
+            float* buf = reinterpret_cast<float*>(bufferPtr);
+            shaper.processBlock(buf, numFrames, channels);
+        }));
+
+    // GraphicEQ31 bindings
+    class_<GraphicEQ31>("GraphicEQ31")
+        .constructor<double>()
+        .function("setSampleRate", &GraphicEQ31::setSampleRate)
+        .function("getSampleRate", &GraphicEQ31::getSampleRate)
+        .function("setBandGain", &GraphicEQ31::setBandGain)
+        .function("getBandGain", &GraphicEQ31::getBandGain)
+        .function("getBandFrequency", &GraphicEQ31::getBandFrequency)
+        .function("resetAllBands", &GraphicEQ31::resetAllBands)
+        .function("setMasterGainDb", &GraphicEQ31::setMasterGainDb)
+        .function("getMasterGainDb", &GraphicEQ31::getMasterGainDb)
+        .function("setEnabled", &GraphicEQ31::setEnabled)
+        .function("isEnabled", &GraphicEQ31::isEnabled)
+        .function("reset", &GraphicEQ31::reset)
+        .function("processBlockNative", optional_override([](
+            GraphicEQ31& eq,
+            uintptr_t bufferPtr,
+            size_t numFrames,
+            int channels
+        ) {
+            float* buf = reinterpret_cast<float*>(bufferPtr);
+            eq.processBlock(buf, numFrames, channels);
+        }));
+
+    // DynamicEQ bindings
+    value_object<DynamicEQBand>("DynamicEQBand")
+        .field("frequency", &DynamicEQBand::frequency)
+        .field("Q", &DynamicEQBand::Q)
+        .field("baseGainDb", &DynamicEQBand::baseGainDb)
+        .field("thresholdDb", &DynamicEQBand::thresholdDb)
+        .field("ratio", &DynamicEQBand::ratio)
+        .field("attackMs", &DynamicEQBand::attackMs)
+        .field("releaseMs", &DynamicEQBand::releaseMs)
+        .field("maxDynamicGainDb", &DynamicEQBand::maxDynamicGainDb)
+        .field("isDownward", &DynamicEQBand::isDownward)
+        .field("enabled", &DynamicEQBand::enabled);
+
+    class_<DynamicEQ>("DynamicEQ")
+        .constructor<double>()
+        .function("setSampleRate", &DynamicEQ::setSampleRate)
+        .function("getSampleRate", &DynamicEQ::getSampleRate)
+        .function("setBandParams", &DynamicEQ::setBandParams)
+        .function("getBandParams", &DynamicEQ::getBandParams)
+        .function("getDynamicGainReductionDb", &DynamicEQ::getDynamicGainReductionDb)
+        .function("setOutputGainDb", &DynamicEQ::setOutputGainDb)
+        .function("getOutputGainDb", &DynamicEQ::getOutputGainDb)
+        .function("setEnabled", &DynamicEQ::setEnabled)
+        .function("isEnabled", &DynamicEQ::isEnabled)
+        .function("reset", &DynamicEQ::reset)
+        .function("processBlockNative", optional_override([](
+            DynamicEQ& eq,
+            uintptr_t bufferPtr,
+            size_t numFrames,
+            int channels
+        ) {
+            float* buf = reinterpret_cast<float*>(bufferPtr);
+            eq.processBlock(buf, numFrames, channels);
+        }));
+
+    // LinearPhaseFilter bindings
+    enum_<FIRWindowType>("FIRWindowType")
+        .value("Hann", FIRWindowType::Hann)
+        .value("Hamming", FIRWindowType::Hamming)
+        .value("Blackman", FIRWindowType::Blackman)
+        .value("BlackmanHarris", FIRWindowType::BlackmanHarris)
+        .value("Rectangular", FIRWindowType::Rectangular);
+
+    value_object<LinearPhaseParams>("LinearPhaseParams")
+        .field("hpFreq", &LinearPhaseParams::hpFreq)
+        .field("lpFreq", &LinearPhaseParams::lpFreq)
+        .field("filterOrder", &LinearPhaseParams::filterOrder)
+        .field("windowType", &LinearPhaseParams::windowType)
+        .field("enabled", &LinearPhaseParams::enabled);
+
+    class_<LinearPhaseFilter>("LinearPhaseFilter")
+        .constructor<float>()
+        .function("setSampleRate", &LinearPhaseFilter::setSampleRate)
+        .function("getSampleRate", &LinearPhaseFilter::getSampleRate)
+        .function("setParams", &LinearPhaseFilter::setParams)
+        .function("getParams", &LinearPhaseFilter::getParams)
+        .function("getGroupDelaySamples", &LinearPhaseFilter::getGroupDelaySamples)
+        .function("reset", &LinearPhaseFilter::reset)
+        .function("processBlockNative", optional_override([](
+            LinearPhaseFilter& filter,
+            uintptr_t bufferPtr,
+            size_t numFrames,
+            int channels
+        ) {
+            float* buf = reinterpret_cast<float*>(bufferPtr);
+            filter.processBlock(buf, numFrames, channels);
+        }));
+
+    // ResonanceSuppressor bindings
+    value_object<ResonanceSuppressorParams>("ResonanceSuppressorParams")
+        .field("sensitivity", &ResonanceSuppressorParams::sensitivity)
+        .field("maxAttenuationDb", &ResonanceSuppressorParams::maxAttenuationDb)
+        .field("maxNotches", &ResonanceSuppressorParams::maxNotches)
+        .field("minFreq", &ResonanceSuppressorParams::minFreq)
+        .field("maxFreq", &ResonanceSuppressorParams::maxFreq)
+        .field("sharpness", &ResonanceSuppressorParams::sharpness)
+        .field("attackMs", &ResonanceSuppressorParams::attackMs)
+        .field("releaseMs", &ResonanceSuppressorParams::releaseMs)
+        .field("enabled", &ResonanceSuppressorParams::enabled);
+
+    class_<ResonanceSuppressor>("ResonanceSuppressor")
+        .constructor<float>()
+        .function("setSampleRate", &ResonanceSuppressor::setSampleRate)
+        .function("getSampleRate", &ResonanceSuppressor::getSampleRate)
+        .function("setParams", &ResonanceSuppressor::setParams)
+        .function("getParams", &ResonanceSuppressor::getParams)
+        .function("reset", &ResonanceSuppressor::reset)
+        .function("getActiveNotchCount", &ResonanceSuppressor::getActiveNotchCount)
+        .function("getNotchFrequency", &ResonanceSuppressor::getNotchFrequency)
+        .function("getNotchAttenuationDb", &ResonanceSuppressor::getNotchAttenuationDb)
+        .function("processBlockNative", optional_override([](
+            ResonanceSuppressor& suppressor,
+            uintptr_t bufferPtr,
+            size_t numFrames,
+            int channels
+        ) {
+            float* buf = reinterpret_cast<float*>(bufferPtr);
+            suppressor.processBlock(buf, numFrames, channels);
+        }));
+
+    // TapeSaturation bindings
+    value_object<TapeParams>("TapeParams")
+        .field("driveDb", &TapeParams::driveDb)
+        .field("bias", &TapeParams::bias)
+        .field("saturationMix", &TapeParams::saturationMix)
+        .field("lowFreqColor", &TapeParams::lowFreqColor)
+        .field("highFreqRolloff", &TapeParams::highFreqRolloff)
+        .field("outputGainDb", &TapeParams::outputGainDb)
+        .field("autoGain", &TapeParams::autoGain)
+        .field("enabled", &TapeParams::enabled);
+
+    class_<TapeSaturation>("TapeSaturation")
+        .constructor<float>()
+        .function("setSampleRate", &TapeSaturation::setSampleRate)
+        .function("getSampleRate", &TapeSaturation::getSampleRate)
+        .function("setParams", &TapeSaturation::setParams)
+        .function("getParams", &TapeSaturation::getParams)
+        .function("reset", &TapeSaturation::reset)
+        .function("processBlockNative", optional_override([](
+            TapeSaturation& tape,
+            uintptr_t bufferPtr,
+            size_t numFrames,
+            int channels
+        ) {
+            float* buf = reinterpret_cast<float*>(bufferPtr);
+            tape.processBlock(buf, numFrames, channels);
+        }));
+
+    // SmartBreathController bindings
+    value_object<BreathControllerParams>("BreathControllerParams")
+        .field("targetReductionDb", &BreathControllerParams::targetReductionDb)
+        .field("sensitivity", &BreathControllerParams::sensitivity)
+        .field("lookaheadMs", &BreathControllerParams::lookaheadMs)
+        .field("attackMs", &BreathControllerParams::attackMs)
+        .field("releaseMs", &BreathControllerParams::releaseMs)
+        .field("minLevelDb", &BreathControllerParams::minLevelDb)
+        .field("maxLevelDb", &BreathControllerParams::maxLevelDb)
+        .field("enabled", &BreathControllerParams::enabled);
+
+    class_<SmartBreathController>("SmartBreathController")
+        .constructor<float>()
+        .function("setSampleRate", &SmartBreathController::setSampleRate)
+        .function("getSampleRate", &SmartBreathController::getSampleRate)
+        .function("setParams", &SmartBreathController::setParams)
+        .function("getParams", &SmartBreathController::getParams)
+        .function("getLatencySamples", &SmartBreathController::getLatencySamples)
+        .function("reset", &SmartBreathController::reset)
+        .function("isBreathActive", &SmartBreathController::isBreathActive)
+        .function("getCurrentAttenuationDb", &SmartBreathController::getCurrentAttenuationDb)
+        .function("processBlockNative", optional_override([](
+            SmartBreathController& controller,
+            uintptr_t bufferPtr,
+            size_t numFrames,
+            int channels
+        ) {
+            float* buf = reinterpret_cast<float*>(bufferPtr);
+            controller.processBlock(buf, numFrames, channels);
+        }));
+
+    // MouthDeClicker bindings
+    value_object<MouthDeClickerParams>("MouthDeClickerParams")
+        .field("sensitivity", &MouthDeClickerParams::sensitivity)
+        .field("maxClickDurationSamples", &MouthDeClickerParams::maxClickDurationSamples)
+        .field("highPassCutoff", &MouthDeClickerParams::highPassCutoff)
+        .field("wideningMargin", &MouthDeClickerParams::wideningMargin)
+        .field("enabled", &MouthDeClickerParams::enabled);
+
+    class_<MouthDeClicker>("MouthDeClicker")
+        .constructor<float>()
+        .function("setSampleRate", &MouthDeClicker::setSampleRate)
+        .function("getSampleRate", &MouthDeClicker::getSampleRate)
+        .function("setParams", &MouthDeClicker::setParams)
+        .function("getParams", &MouthDeClicker::getParams)
+        .function("getLatencySamples", &MouthDeClicker::getLatencySamples)
+        .function("reset", &MouthDeClicker::reset)
+        .function("getTotalClicksRepaired", &MouthDeClicker::getTotalClicksRepaired)
+        .function("processBlockNative", optional_override([](
+            MouthDeClicker& declicker,
+            uintptr_t bufferPtr,
+            size_t numFrames,
+            int channels
+        ) {
+            float* buf = reinterpret_cast<float*>(bufferPtr);
+            declicker.processBlock(buf, numFrames, channels);
+        }));
+
+    // ProximityControl bindings
+    value_object<ProximityParams>("ProximityParams")
+        .field("cutoffFrequency", &ProximityParams::cutoffFrequency)
+        .field("thresholdDb", &ProximityParams::thresholdDb)
+        .field("maxReductionDb", &ProximityParams::maxReductionDb)
+        .field("responseMs", &ProximityParams::responseMs)
+        .field("releaseMs", &ProximityParams::releaseMs)
+        .field("sensitivity", &ProximityParams::sensitivity)
+        .field("enabled", &ProximityParams::enabled);
+
+    class_<ProximityControl>("ProximityControl")
+        .constructor<float>()
+        .function("setSampleRate", &ProximityControl::setSampleRate)
+        .function("getSampleRate", &ProximityControl::getSampleRate)
+        .function("setParams", &ProximityControl::setParams)
+        .function("getParams", &ProximityControl::getParams)
+        .function("reset", &ProximityControl::reset)
+        .function("getCurrentAttenuationDb", &ProximityControl::getCurrentAttenuationDb)
+        .function("getProximityRatioDb", &ProximityControl::getProximityRatioDb)
+        .function("processBlockNative", optional_override([](
+            ProximityControl& proximity,
+            uintptr_t bufferPtr,
+            size_t numFrames,
+            int channels
+        ) {
+            float* buf = reinterpret_cast<float*>(bufferPtr);
+            proximity.processBlock(buf, numFrames, channels);
+        }));
+
+    // AutoPhaseAligner bindings
+    value_object<PhaseAlignResult>("PhaseAlignResult")
+        .field("delayMs", &PhaseAlignResult::delayMs)
+        .field("delaySamples", &PhaseAlignResult::delaySamples)
+        .field("correlation", &PhaseAlignResult::correlation)
+        .field("phaseInverted", &PhaseAlignResult::phaseInverted)
+        .field("coherenceScore", &PhaseAlignResult::coherenceScore);
+
+    value_object<AutoPhaseParams>("AutoPhaseParams")
+        .field("maxShiftMs", &AutoPhaseParams::maxShiftMs)
+        .field("autoInvertPolarity", &AutoPhaseParams::autoInvertPolarity)
+        .field("enabled", &AutoPhaseParams::enabled);
+
+    class_<AutoPhaseAligner>("AutoPhaseAligner")
+        .constructor<float>()
+        .function("setSampleRate", &AutoPhaseAligner::setSampleRate)
+        .function("getSampleRate", &AutoPhaseAligner::getSampleRate)
+        .function("setParams", &AutoPhaseAligner::setParams)
+        .function("getParams", &AutoPhaseAligner::getParams)
+        .function("reset", &AutoPhaseAligner::reset)
+        .function("analyzePhaseNative", optional_override([](
+            AutoPhaseAligner& aligner,
+            uintptr_t refPtr,
+            uintptr_t tgtPtr,
+            size_t numFrames,
+            float maxShiftMs
+        ) {
+            const float* ref = reinterpret_cast<const float*>(refPtr);
+            const float* tgt = reinterpret_cast<const float*>(tgtPtr);
+            return aligner.analyzePhase(ref, tgt, numFrames, maxShiftMs);
+        }))
+        .function("alignSignalsNative", optional_override([](
+            AutoPhaseAligner& aligner,
+            uintptr_t refPtr,
+            uintptr_t tgtPtr,
+            size_t numFrames,
+            float maxShiftMs
+        ) {
+            const float* ref = reinterpret_cast<const float*>(refPtr);
+            float* tgt = reinterpret_cast<float*>(tgtPtr);
+            return aligner.alignSignals(ref, tgt, numFrames, maxShiftMs);
+        }))
+        .function("processBlockNative", optional_override([](
+            AutoPhaseAligner& aligner,
+            uintptr_t bufferPtr,
+            size_t numFrames,
+            int channels
+        ) {
+            float* buf = reinterpret_cast<float*>(bufferPtr);
+            aligner.processBlock(buf, numFrames, channels);
+        }));
 }
 
 #endif // __EMSCRIPTEN__
@@ -1375,6 +1902,47 @@ int extractWaveformRMS(
         isStereo != 0,
         outRms
     );
+}
+
+// ============================================================================
+// Управление цепочкой инсерт-эффектов дорожки (TrackInsertChain)
+// ============================================================================
+
+EMSCRIPTEN_KEEPALIVE
+int addTrackEffect(uintptr_t mixerPtr, int trackId, int effectTypeId) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return -1;
+    return mixer->addTrackEffect(static_cast<uint32_t>(trackId), effectTypeId);
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool removeTrackEffect(uintptr_t mixerPtr, int trackId, int slotIdx) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    return mixer->removeTrackEffect(static_cast<uint32_t>(trackId), slotIdx);
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool setTrackEffectParam(uintptr_t mixerPtr, int trackId, int slotIdx, int paramId, float value) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    mixer->setTrackEffectParam(static_cast<uint32_t>(trackId), slotIdx, paramId, value);
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool setTrackEffectBypass(uintptr_t mixerPtr, int trackId, int slotIdx, int bypass) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    mixer->setTrackEffectBypass(static_cast<uint32_t>(trackId), slotIdx, bypass != 0);
+    return true;
+}
+
+EMSCRIPTEN_KEEPALIVE
+bool reorderTrackEffects(uintptr_t mixerPtr, int trackId, int fromIdx, int toIdx) {
+    auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
+    if (!mixer) return false;
+    return mixer->reorderTrackEffects(static_cast<uint32_t>(trackId), fromIdx, toIdx);
 }
 
 } // extern "C"

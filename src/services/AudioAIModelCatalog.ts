@@ -222,6 +222,21 @@ export const OFFICIAL_AUDIO_AI_MODELS: ModelCatalogItem[] = [
   // 2. DEREVERBERATION & DE-ECHO (Подавление реверберации и комнатного эха)
   // =========================================================================
   {
+    id: 'vst-spectral-dereverb',
+    name: 'Spectral De-Reverb Lite (Native C++ DSP)',
+    filename: 'SpectralDeReverb.dsp',
+    category: 'dereverb',
+    description: '16-полосный нативный C++ алгоритм вычитания диффузного хвоста реверберации с нулевой задержкой без нейросетей.',
+    size_mb: 0.1,
+    recommended_for: 'Мгновенное бессерверное устранение эха без задержки и без нагрузки на GPU/RAM',
+    urls: [],
+    is_installed: true,
+    installed_bytes: 1024,
+    local_path: 'built-in://dsp/spectral-dereverb',
+    format: 'built-in-dsp',
+    engineArchitecture: '16-Band Filterbank Energy Decay Subtraction'
+  },
+  {
     id: 'reverb_foxjoy',
     name: 'Reverb HQ (FoxJoy)',
     filename: 'Reverb_HQ_By_FoxJoy.onnx',
@@ -508,6 +523,21 @@ export const OFFICIAL_AUDIO_AI_MODELS: ModelCatalogItem[] = [
     local_path: 'built-in-dsp',
     format: 'built-in-dsp',
     engineArchitecture: 'Formant Dynamics & Resonant Envelope Transfer'
+  },
+  {
+    id: 'vst-speech-leveler',
+    name: 'Speech Dynamic Leveler (Native C++ DSP)',
+    filename: 'SpeechLeveler.dsp',
+    category: 'vocal_match',
+    description: 'Двухступенчатый авто-фейдер речи: медленный RMS левеллер (250-500 мс) с Gate Freeze в паузах и быстрый пиковый лимитер выкриков.',
+    size_mb: 0.1,
+    recommended_for: 'Автоматическое выравнивание шепота и криков без пампинга пауз и артефактов',
+    urls: [],
+    is_installed: true,
+    installed_bytes: 1024,
+    local_path: 'built-in://dsp/speech-leveler',
+    format: 'built-in-dsp',
+    engineArchitecture: 'Slow RMS Leveller + Fast Peak Tame Limiter'
   }
 ];
 

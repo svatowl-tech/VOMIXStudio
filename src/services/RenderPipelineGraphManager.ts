@@ -25,6 +25,23 @@ export type PipelineNodeType =
   | 'loudness_align'
   | 'transient_shaper'
   | 'master_limiter'
+  // 16 Нативных C++17 DSP модулей
+  | 'dsp_phrase_leveler'
+  | 'dsp_studio_compressor'
+  | 'dsp_parametric_eq'
+  | 'dsp_dynamic_eq'
+  | 'dsp_graphic_eq31'
+  | 'dsp_de_esser'
+  | 'dsp_smart_breath'
+  | 'dsp_mouth_declicker'
+  | 'dsp_proximity_control'
+  | 'dsp_phase_aligner'
+  | 'dsp_transient_shaper'
+  | 'dsp_resonance_suppressor'
+  | 'dsp_tape_saturation'
+  | 'dsp_linear_phase_filter'
+  | 'dsp_studio_reverb'
+  | 'dsp_fft_spectral_filter'
   // 5. Маршрутизация, отшивание, сплиттеры, микшеры
   | 'node_branch_split'
   | 'node_mixer_merge'
@@ -540,6 +557,238 @@ export const NODE_DEFINITIONS: Record<
       { id: 'out_limited', label: 'Лимитированный Мастер', type: 'audio', color: '#06b6d4' }
     ],
     defaultParams: { ceilingDb: -0.5, releaseMs: 100, lookaheadMs: 5 }
+  },
+
+  // --- 16 Нативных C++17 DSP модулей ---
+  dsp_phrase_leveler: {
+    title: 'DSP: Phrase Leveler (101)',
+    description: 'Интеллектуальное RMS выравнивание громкости речевых фраз (Speech-Gated Leveler)',
+    category: 'dsp',
+    iconName: 'Gauge',
+    color: '#3b82f6',
+    defaultInputs: [
+      { id: 'in_audio', label: 'Аудио Вход', type: 'audio', color: '#3b82f6' }
+    ],
+    defaultOutputs: [
+      { id: 'out_audio', label: 'Выровненный Сигнал', type: 'audio', color: '#3b82f6' },
+      { id: 'out_dry', label: 'Dry Thru', type: 'audio', color: '#64748b' }
+    ],
+    defaultParams: { targetRmsDb: -18, maxBoostDb: 12, maxCutDb: 12, gateThresholdDb: -48, attackMs: 50, releaseMs: 300, sensitivity: 0.7 }
+  },
+  dsp_studio_compressor: {
+    title: 'DSP: Studio Compressor (102)',
+    description: 'Прецизионный VCA/Opto студийный компрессор с мягким коленом (Soft-Knee)',
+    category: 'dsp',
+    iconName: 'Activity',
+    color: '#06b6d4',
+    defaultInputs: [
+      { id: 'in_audio', label: 'Аудио Вход', type: 'audio', color: '#06b6d4' },
+      { id: 'in_sidechain', label: 'Sidechain Trigger', type: 'sidechain', color: '#f59e0b' }
+    ],
+    defaultOutputs: [
+      { id: 'out_audio', label: 'Скомпрессированный', type: 'audio', color: '#06b6d4' },
+      { id: 'out_gain_reduction', label: 'Gain Reduction', type: 'sync', color: '#f43f5e' }
+    ],
+    defaultParams: { thresholdDb: -18, ratio: 4.0, attackMs: 15, releaseMs: 150, kneeDb: 6.0, makeupGainDb: 0, dryWet: 1.0 }
+  },
+  dsp_parametric_eq: {
+    title: 'DSP: Parametric EQ Pro (103)',
+    description: '5-полосный параметрический эквалайзер аудиофильского класса (Biquad Pro)',
+    category: 'dsp',
+    iconName: 'Sliders',
+    color: '#10b981',
+    defaultInputs: [
+      { id: 'in_audio', label: 'Аудио Вход', type: 'audio', color: '#10b981' }
+    ],
+    defaultOutputs: [
+      { id: 'out_audio', label: 'Эквалайзер Out', type: 'audio', color: '#10b981' }
+    ],
+    defaultParams: { b1_freq: 80, b1_gain: 0, b1_q: 0.707, b2_freq: 300, b2_gain: 0, b2_q: 1.0, b3_freq: 1200, b3_gain: 0, b3_q: 1.0, b4_freq: 4500, b4_gain: 0, b4_q: 1.0, b5_freq: 12000, b5_gain: 0, b5_q: 0.707 }
+  },
+  dsp_dynamic_eq: {
+    title: 'DSP: Dynamic EQ (104)',
+    description: 'Динамический эквалайзер для подавления резонансов и адаптивной коррекции тембра',
+    category: 'dsp',
+    iconName: 'Activity',
+    color: '#14b8a6',
+    defaultInputs: [
+      { id: 'in_audio', label: 'Аудио Вход', type: 'audio', color: '#14b8a6' }
+    ],
+    defaultOutputs: [
+      { id: 'out_audio', label: 'Динамический EQ Out', type: 'audio', color: '#14b8a6' }
+    ],
+    defaultParams: { centerFreq: 3200, q: 2.0, thresholdDb: -20, maxGainDb: -9, attackMs: 10, releaseMs: 100, mode: 0 }
+  },
+  dsp_graphic_eq31: {
+    title: 'DSP: Graphic EQ 31 (105)',
+    description: '31-полосный 1/3-октавный графический мастер-эквалайзер (20 Гц .. 20 кГц)',
+    category: 'dsp',
+    iconName: 'Sliders',
+    color: '#22c55e',
+    defaultInputs: [
+      { id: 'in_audio', label: 'Аудио Вход', type: 'audio', color: '#22c55e' }
+    ],
+    defaultOutputs: [
+      { id: 'out_audio', label: 'Graphic EQ Out', type: 'audio', color: '#22c55e' }
+    ],
+    defaultParams: { band1: 0, band8: 0, band16: 0, band24: 0, band31: 0, masterGain: 0 }
+  },
+  dsp_de_esser: {
+    title: 'DSP: De-Esser Pro (106)',
+    description: 'Узкополосный спектральный де-эссер свистящих согласных (С, З, Щ, Ц)',
+    category: 'dsp',
+    iconName: 'Scissors',
+    color: '#f59e0b',
+    defaultInputs: [
+      { id: 'in_audio', label: 'Аудио Вход', type: 'audio', color: '#f59e0b' }
+    ],
+    defaultOutputs: [
+      { id: 'out_audio', label: 'Чистый Голос', type: 'audio', color: '#f59e0b' },
+      { id: 'out_sibilance', label: 'Сибилянты Listen', type: 'audio', color: '#ec4899' }
+    ],
+    defaultParams: { freq: 6500, bandwidth: 2000, thresholdDb: -22, ratio: 6.0, attackMs: 1.0, releaseMs: 50, listenMode: 0 }
+  },
+  dsp_smart_breath: {
+    title: 'DSP: Smart Breath Controller (107)',
+    description: 'Интеллектуальное обнаружение и мягкое подавление вдохов диктора в паузах',
+    category: 'dsp',
+    iconName: 'Sparkles',
+    color: '#84cc16',
+    defaultInputs: [
+      { id: 'in_audio', label: 'Аудио Вход', type: 'audio', color: '#84cc16' }
+    ],
+    defaultOutputs: [
+      { id: 'out_audio', label: 'Без Вдохов', type: 'audio', color: '#84cc16' }
+    ],
+    defaultParams: { thresholdDb: -32, reductionDb: -14, targetGainDb: 0, attackMs: 20, releaseMs: 120 }
+  },
+  dsp_mouth_declicker: {
+    title: 'DSP: Mouth De-Clicker (108)',
+    description: 'Удаление слюнных щелчков, причмокиваний и артикуляционных импульсов',
+    category: 'dsp',
+    iconName: 'Zap',
+    color: '#e11d48',
+    defaultInputs: [
+      { id: 'in_audio', label: 'Аудио Вход', type: 'audio', color: '#e11d48' }
+    ],
+    defaultOutputs: [
+      { id: 'out_audio', label: 'Декликнутый Сигнал', type: 'audio', color: '#e11d48' },
+      { id: 'out_clicks', label: 'Щелчки Listen', type: 'sync', color: '#f43f5e' }
+    ],
+    defaultParams: { sensitivity: 60, maxClickWidth: 80, strength: 85 }
+  },
+  dsp_proximity_control: {
+    title: 'DSP: Dynamic Proximity (109)',
+    description: 'Компенсация эффекта приближения к микрофону и бубнящих низких частот',
+    category: 'dsp',
+    iconName: 'Mic',
+    color: '#8b5cf6',
+    defaultInputs: [
+      { id: 'in_audio', label: 'Аудио Вход', type: 'audio', color: '#8b5cf6' }
+    ],
+    defaultOutputs: [
+      { id: 'out_audio', label: 'Сбалансированный', type: 'audio', color: '#8b5cf6' }
+    ],
+    defaultParams: { cutoffHz: 180, maxCutDb: 10, thresholdDb: -24, distanceOffset: 0.5 }
+  },
+  dsp_phase_aligner: {
+    title: 'DSP: Auto Phase Aligner (110)',
+    description: 'Прецизионное выравнивание фазы стерео и суб-сэмпловая задержка',
+    category: 'dsp',
+    iconName: 'Activity',
+    color: '#06b6d4',
+    defaultInputs: [
+      { id: 'in_audio', label: 'Стерео Вход', type: 'audio', color: '#06b6d4' }
+    ],
+    defaultOutputs: [
+      { id: 'out_audio', label: 'Фазированный Сигнал', type: 'audio', color: '#06b6d4' }
+    ],
+    defaultParams: { delaySamples: 0, invertPhaseL: 0, invertPhaseR: 0, correlationTarget: 1.0 }
+  },
+  dsp_transient_shaper: {
+    title: 'DSP: Transient Shaper (111)',
+    description: 'Раздельное управление атакой (согласные) и сустейном (гласные/хвосты)',
+    category: 'dsp',
+    iconName: 'Zap',
+    color: '#eab308',
+    defaultInputs: [
+      { id: 'in_audio', label: 'Аудио Вход', type: 'audio', color: '#eab308' }
+    ],
+    defaultOutputs: [
+      { id: 'out_audio', label: 'Шейпированный Сигнал', type: 'audio', color: '#eab308' }
+    ],
+    defaultParams: { attackGainDb: 3.0, sustainGainDb: -1.0, attackSpeedMs: 15, sustainLengthMs: 150 }
+  },
+  dsp_resonance_suppressor: {
+    title: 'DSP: Resonance Suppressor (112)',
+    description: 'Многополосный автоматический поиск и вырезание резких стоячих резонансов (Soothe/Smooth)',
+    category: 'dsp',
+    iconName: 'Activity',
+    color: '#a855f7',
+    defaultInputs: [
+      { id: 'in_audio', label: 'Аудио Вход', type: 'audio', color: '#a855f7' }
+    ],
+    defaultOutputs: [
+      { id: 'out_audio', label: 'Гладкий Тембр', type: 'audio', color: '#a855f7' }
+    ],
+    defaultParams: { depthDb: 6.0, sharpnessQ: 4.0, minFreqHz: 200, maxFreqHz: 8000, sensitivity: 70 }
+  },
+  dsp_tape_saturation: {
+    title: 'DSP: Tape Saturation (113)',
+    description: 'Лампово-ленточная аналоговая сатурация, насыщение четными и нечетными гармониками',
+    category: 'dsp',
+    iconName: 'Sparkles',
+    color: '#f97316',
+    defaultInputs: [
+      { id: 'in_audio', label: 'Аудио Вход', type: 'audio', color: '#f97316' }
+    ],
+    defaultOutputs: [
+      { id: 'out_audio', label: 'Сатурированный Сигнал', type: 'audio', color: '#f97316' }
+    ],
+    defaultParams: { drive: 2.0, warmth: 4.0, tapeSpeedIps: 15, hfRollOffHz: 16000, dryWet: 1.0 }
+  },
+  dsp_linear_phase_filter: {
+    title: 'DSP: Linear Phase Filter (114)',
+    description: 'Кроссовер и срез без фазовых искажений (FIR Linear Phase Crossover)',
+    category: 'dsp',
+    iconName: 'Sliders',
+    color: '#0284c7',
+    defaultInputs: [
+      { id: 'in_audio', label: 'Аудио Вход', type: 'audio', color: '#0284c7' }
+    ],
+    defaultOutputs: [
+      { id: 'out_audio', label: 'Отфильтрованный', type: 'audio', color: '#0284c7' }
+    ],
+    defaultParams: { lowCutHz: 35, highCutHz: 18000, slopeDbOct: 24 }
+  },
+  dsp_studio_reverb: {
+    title: 'DSP: Studio Reverb (115)',
+    description: 'Алгоритмический студийный ревербератор (Plate, Room, Hall, Chamber)',
+    category: 'dsp',
+    iconName: 'Layers',
+    color: '#6366f1',
+    defaultInputs: [
+      { id: 'in_audio', label: 'Аудио Вход', type: 'audio', color: '#6366f1' }
+    ],
+    defaultOutputs: [
+      { id: 'out_audio', label: 'Reverb Wet/Dry Mix', type: 'audio', color: '#6366f1' },
+      { id: 'out_wet_only', label: 'Wet 100% FX', type: 'audio', color: '#8b5cf6' }
+    ],
+    defaultParams: { roomSize: 0.5, decayTimeSec: 1.8, preDelayMs: 20, damping: 0.4, wetDry: 0.25 }
+  },
+  dsp_fft_spectral_filter: {
+    title: 'DSP: FFT Spectral Filter (116)',
+    description: 'Узкополосный спектральный фильтр на основе быстрого преобразования Фурье',
+    category: 'dsp',
+    iconName: 'Activity',
+    color: '#d946ef',
+    defaultInputs: [
+      { id: 'in_audio', label: 'Аудио Вход', type: 'audio', color: '#d946ef' }
+    ],
+    defaultOutputs: [
+      { id: 'out_audio', label: 'FFT Filter Out', type: 'audio', color: '#d946ef' }
+    ],
+    defaultParams: { centerHz: 1000, bandwidthHz: 300, gainLinear: 1.0 }
   },
 
   // 5. Маршрутизация, отшивание, сплиттеры, микшеры

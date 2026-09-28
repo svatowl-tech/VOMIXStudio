@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import { VocalBusState, VocalBusDSP } from '../audio/dawEngine';
+import { VocalBusState, VocalBusDSP, TrackInsertEffect } from '../audio/dawEngine';
 import { VocalBusMeterData } from '../hooks/useAudioEngine';
 import { VSTPluginInstance } from '../audio/vstTypes';
 import { VSTRackSlot } from './VSTRackSlot';
+import { TrackInsertRack } from './TrackInsertRack';
 import { Volume2, Sliders, Mic, ShieldAlert, Sparkles, Activity, Music, ChevronDown, ChevronUp, Layers } from 'lucide-react';
 import { toSafeArray } from '../utils/safeIterables';
 
@@ -26,6 +27,7 @@ export const VocalBusSection: React.FC<VocalBusSectionProps> = ({
   onUpdateVstWetDry
 }) => {
   const [isExpanded, setIsExpanded] = useState(false);
+  const [activeInsertTab, setActiveInsertTab] = useState<'fx' | 'vst'>('fx');
 
   const peakLevel = Math.max(vocalBusMeter.peakL, vocalBusMeter.peakR);
   const peakDb = peakLevel > 1e-4 ? 20 * Math.log10(peakLevel) : -120;
@@ -173,31 +175,96 @@ export const VocalBusSection: React.FC<VocalBusSectionProps> = ({
         </div>
       </div>
 
-      {/* VST Plugin Insert Rack for Vocal Bus */}
-      <div className="pt-2 border-t border-slate-800/60">
-        <VSTRackSlot
-          plugins={toSafeArray<VSTPluginInstance>(vocalBus?.vstPlugins)}
-          title="Vocal Bus VST Inserts"
-          badge="Vocal Bus FX"
-          color="#8b5cf6"
-          onUpdateChain={(newChain) => {
-            const safeChain = toSafeArray<VSTPluginInstance>(newChain);
-            if (onUpdateVstChain) {
-              onUpdateVstChain(safeChain);
-            } else {
-              onUpdateVocalBus({ ...vocalBus, vstPlugins: safeChain });
-            }
-          }}
-          onUpdateParam={(instId, pId, val) => {
-            if (onUpdateVstParam) onUpdateVstParam(instId, pId, val);
-          }}
-          onUpdateBypass={(instId, enabled) => {
-            if (onUpdateVstBypass) onUpdateVstBypass(instId, enabled);
-          }}
-          onUpdateWetDry={(instId, wetDry) => {
-            if (onUpdateVstWetDry) onUpdateVstWetDry(instId, wetDry);
-          }}
-        />
+      {/* Нативные DSP модули (16 C++) и VST-инсерты шины */}
+      <div className="pt-2 border-t border-slate-800/60 space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs">
+            <button
+              onClick={() => setActiveInsertTab('fx')}
+              className={`px-3 py-1 rounded-lg font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                activeInsertTab === 'fx'
+                  ? 'bg-violet-600 text-white shadow-md'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Sliders size={13} />
+              <span>DSP Инсерты ({(vocalBus.insertEffects || []).length})</span>
+            </button>
+            <button
+              onClick={() => setActiveInsertTab('vst')}
+              className={`px-3 py-1 rounded-lg font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                activeInsertTab === 'vst'
+                  ? 'bg-violet-600 text-white shadow-md'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Layers size={13} />
+              <span>VST Плагины ({(vocalBus.vstPlugins || []).length})</span>
+            </button>
+          </div>
+          <span className="text-[10px] text-violet-300 font-mono">
+            {activeInsertTab === 'fx' ? '16 C++ DSP модулей' : 'VST3 / WebAudio хост'}
+          </span>
+        </div>
+
+        {activeInsertTab === 'fx' ? (
+          <TrackInsertRack
+            trackId={999}
+            trackName="Master Voiceover Bus"
+            trackColor="#8b5cf6"
+            effects={vocalBus.insertEffects || []}
+            onUpdateEffects={(updated) => {
+              onUpdateVocalBus({ ...vocalBus, insertEffects: updated });
+            }}
+            onSetEffectParam={(slotIdx, paramId, val) => {
+              const currentEffects = [...(vocalBus.insertEffects || [])];
+              if (currentEffects[slotIdx]) {
+                currentEffects[slotIdx] = {
+                  ...currentEffects[slotIdx],
+                  params: {
+                    ...currentEffects[slotIdx].params,
+                    [paramId]: val
+                  }
+                };
+                onUpdateVocalBus({ ...vocalBus, insertEffects: currentEffects });
+              }
+            }}
+            onSetEffectBypass={(slotIdx, bypass) => {
+              const currentEffects = [...(vocalBus.insertEffects || [])];
+              if (currentEffects[slotIdx]) {
+                currentEffects[slotIdx] = {
+                  ...currentEffects[slotIdx],
+                  bypassed: bypass
+                };
+                onUpdateVocalBus({ ...vocalBus, insertEffects: currentEffects });
+              }
+            }}
+          />
+        ) : (
+          <VSTRackSlot
+            plugins={toSafeArray<VSTPluginInstance>(vocalBus?.vstPlugins)}
+            title="Vocal Bus VST Inserts"
+            badge="Vocal Bus FX"
+            color="#8b5cf6"
+            onUpdateChain={(newChain) => {
+              const safeChain = toSafeArray<VSTPluginInstance>(newChain);
+              if (onUpdateVstChain) {
+                onUpdateVstChain(safeChain);
+              } else {
+                onUpdateVocalBus({ ...vocalBus, vstPlugins: safeChain });
+              }
+            }}
+            onUpdateParam={(instId, pId, val) => {
+              if (onUpdateVstParam) onUpdateVstParam(instId, pId, val);
+            }}
+            onUpdateBypass={(instId, enabled) => {
+              if (onUpdateVstBypass) onUpdateVstBypass(instId, enabled);
+            }}
+            onUpdateWetDry={(instId, wetDry) => {
+              if (onUpdateVstWetDry) onUpdateVstWetDry(instId, wetDry);
+            }}
+          />
+        )}
       </div>
 
       {/* Expanded C++ DSP Rack */}

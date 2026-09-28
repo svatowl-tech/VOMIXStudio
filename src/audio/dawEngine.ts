@@ -16,6 +16,22 @@
 
 import { globalNativeDAWBridge } from '../services/NativeDAWBridge';
 import { VSTPluginInstance } from './vstTypes';
+export {
+  NATIVE_DSP_CATALOG,
+  getEffectDefinition,
+  createDefaultInsertEffect,
+  createDefaultVocalInsertChain
+} from './nativeEffectsCatalog';
+export type {
+  TrackInsertEffect,
+  EffectParamDescriptor,
+  NativeEffectDefinition
+} from './nativeEffectsCatalog';
+import {
+  TrackInsertEffect,
+  createDefaultInsertEffect,
+  createDefaultVocalInsertChain
+} from './nativeEffectsCatalog';
 
 export interface ClipConfig {
   id: number;
@@ -140,6 +156,7 @@ export interface TrackState {
   noiseGate: NoiseGateParams;
   deEsser: DeEsserParams;
   vstPlugins?: VSTPluginInstance[];
+  insertEffects?: TrackInsertEffect[];
   peakL: number;
   peakR: number;
   isOriginalAudio?: boolean;
@@ -176,6 +193,7 @@ export interface VocalBusState {
   peakR: number;
   dsp: VocalBusDSP;
   vstPlugins?: VSTPluginInstance[];
+  insertEffects?: TrackInsertEffect[];
 }
 
 export function createDefaultVocalBus(): VocalBusState {
@@ -187,6 +205,7 @@ export function createDefaultVocalBus(): VocalBusState {
     peakL: 0.0,
     peakR: 0.0,
     vstPlugins: [],
+    insertEffects: [],
     dsp: {
       eq: {
         lowShelf: { type: 'lowshelf', frequency: 120, gainDb: 0.0, Q: 0.7071, enabled: true },
@@ -226,6 +245,7 @@ export interface MasterState {
   limiterCeilingDb: number;
   limiterEnabled: boolean;
   vstPlugins?: VSTPluginInstance[];
+  insertEffects?: TrackInsertEffect[];
   peakL: number;
   peakR: number;
   clipped: boolean;
@@ -408,6 +428,7 @@ export function createNewTrack(id: number, name?: string, color?: string, isOrig
     clips: [],
     ...dsp,
     vstPlugins: [],
+    insertEffects: isOriginal ? [] : createDefaultVocalInsertChain(),
     peakL: 0,
     peakR: 0
   };
@@ -439,7 +460,8 @@ export function populateTrackDSPDefaults(track: Partial<TrackState> & { id: numb
     dePlosive: track.dePlosive || d.dePlosive,
     noiseGate: track.noiseGate ? { ...baseGate, ...track.noiseGate } : baseGate,
     deEsser: track.deEsser ? { ...baseDeEsser, ...track.deEsser } : baseDeEsser,
-    vstPlugins: track.vstPlugins || d.vstPlugins || []
+    vstPlugins: track.vstPlugins || d.vstPlugins || [],
+    insertEffects: track.insertEffects || d.insertEffects || (isOriginal ? [] : createDefaultVocalInsertChain())
   } as TrackState;
 }
 
@@ -531,6 +553,111 @@ export class LiveDAWEngine {
         }
         plugin.parameters[paramId] = value;
       }
+    }
+  }
+
+  // --- Управление цепочкой нативных инсерт-эффектов дорожки (TrackInsertChain) ---
+
+  public getTrackEffects(trackId: number): TrackInsertEffect[] {
+    const track = this.tracks.find((t) => t.id === trackId);
+    return track?.insertEffects || [];
+  }
+
+  public addTrackEffect(trackId: number, effectTypeId: number): TrackInsertEffect | null {
+    const track = this.tracks.find((t) => t.id === trackId);
+    if (!track) return null;
+    if (!track.insertEffects) track.insertEffects = [];
+
+    const newEffect = createDefaultInsertEffect(effectTypeId);
+    const slotIdx = track.insertEffects.length;
+    track.insertEffects.push(newEffect);
+
+    try {
+      globalNativeDAWBridge.addTrackEffect(trackId, effectTypeId);
+      // Инициализируем начальные параметры в C++
+      for (const [pIdStr, val] of Object.entries(newEffect.params)) {
+        globalNativeDAWBridge.setTrackEffectParam(trackId, slotIdx, Number(pIdStr), val);
+      }
+    } catch (e) {
+      console.warn('[LiveDAWEngine] addTrackEffect WASM call warning:', e);
+    }
+
+    return newEffect;
+  }
+
+  public removeTrackEffect(trackId: number, slotIdx: number): boolean {
+    const track = this.tracks.find((t) => t.id === trackId);
+    if (!track || !track.insertEffects || slotIdx < 0 || slotIdx >= track.insertEffects.length) {
+      return false;
+    }
+    track.insertEffects.splice(slotIdx, 1);
+    try {
+      globalNativeDAWBridge.removeTrackEffect(trackId, slotIdx);
+    } catch (e) {
+      console.warn('[LiveDAWEngine] removeTrackEffect WASM call warning:', e);
+    }
+    return true;
+  }
+
+  public setTrackEffectParam(trackId: number, slotIdx: number, paramId: number, value: number): void {
+    const track = this.tracks.find((t) => t.id === trackId);
+    if (track && track.insertEffects && track.insertEffects[slotIdx]) {
+      track.insertEffects[slotIdx].params[paramId] = value;
+      try {
+        globalNativeDAWBridge.setTrackEffectParam(trackId, slotIdx, paramId, value);
+      } catch (e) {
+        // Safe ignore
+      }
+    }
+  }
+
+  public setTrackEffectBypass(trackId: number, slotIdx: number, bypass: boolean): void {
+    const track = this.tracks.find((t) => t.id === trackId);
+    if (track && track.insertEffects && track.insertEffects[slotIdx]) {
+      track.insertEffects[slotIdx].bypassed = bypass;
+      try {
+        globalNativeDAWBridge.setTrackEffectBypass(trackId, slotIdx, bypass);
+      } catch (e) {
+        // Safe ignore
+      }
+    }
+  }
+
+  public reorderTrackEffects(trackId: number, fromIdx: number, toIdx: number): boolean {
+    const track = this.tracks.find((t) => t.id === trackId);
+    if (!track || !track.insertEffects) return false;
+    if (fromIdx < 0 || fromIdx >= track.insertEffects.length) return false;
+    if (toIdx < 0 || toIdx >= track.insertEffects.length) return false;
+
+    const [moved] = track.insertEffects.splice(fromIdx, 1);
+    track.insertEffects.splice(toIdx, 0, moved);
+    try {
+      globalNativeDAWBridge.reorderTrackEffects(trackId, fromIdx, toIdx);
+    } catch (e) {
+      console.warn('[LiveDAWEngine] reorderTrackEffects WASM call warning:', e);
+    }
+    return true;
+  }
+
+  public loadVocalDefaultChain(trackId: number): void {
+    const track = this.tracks.find((t) => t.id === trackId);
+    if (!track) return;
+    track.insertEffects = createDefaultVocalInsertChain();
+    // Синхронизируем с C++
+    try {
+      // Очищаем существующие
+      for (let i = 15; i >= 0; i--) {
+        globalNativeDAWBridge.removeTrackEffect(trackId, i);
+      }
+      // Добавляем дефолтные
+      track.insertEffects.forEach((eff, sIdx) => {
+        globalNativeDAWBridge.addTrackEffect(trackId, eff.typeId);
+        for (const [pIdStr, val] of Object.entries(eff.params)) {
+          globalNativeDAWBridge.setTrackEffectParam(trackId, sIdx, Number(pIdStr), val);
+        }
+      });
+    } catch (e) {
+      console.warn('[LiveDAWEngine] loadVocalDefaultChain warning:', e);
     }
   }
 

@@ -11,6 +11,11 @@
  * 4. Мастер-секцию (Master VST Rack, Master Fader, Constant Power Pan, SoftLimiter).
  * 5. Офлайн-рендеринг всего проекта и отдельных изолированных стемов (Stems).
  * 6. Автоматическое поканальное выравнивание громкости (Auto Loudness Match).
+ * 
+ * Стандартизация размерностей (Строго во ФРЕЙМАХ):
+ * - offsetSamples — это ВСЕГДА смещение во ФРЕЙМАХ (1 сек = 48 000).
+ * - lengthSamples — это ВСЕГДА длина во ФРЕЙМАХ (1 сек = 48 000).
+ * - При обращении к float* buffer: size_t sampleIndex = frameOffset * channels.
  * ============================================================================
  */
 
@@ -33,7 +38,7 @@ public:
     float sampleRate{48000.0f};
     float masterVolumeDb{0.0f};          // Мастер-громкость (-60 .. +12 dB)
     float masterPan{0.0f};               // Мастер-панорама (-1.0 .. +1.0)
-    size_t currentTimelineSample{0};     // Текущая позиция курсора на таймлайне (в сэмплах)
+    size_t currentTimelineSample{0};     // Текущая позиция курсора на таймлайне во ФРЕЙМАХ
     SoftLimiter masterLimiter;           // Мастер-лимитер True Peak Guard
 
     // Параметры вокальной шины (Vocal Bus)
@@ -85,11 +90,20 @@ public:
     explicit Mixer(float sr = 48000.0f);
 
     void setSampleRate(float sr) noexcept;
-    void setTimelinePosition(size_t pos) noexcept;
+    void setTimelinePosition(size_t posFrames) noexcept;
 
     void addTrack(Track* track);
     Track* getTrack(uint32_t trackId) noexcept;
     void removeAllTracks() noexcept;
+
+    // --- Управление цепочкой нативных инсерт-эффектов дорожки (TrackInsertChain) ---
+    int addTrackEffect(uint32_t trackId, int effectTypeId) noexcept;
+    bool removeTrackEffect(uint32_t trackId, int slotIdx) noexcept;
+    void setTrackEffectParam(uint32_t trackId, int slotIdx, int paramId, float value) noexcept;
+    float getTrackEffectParam(uint32_t trackId, int slotIdx, int paramId) const noexcept;
+    void setTrackEffectBypass(uint32_t trackId, int slotIdx, bool bypass) noexcept;
+    bool isTrackEffectBypassed(uint32_t trackId, int slotIdx) const noexcept;
+    bool reorderTrackEffects(uint32_t trackId, int fromIdx, int toIdx) noexcept;
 
     // --- Управление плагинами вокальной шины ---
     void loadVocalBusPlugin(int slotIdx, int pluginTypeId);
@@ -110,14 +124,24 @@ public:
     /**
      * Потоковая обработка одного блока аудиоданных в реальном времени (RT-Safe)
      * @param outputBuffer Указатель на стереобуфер вывода [L, R, L, R...]
-     * @param numFrames Количество стереокадров
+     * @param numFrames Количество стереокадров (во ФРЕЙМАХ)
      */
     void processBlock(float* outputBuffer, size_t numFrames) noexcept;
 
     /**
+     * Пакетный офлайн-рендеринг блока фреймов
+     */
+    void renderOfflineBlock(float* destStereo, size_t startFrame, size_t numFrames, int isolateTrackId = 0) noexcept;
+
+    /**
+     * Пакетный рендеринг мастер-микса на интервале [startFrame, startFrame + numFrames)
+     */
+    void renderMasterMix(float* outputStereoBuffer, size_t startFrame, size_t numFrames, int isolateTrackId = 0) noexcept;
+
+    /**
      * Офлайн-рендеринг проекта или изолированного стема
      * @param outputBuffer Выходной стереобуфер для записи готового микса
-     * @param maxFrames Максимальная вместимость буфера в сэмплах
+     * @param maxFrames Максимальная вместимость буфера во ФРЕЙМАХ
      * @param isolateTrackId 0 = полный микс, >0 = рендер только указанной дорожки (стем)
      * @return Фактическое количество сгенерированных стереокадров
      */
@@ -130,7 +154,7 @@ public:
 
 private:
     /**
-     * Вычисление максимальной длины проекта по всем дорожкам и клипам
+     * Вычисление максимальной длины проекта по всем дорожкам и клипам во ФРЕЙМАХ
      */
     size_t calculateProjectLengthSamples(int isolateTrackId = 0) const noexcept;
 };

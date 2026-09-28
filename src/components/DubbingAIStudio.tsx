@@ -81,6 +81,10 @@ const PURPOSE_TO_CATEGORY_MAP: Record<AIPurposeType, ModelCategory> = {
   stem_separation: 'separation',
   denoise: 'denoise',
   dereverb: 'dereverb',
+  deplosive: 'denoise',
+  thickener: 'vocal_match',
+  headroom_recovery: 'vocal_match',
+  leveler: 'vocal_match',
   spectral_match: 'vocal_match',
   voicefixer: 'vocal_match',
   whisper_vad: 'whisper',
@@ -132,11 +136,39 @@ export const PURPOSE_DESCRIPTIONS: Record<
     badgeColor: 'blue'
   },
   dereverb: {
-    title: 'Устранение эха и реверберации помещения (De-Reverb)',
+    title: 'Устранение эха и реверберации помещения (Spectral De-Reverb)',
     icon: '🏛️',
-    why: 'Убирает гулкость и комнатные отражения стен («Room Acoustic Fix»), делая голос сухим, как в звукоизолированной будке.',
-    defaultModel: 'reverb_foxjoy',
+    why: '16-полосное алгоритмическое вычитание диффузного хвоста реверберации с нулевой задержкой и сохранением согласных.',
+    defaultModel: 'vst-spectral-dereverb',
     badgeColor: 'cyan'
+  },
+  deplosive: {
+    title: 'Устранение взрывных «п»/«б» (De-Plosive Pro)',
+    icon: '💨',
+    why: 'Подавляет задувы микрофона, воздушные хлопки и взрывные согласные «п»/«б» через LR4-кроссовер и VCA-аттенюатор.',
+    defaultModel: 'vst-deplosive-pro',
+    badgeColor: 'teal'
+  },
+  thickener: {
+    title: 'Уплотнение и теплота голоса (Vocal Thickener)',
+    icon: '📻',
+    why: 'Добавляет фундаментальное тело четными субгармониками Чебышёва, шелковое присутствие и плотную ленточную сатурацию.',
+    defaultModel: 'vst-vocal-thickener',
+    badgeColor: 'amber'
+  },
+  headroom_recovery: {
+    title: 'Подъем тихих записей (Headroom Recovery)',
+    icon: '⚡',
+    why: 'Векторизованное сканирование True Peak/RMS, безопасный разгон тихих реплик до -6 dBFS с защитой maxBoost (+36 dB) и лимитером.',
+    defaultModel: 'vst-headroom-recovery',
+    badgeColor: 'emerald'
+  },
+  leveler: {
+    title: 'Выравнивание громкости речи (Speech Leveler)',
+    icon: '🎚️',
+    why: 'Автоматический авто-фейдер шепота и криков: медленный RMS левеллер с Gate Freeze в паузах и быстрый лимитер пиков.',
+    defaultModel: 'vst-speech-leveler',
+    badgeColor: 'violet'
   },
   spectral_match: {
     title: 'Спектральная подгонка тембра к оригиналу (Spectral EQ Match)',
@@ -694,6 +726,84 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
               handleUpdateTrackConfig(trackId, {
                 progressPercent: basePct + Math.round((pct / 100) * stepShare),
                 statusMessage: `Шаг ${stepNum}/${totalSteps} [VoiceFixer]: ${msg}`
+              });
+            }
+          );
+        } else if (step.purpose === 'deplosive') {
+          currentPcm = await globalAudioAICleanupEngine.processDePlosive(
+            currentPcm,
+            {
+              thresholdDb: -24 - ((step.intensity - 50) * 0.3),
+              frequencyLimitHz: 120,
+              suppressionDepthDb: -18,
+              recoveryMs: 35,
+              wetDryPercent: 100
+            },
+            (pct, msg) => {
+              const basePct = Math.round((idx / totalSteps) * 100);
+              const stepShare = Math.round(100 / totalSteps);
+              handleUpdateTrackConfig(trackId, {
+                progressPercent: basePct + Math.round((pct / 100) * stepShare),
+                statusMessage: `Шаг ${stepNum}/${totalSteps} [De-Plosive Pro]: ${msg}`
+              });
+            }
+          );
+        } else if (step.purpose === 'thickener') {
+          currentPcm = await globalAudioAICleanupEngine.processVocalThickener(
+            currentPcm,
+            {
+              bodyDrivePercent: step.intensity,
+              presenceClarityPercent: step.airBandBoost ? step.airBandBoost * 16 : 40,
+              tapeDensityPercent: step.warmthSat,
+              mixPercent: 100
+            },
+            (pct, msg) => {
+              const basePct = Math.round((idx / totalSteps) * 100);
+              const stepShare = Math.round(100 / totalSteps);
+              handleUpdateTrackConfig(trackId, {
+                progressPercent: basePct + Math.round((pct / 100) * stepShare),
+                statusMessage: `Шаг ${stepNum}/${totalSteps} [Vocal Thickener]: ${msg}`
+              });
+            }
+          );
+        } else if (step.purpose === 'headroom_recovery') {
+          currentPcm = await globalAudioAICleanupEngine.processHeadroomRecovery(
+            currentPcm,
+            {
+              targetPeakDb: -6.0,
+              maxBoostDb: 36.0,
+              manualGainDb: (step.intensity - 50) * 0.4, // -20 dB to +20 dB fine offset
+              autoHeadroom: true,
+              lookaheadMs: 3.0,
+              mixPercent: 100
+            },
+            (pct, msg) => {
+              const basePct = Math.round((idx / totalSteps) * 100);
+              const stepShare = Math.round(100 / totalSteps);
+              handleUpdateTrackConfig(trackId, {
+                progressPercent: basePct + Math.round((pct / 100) * stepShare),
+                statusMessage: `Шаг ${stepNum}/${totalSteps} [Headroom Recovery]: ${msg}`
+              });
+            }
+          );
+        } else if (step.purpose === 'leveler') {
+          currentPcm = await globalAudioAICleanupEngine.processSpeechLeveler(
+            currentPcm,
+            {
+              targetLevelDb: -18.0,
+              levelingSpeedMs: 300.0 - (step.intensity - 50) * 2.0, // 200..400 ms
+              maxBoostDb: 12.0 + (step.warmthSat ? (step.warmthSat - 50) * 0.1 : 0),
+              maxCutDb: -18.0,
+              silenceGateDb: -45.0,
+              peakCeilingDb: -2.0,
+              mixPercent: 100
+            },
+            (pct, msg) => {
+              const basePct = Math.round((idx / totalSteps) * 100);
+              const stepShare = Math.round(100 / totalSteps);
+              handleUpdateTrackConfig(trackId, {
+                progressPercent: basePct + Math.round((pct / 100) * stepShare),
+                statusMessage: `Шаг ${stepNum}/${totalSteps} [Speech Leveler]: ${msg}`
               });
             }
           );
@@ -1562,10 +1672,15 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500"
                               >
                                 <option value="stem_separation">✂️ Изоляция вокала (UVR / Stem Sep)</option>
-                                <option value="denoise">🧹 Подавление шума (DeepFilterNet3)</option>
-                                <option value="dereverb">🏛️ Декомпозиция эха (Reverb FoxJoy)</option>
-                                <option value="spectral_match">🎚️ Спектральная подгонка к оригиналу</option>
-                                <option value="voicefixer">✨ VoiceFixer Реставрация гармоник</option>
+                                <option value="denoise">🧹 Подавление шума (DeepFilterNet3 / De-Noise)</option>
+                                <option value="dereverb">🏛️ Декомпозиция эха (Spectral De-Reverb)</option>
+                                <option value="deplosive">💨 Устранение задувов «п»/«б» (De-Plosive Pro)</option>
+                                <option value="thickener">📻 Уплотнение и теплота (Vocal Thickener)</option>
+                                <option value="headroom_recovery">⚡ Разгон тихих записей (Headroom Recovery)</option>
+                                <option value="leveler">🎚️ Выравнивание громкости (Speech Leveler)</option>
+                                <option value="spectral_match">🎚️ Спектральная подгонка тембра (Spectral EQ)</option>
+                                <option value="voicefixer">✨ Реставрация верхов Air-Band (VoiceFixer)</option>
+                                <option value="vocal_chain">🚀 Полный ремастеринг вокала (All-in-One Chain)</option>
                               </select>
                             </div>
 

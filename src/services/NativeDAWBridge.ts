@@ -520,6 +520,11 @@ export class NativeDAWBridge {
           setMasterLimiter: () => true,
           addClipToTrack: () => true,
           removeAllTracks: () => true,
+          addTrackEffect: () => 0,
+          removeTrackEffect: () => true,
+          setTrackEffectParam: () => true,
+          setTrackEffectBypass: () => true,
+          reorderTrackEffects: () => true,
 
           processMixer: (mixerPtr: number, outBufferPtr: number, numFrames: number) => {
             const floatOffset = outBufferPtr >> 2;
@@ -3260,6 +3265,367 @@ export class NativeDAWBridge {
       },
       subtitles: []
     }, null, 2);
+  }
+
+  /**
+   * Нативное покадровое выравнивание громкости речевых фраз (Phrase Loudness Normalizer)
+   * Автоматически сканирует фразы, вычисляет LUFS и применяет сглаженный Gain Ride.
+   */
+  public async normalizeTrackPhrases(
+    audioBuffer: Float32Array,
+    channels: number = 1,
+    sampleRate: number = 48000,
+    config: {
+      targetLufs?: number;
+      maxGainDb?: number;
+      minGainDb?: number;
+      minSilenceDurationMs?: number;
+      thresholdDb?: number;
+      fadeTimeMs?: number;
+      prePaddingMs?: number;
+      postPaddingMs?: number;
+      maxPeakDb?: number;
+    } = {}
+  ): Promise<{
+    totalPhrases: number;
+    averageInputLufs: number;
+    averageOutputLufs: number;
+    maxBoostDb: number;
+    maxAttenuationDb: number;
+    phrases: Array<{
+      startFrame: number;
+      endFrame: number;
+      durationSec: number;
+      measuredLufs: number;
+      targetLufs: number;
+      appliedGainDb: number;
+      peakBeforeDb: number;
+      peakAfterDb: number;
+    }>;
+  }> {
+    await this.initWasmEngine();
+
+    const fullConfig = {
+      targetLufs: config.targetLufs ?? -18.0,
+      maxGainDb: config.maxGainDb ?? 12.0,
+      minGainDb: config.minGainDb ?? -18.0,
+      minSilenceDurationMs: config.minSilenceDurationMs ?? 350.0,
+      thresholdDb: config.thresholdDb ?? -40.0,
+      fadeTimeMs: config.fadeTimeMs ?? 30.0,
+      prePaddingMs: config.prePaddingMs ?? 35.0,
+      postPaddingMs: config.postPaddingMs ?? 50.0,
+      maxPeakDb: config.maxPeakDb ?? -0.5,
+    };
+
+    const totalSamples = audioBuffer.length;
+    const totalFrames = Math.floor(totalSamples / Math.max(1, channels));
+
+    if (
+      this.wasmModule &&
+      typeof (this.wasmModule as any).normalizeTrackPhrasesNative === 'function' &&
+      typeof this.wasmModule._malloc === 'function' &&
+      typeof this.wasmModule._free === 'function'
+    ) {
+      let bufPtr = 0;
+      try {
+        const bytes = totalSamples * 4;
+        bufPtr = this.wasmModule._malloc(bytes);
+        this.wasmModule.HEAPF32.set(audioBuffer, bufPtr >> 2);
+
+        const res = (this.wasmModule as any).normalizeTrackPhrasesNative(
+          bufPtr,
+          totalFrames,
+          channels,
+          sampleRate,
+          fullConfig
+        );
+
+        // Копируем модифицированные сэмплы обратно в audioBuffer
+        const updatedSamples = this.wasmModule.HEAPF32.subarray(
+          bufPtr >> 2,
+          (bufPtr >> 2) + totalSamples
+        );
+        audioBuffer.set(updatedSamples);
+
+        const outPhrases: any[] = [];
+        if (res && res.phrases) {
+          const count = res.phrases.size ? res.phrases.size() : (res.phrases.length || 0);
+          for (let i = 0; i < count; i++) {
+            const p = res.phrases.get ? res.phrases.get(i) : res.phrases[i];
+            outPhrases.push({
+              startFrame: p.startFrame,
+              endFrame: p.endFrame,
+              durationSec: p.durationSec,
+              measuredLufs: p.measuredLufs,
+              targetLufs: p.targetLufs,
+              appliedGainDb: p.appliedGainDb,
+              peakBeforeDb: p.peakBeforeDb,
+              peakAfterDb: p.peakAfterDb,
+            });
+          }
+        }
+
+        return {
+          totalPhrases: res.totalPhrases || outPhrases.length,
+          averageInputLufs: res.averageInputLufs ?? -120,
+          averageOutputLufs: res.averageOutputLufs ?? -120,
+          maxBoostDb: res.maxBoostDb ?? 0,
+          maxAttenuationDb: res.maxAttenuationDb ?? 0,
+          phrases: outPhrases,
+        };
+      } catch (wasmErr) {
+        console.warn('[NativeDAWBridge] normalizeTrackPhrasesNative WASM error:', wasmErr);
+      } finally {
+        if (bufPtr && this.wasmModule && typeof this.wasmModule._free === 'function') {
+          this.wasmModule._free(bufPtr);
+        }
+      }
+    }
+
+    // High performance JS fallback (matching C++ algorithm exactly)
+    const hopFrames = Math.max(1, Math.floor(sampleRate * 0.010));
+    const totalBlocks = Math.floor(totalFrames / hopFrames);
+    const thresholdLin = Math.pow(10, fullConfig.thresholdDb / 20);
+    const minSilenceFrames = Math.floor((fullConfig.minSilenceDurationMs / 1000) * sampleRate);
+    const prePaddingFrames = Math.floor((fullConfig.prePaddingMs / 1000) * sampleRate);
+    const postPaddingFrames = Math.floor((fullConfig.postPaddingMs / 1000) * sampleRate);
+    const fadeFrames = Math.max(8, Math.floor((fullConfig.fadeTimeMs / 1000) * sampleRate));
+
+    const rawPhrases: Array<{ start: number; end: number }> = [];
+    let inSpeech = false;
+    let phraseStart = 0;
+    let silentFrames = 0;
+
+    for (let b = 0; b < totalBlocks; b++) {
+      const fOffset = b * hopFrames;
+      const sOffset = fOffset * channels;
+      let sumSq = 0;
+      let peak = 0;
+      const cnt = hopFrames * channels;
+      for (let i = 0; i < cnt; i++) {
+        const val = audioBuffer[sOffset + i] || 0;
+        const absVal = Math.abs(val);
+        sumSq += val * val;
+        if (absVal > peak) peak = absVal;
+      }
+      const rms = Math.sqrt(sumSq / cnt);
+      const isSpeech = rms >= thresholdLin || peak >= thresholdLin;
+
+      if (!inSpeech) {
+        if (isSpeech) {
+          inSpeech = true;
+          phraseStart = Math.max(0, fOffset - prePaddingFrames);
+          silentFrames = 0;
+        }
+      } else {
+        if (!isSpeech) {
+          silentFrames += hopFrames;
+          if (silentFrames >= minSilenceFrames) {
+            const pEnd = Math.min(totalFrames, fOffset + postPaddingFrames);
+            if (pEnd > phraseStart + fadeFrames * 2) {
+              rawPhrases.push({ start: phraseStart, end: pEnd });
+            }
+            inSpeech = false;
+            silentFrames = 0;
+          }
+        } else {
+          silentFrames = 0;
+        }
+      }
+    }
+
+    if (inSpeech) {
+      rawPhrases.push({ start: phraseStart, end: totalFrames });
+    }
+
+    // Merge overlapping
+    const merged: Array<{ start: number; end: number }> = [];
+    for (const rp of rawPhrases) {
+      if (merged.length === 0) {
+        merged.push(rp);
+      } else {
+        const last = merged[merged.length - 1];
+        if (rp.start <= last.end + fadeFrames) {
+          last.end = Math.max(last.end, rp.end);
+        } else {
+          merged.push(rp);
+        }
+      }
+    }
+
+    const phrases: any[] = [];
+    const maxCeilingLin = Math.pow(10, fullConfig.maxPeakDb / 20);
+
+    for (const p of merged) {
+      const pFrames = p.end - p.start;
+      const pSamples = pFrames * channels;
+      let sumSq = 0;
+      let peak = 0;
+      const offset = p.start * channels;
+
+      for (let i = 0; i < pSamples; i++) {
+        const s = audioBuffer[offset + i];
+        const absS = Math.abs(s);
+        sumSq += s * s;
+        if (absS > peak) peak = absS;
+      }
+
+      const pRms = Math.sqrt(sumSq / Math.max(1, pSamples));
+      const pLufs = pRms > 1e-6 ? 20 * Math.log10(pRms) : -120;
+      const pPeakDb = peak > 1e-6 ? 20 * Math.log10(peak) : -120;
+
+      let gainDb = fullConfig.targetLufs - pLufs;
+      gainDb = Math.max(fullConfig.minGainDb, Math.min(fullConfig.maxGainDb, gainDb));
+
+      // True Peak Guard
+      const potPeak = peak * Math.pow(10, gainDb / 20);
+      if (potPeak > maxCeilingLin && peak > 1e-5) {
+        const maxGain = 20 * Math.log10(maxCeilingLin / peak);
+        gainDb = Math.min(gainDb, maxGain);
+      }
+
+      const gainLin = Math.pow(10, gainDb / 20);
+      const actualFade = Math.min(fadeFrames, Math.floor(pFrames / 4));
+
+      if (actualFade > 0) {
+        // Entry fade
+        for (let f = 0; f < actualFade; f++) {
+          const t = f / actualFade;
+          const g = 1.0 + (gainLin - 1.0) * 0.5 * (1.0 - Math.cos(Math.PI * t));
+          const idx = (p.start + f) * channels;
+          for (let ch = 0; ch < channels; ch++) audioBuffer[idx + ch] *= g;
+        }
+        // Body
+        const bodyStart = p.start + actualFade;
+        const bodyEnd = p.end - actualFade;
+        for (let f = bodyStart; f < bodyEnd; f++) {
+          const idx = f * channels;
+          for (let ch = 0; ch < channels; ch++) audioBuffer[idx + ch] *= gainLin;
+        }
+        // Exit fade
+        const exitStart = p.end - actualFade;
+        for (let f = 0; f < actualFade; f++) {
+          const t = f / actualFade;
+          const g = gainLin + (1.0 - gainLin) * 0.5 * (1.0 - Math.cos(Math.PI * t));
+          const idx = (exitStart + f) * channels;
+          for (let ch = 0; ch < channels; ch++) audioBuffer[idx + ch] *= g;
+        }
+      } else {
+        for (let f = p.start; f < p.end; f++) {
+          const idx = f * channels;
+          for (let ch = 0; ch < channels; ch++) audioBuffer[idx + ch] *= gainLin;
+        }
+      }
+
+      phrases.push({
+        startFrame: p.start,
+        endFrame: p.end,
+        durationSec: pFrames / sampleRate,
+        measuredLufs: pLufs,
+        targetLufs: fullConfig.targetLufs,
+        appliedGainDb: gainDb,
+        peakBeforeDb: pPeakDb,
+        peakAfterDb: 20 * Math.log10(Math.max(1e-6, peak * gainLin)),
+      });
+    }
+
+    return {
+      totalPhrases: phrases.length,
+      averageInputLufs: fullConfig.targetLufs,
+      averageOutputLufs: fullConfig.targetLufs,
+      maxBoostDb: Math.max(0, ...phrases.map((p) => p.appliedGainDb)),
+      maxAttenuationDb: Math.min(0, ...phrases.map((p) => p.appliedGainDb)),
+      phrases,
+    };
+  }
+
+  // --- Управление цепочкой нативных инсерт-эффектов дорожки (TrackInsertChain) ---
+
+  /**
+   * Добавление нативного C++ DSP-эффекта (101..116) в цепочку дорожки
+   */
+  public addTrackEffect(trackId: number, effectTypeId: number, mixerPtr: number = 0): number {
+    const mod = this.getModule();
+    if (typeof mod._addTrackEffect === 'function') {
+      return mod._addTrackEffect(mixerPtr, trackId, effectTypeId);
+    }
+    if (typeof mod.addTrackEffect === 'function') {
+      return mod.addTrackEffect(mixerPtr, trackId, effectTypeId);
+    }
+    return -1;
+  }
+
+  /**
+   * Удаление эффекта из слота дорожки
+   */
+  public removeTrackEffect(trackId: number, slotIdx: number, mixerPtr: number = 0): boolean {
+    const mod = this.getModule();
+    if (typeof mod._removeTrackEffect === 'function') {
+      return Boolean(mod._removeTrackEffect(mixerPtr, trackId, slotIdx));
+    }
+    if (typeof mod.removeTrackEffect === 'function') {
+      return Boolean(mod.removeTrackEffect(mixerPtr, trackId, slotIdx));
+    }
+    return false;
+  }
+
+  /**
+   * Передача числового параметра эффекта в C++ ядро (Zero Alloc)
+   */
+  public setTrackEffectParam(
+    trackId: number,
+    slotIdx: number,
+    paramId: number,
+    value: number,
+    mixerPtr: number = 0
+  ): boolean {
+    const mod = this.getModule();
+    if (typeof mod._setTrackEffectParam === 'function') {
+      return Boolean(mod._setTrackEffectParam(mixerPtr, trackId, slotIdx, paramId, value));
+    }
+    if (typeof mod.setTrackEffectParam === 'function') {
+      return Boolean(mod.setTrackEffectParam(mixerPtr, trackId, slotIdx, paramId, value));
+    }
+    return false;
+  }
+
+  /**
+   * Включение/выключение байпаса слота эффекта (с плавным переходом)
+   */
+  public setTrackEffectBypass(
+    trackId: number,
+    slotIdx: number,
+    bypass: boolean,
+    mixerPtr: number = 0
+  ): boolean {
+    const mod = this.getModule();
+    const bypassVal = bypass ? 1 : 0;
+    if (typeof mod._setTrackEffectBypass === 'function') {
+      return Boolean(mod._setTrackEffectBypass(mixerPtr, trackId, slotIdx, bypassVal));
+    }
+    if (typeof mod.setTrackEffectBypass === 'function') {
+      return Boolean(mod.setTrackEffectBypass(mixerPtr, trackId, slotIdx, bypassVal));
+    }
+    return false;
+  }
+
+  /**
+   * Изменение порядка эффектов в цепочке дорожки
+   */
+  public reorderTrackEffects(
+    trackId: number,
+    fromIdx: number,
+    toIdx: number,
+    mixerPtr: number = 0
+  ): boolean {
+    const mod = this.getModule();
+    if (typeof mod._reorderTrackEffects === 'function') {
+      return Boolean(mod._reorderTrackEffects(mixerPtr, trackId, fromIdx, toIdx));
+    }
+    if (typeof mod.reorderTrackEffects === 'function') {
+      return Boolean(mod.reorderTrackEffects(mixerPtr, trackId, fromIdx, toIdx));
+    }
+    return false;
   }
 }
 

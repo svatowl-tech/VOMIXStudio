@@ -32,11 +32,13 @@ Track::Track(uint32_t trackId, std::string trackName, float sr)
     std::memset(vstOutR, 0, sizeof(vstOutR));
     streamingRingBuffer.reset();
     vocalRack.setup(sr);
+    insertChain.setSampleRate(sr);
 }
 
 void Track::setSampleRate(float sr) noexcept {
     sampleRate = sr;
     vocalRack.setup(sr);
+    insertChain.setSampleRate(sr);
     for (auto& slot : vstSlots) {
         if (slot) {
             slot->initialize(static_cast<double>(sr), MAX_BUFFER_SIZE);
@@ -170,6 +172,12 @@ void Track::renderClipsToBuffer(size_t timelinePosition, size_t numFrames) noexc
 void Track::processVocalRack(const float* sidechainMono, size_t numFrames) noexcept {
     size_t safeFrames = std::min(numFrames, MAX_BUFFER_SIZE);
     vocalRack.process(trackBuffer, sidechainMono, safeFrames);
+}
+
+void Track::processInsertChain(size_t numFrames) noexcept {
+    size_t safeFrames = std::min(numFrames, MAX_BUFFER_SIZE);
+    if (safeFrames == 0) return;
+    insertChain.process(trackBuffer, safeFrames, 2);
 }
 
 void Track::processVSTSlots(size_t numFrames) noexcept {

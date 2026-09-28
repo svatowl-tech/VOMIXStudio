@@ -3,7 +3,9 @@ import { TrackState } from '../audio/dawEngine';
 import { VSTPluginInstance } from '../audio/vstTypes';
 import { EqCurveVisualizer } from './EqCurveVisualizer';
 import { VSTRackSlot } from './VSTRackSlot';
-import { Sliders, Activity, Mic, VolumeX, Volume2, Shield, Layers } from 'lucide-react';
+import { TrackInsertRack } from './TrackInsertRack';
+import { globalNativeDAWBridge } from '../services/NativeDAWBridge';
+import { Sliders, Activity, Mic, VolumeX, Volume2, Shield, Layers, Wrench } from 'lucide-react';
 
 interface TrackStripProps {
   track: TrackState;
@@ -24,7 +26,7 @@ export const TrackStrip: React.FC<TrackStripProps> = ({
   onUpdateVstBypass,
   onUpdateVstWetDry
 }) => {
-  const [activeDspTab, setActiveDspTab] = useState<'eq' | 'comp' | 'duck' | 'vst'>('eq');
+  const [activeDspTab, setActiveDspTab] = useState<'eq' | 'comp' | 'duck' | 'fx' | 'vst'>('eq');
 
   const handleVolumeChange = (v: number) => {
     onUpdateTrack({ ...track, volumeDb: v });
@@ -195,6 +197,15 @@ export const TrackStrip: React.FC<TrackStripProps> = ({
               }`}
             >
               Duck
+            </button>
+            <button
+              onClick={() => setActiveDspTab('fx')}
+              className={`px-2 py-0.5 text-[11px] font-medium rounded flex items-center gap-1 ${
+                activeDspTab === 'fx' ? 'bg-emerald-600 text-white font-bold' : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Sliders size={11} />
+              Insert FX ({(track.insertEffects || []).length})
             </button>
             <button
               onClick={() => setActiveDspTab('vst')}
@@ -462,7 +473,36 @@ export const TrackStrip: React.FC<TrackStripProps> = ({
           </div>
         )}
 
-        {/* Tab 4: VST Rack Slot */}
+        {/* Tab 4: Native C++ Insert FX Rack */}
+        {activeDspTab === 'fx' && (
+          <div className="space-y-3 animate-fadeIn">
+            <TrackInsertRack
+              trackId={track.id}
+              trackName={track.name}
+              trackColor={track.color}
+              effects={track.insertEffects || []}
+              onUpdateEffects={(updated) => {
+                onUpdateTrack({ ...track, insertEffects: updated });
+              }}
+              onSetEffectParam={(slotIdx, paramId, val) => {
+                try {
+                  globalNativeDAWBridge.setTrackEffectParam(track.id, slotIdx, paramId, val);
+                } catch {
+                  // Ignore
+                }
+              }}
+              onSetEffectBypass={(slotIdx, bypass) => {
+                try {
+                  globalNativeDAWBridge.setTrackEffectBypass(track.id, slotIdx, bypass);
+                } catch {
+                  // Ignore
+                }
+              }}
+            />
+          </div>
+        )}
+
+        {/* Tab 5: VST Rack Slot */}
         {activeDspTab === 'vst' && (
           <div className="space-y-3 animate-fadeIn">
             <VSTRackSlot

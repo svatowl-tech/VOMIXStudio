@@ -14,6 +14,20 @@ set(DSP_SOURCES
     dsp/BiquadFilter.cpp
     dsp/Dynamics.cpp
     dsp/AudioUtils.cpp
+    dsp/StudioCompressor.cpp
+    dsp/ParametricEQPro.cpp
+    dsp/StudioReverb.cpp
+    dsp/FFTSpectralFilter.cpp
+    dsp/TransientShaper.cpp
+    dsp/GraphicEQ31.cpp
+    dsp/DynamicEQ.cpp
+    dsp/LinearPhaseFilter.cpp
+    dsp/ResonanceSuppressor.cpp
+    dsp/TapeSaturation.cpp
+    dsp/SmartBreathController.cpp
+    dsp/MouthDeClicker.cpp
+    dsp/ProximityControl.cpp
+    dsp/AutoPhaseAligner.cpp
 )
 
 set(DSP_HEADERS
@@ -21,6 +35,20 @@ set(DSP_HEADERS
     dsp/BiquadFilter.hpp
     dsp/Dynamics.hpp
     dsp/AudioUtils.hpp
+    dsp/StudioCompressor.hpp
+    dsp/ParametricEQPro.hpp
+    dsp/StudioReverb.hpp
+    dsp/FFTSpectralFilter.hpp
+    dsp/TransientShaper.hpp
+    dsp/GraphicEQ31.hpp
+    dsp/DynamicEQ.hpp
+    dsp/LinearPhaseFilter.hpp
+    dsp/ResonanceSuppressor.hpp
+    dsp/TapeSaturation.hpp
+    dsp/SmartBreathController.hpp
+    dsp/MouthDeClicker.hpp
+    dsp/ProximityControl.hpp
+    dsp/AutoPhaseAligner.hpp
 )
 
 # 2. Vocal Rack DSP
@@ -38,6 +66,7 @@ set(ENGINE_SOURCES
     engine/Track.cpp
     engine/Mixer.cpp
     engine/MediaCore.cpp
+    engine/TrackInsertChain.cpp
 )
 
 set(ENGINE_HEADERS
@@ -45,6 +74,7 @@ set(ENGINE_HEADERS
     engine/Track.hpp
     engine/Mixer.hpp
     engine/MediaCore.hpp
+    engine/TrackInsertChain.hpp
 )
 
 # 4. Clip Editing, Silence Stripper & WSOLA Time Stretch
@@ -52,12 +82,14 @@ set(EDITING_SOURCES
     editing/WSOLATimeStretch.cpp
     editing/ClipEditor.cpp
     editing/SilenceStripper.cpp
+    editing/PhraseLoudnessNormalizer.cpp
 )
 
 set(EDITING_HEADERS
     editing/WSOLATimeStretch.hpp
     editing/ClipEditor.hpp
     editing/SilenceStripper.hpp
+    editing/PhraseLoudnessNormalizer.hpp
 )
 
 # 5. Speech Analysis, Levenshtein, VAD, Waveform Peaks, Subtitle Parsing & Stem Separation

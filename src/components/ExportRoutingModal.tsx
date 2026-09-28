@@ -55,6 +55,26 @@ import {
 } from '../services/RenderPipelineGraphManager';
 import { toSafeArray } from '../utils/safeIterables';
 import { TrackState, VocalBusState, MasterState } from '../audio/dawEngine';
+import { getEffectDefinition, NATIVE_DSP_CATALOG } from '../audio/nativeEffectsCatalog';
+
+const DSP_NODE_TYPE_MAP: Record<string, number> = {
+  dsp_phrase_leveler: 101,
+  dsp_studio_compressor: 102,
+  dsp_parametric_eq: 103,
+  dsp_dynamic_eq: 104,
+  dsp_graphic_eq31: 105,
+  dsp_de_esser: 106,
+  dsp_smart_breath: 107,
+  dsp_mouth_declicker: 108,
+  dsp_proximity_control: 109,
+  dsp_phase_aligner: 110,
+  dsp_transient_shaper: 111,
+  dsp_resonance_suppressor: 112,
+  dsp_tape_saturation: 113,
+  dsp_linear_phase_filter: 114,
+  dsp_studio_reverb: 115,
+  dsp_fft_spectral_filter: 116
+};
 
 interface ExportRoutingModalProps {
   isOpen: boolean;
@@ -201,30 +221,40 @@ export const ExportRoutingModal: React.FC<ExportRoutingModalProps> = ({
     }
   };
 
-  // Canvas Mouse Move
+  const rafRef = useRef<number | null>(null);
+
+  // Canvas Mouse Move с аппаратным троттлингом (requestAnimationFrame) для исключения просадок FPS
   const handleMouseMoveCanvas = (e: React.MouseEvent) => {
     if (!canvasRef.current) return;
     const canvasRect = canvasRef.current.getBoundingClientRect();
     const curX = e.clientX - canvasRect.left + canvasRef.current.scrollLeft;
     const curY = e.clientY - canvasRect.top + canvasRef.current.scrollTop;
-    setMousePos({ x: curX, y: curY });
 
-    if (draggingNodeId) {
-      const newX = Math.max(20, Math.min(3200, curX - dragOffset.x));
-      const newY = Math.max(20, Math.min(900, curY - dragOffset.y));
-      globalRenderPipelineGraphManager.updateNode(draggingNodeId, { x: newX, y: newY });
-    }
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(() => {
+      setMousePos({ x: curX, y: curY });
+
+      if (draggingNodeId) {
+        const newX = Math.max(20, Math.min(3200, curX - dragOffset.x));
+        const newY = Math.max(20, Math.min(900, curY - dragOffset.y));
+        globalRenderPipelineGraphManager.updateNode(draggingNodeId, { x: newX, y: newY });
+      }
+    });
   };
 
   const handleMouseUpCanvas = () => {
     setDraggingNodeId(null);
+  };
+
+  const handleCanvasClick = (e: React.MouseEvent) => {
     if (connectingStart) {
       setConnectingStart(null);
+      showToast('Соединение отменено');
     }
   };
 
-  // Interactive Port Cable Connection Handlers
-  const handleStartCableFromPort = (
+  // Интерактивное подключение проводов (поддержка как Drag-and-Drop, так и Click-to-Connect)
+  const handlePortMouseDown = (
     e: React.MouseEvent,
     node: PipelineNode,
     port: NodePort,
@@ -232,6 +262,11 @@ export const ExportRoutingModal: React.FC<ExportRoutingModalProps> = ({
     portIndex: number
   ) => {
     e.stopPropagation();
+    if (connectingStart) {
+      handleCompleteCableAtPort(e, node, port, isOutput);
+      return;
+    }
+
     const portY = node.y + 40 + portIndex * 24 + 12;
     const portX = isOutput ? node.x + 220 : node.x;
 
@@ -241,8 +276,36 @@ export const ExportRoutingModal: React.FC<ExportRoutingModalProps> = ({
       isOutput,
       x: portX,
       y: portY,
-      color: port.color || '#10b981'
+      color: port.color || (isOutput ? '#06b6d4' : '#10b981')
     });
+    showToast(`Выбран ${isOutput ? 'Выход' : 'Вход'} [${port.label}]. Нажмите на целевой порт для соединения.`);
+  };
+
+  const handlePortMouseUp = (
+    e: React.MouseEvent,
+    node: PipelineNode,
+    port: NodePort,
+    isOutput: boolean
+  ) => {
+    e.stopPropagation();
+    if (connectingStart) {
+      handleCompleteCableAtPort(e, node, port, isOutput);
+    }
+  };
+
+  const handlePortClick = (
+    e: React.MouseEvent,
+    node: PipelineNode,
+    port: NodePort,
+    isOutput: boolean,
+    portIndex: number
+  ) => {
+    e.stopPropagation();
+    if (connectingStart) {
+      handleCompleteCableAtPort(e, node, port, isOutput);
+    } else {
+      handlePortMouseDown(e, node, port, isOutput, portIndex);
+    }
   };
 
   const handleCompleteCableAtPort = (
@@ -277,7 +340,7 @@ export const ExportRoutingModal: React.FC<ExportRoutingModalProps> = ({
 
     globalRenderPipelineGraphManager.addPortConnection(fromNodeId, fromPortId, toNodeId, toPortId, isLoop);
     setConnectingStart(null);
-    showToast(`Маршрут соединен: [${fromNode?.title}] -> [${toNode?.title}]`);
+    showToast(`Маршрут успешно создан: [${fromNode?.title}] ➔ [${toNode?.title}]`);
   };
 
   const handleDeleteConnection = (connId: string, e?: React.MouseEvent) => {
@@ -538,6 +601,7 @@ export const ExportRoutingModal: React.FC<ExportRoutingModalProps> = ({
                 ref={canvasRef}
                 onMouseMove={handleMouseMoveCanvas}
                 onMouseUp={handleMouseUpCanvas}
+                onClick={handleCanvasClick}
                 className="w-full h-full overflow-auto relative p-8 cursor-crosshair bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:24px_24px]"
               >
                 {/* SVG Линии связей между портами */}
@@ -708,23 +772,28 @@ export const ExportRoutingModal: React.FC<ExportRoutingModalProps> = ({
                                 const isPortConnected = safeConnections.some(
                                   (c) => c.toNodeId === node.id && c.toPortId === port.id
                                 );
+                                const isConnectingThis = connectingStart?.nodeId === node.id && connectingStart?.portId === port.id;
                                 return (
                                   <div
                                     key={port.id}
                                     className="flex items-center gap-1.5 group/port cursor-pointer"
-                                    onClick={(e) => handleCompleteCableAtPort(e, node, port, false)}
-                                    title={`Вход: ${port.label} (${port.type}). Кликните, чтобы завершить провод.`}
+                                    onMouseDown={(e) => handlePortMouseDown(e, node, port, false, pIdx)}
+                                    onMouseUp={(e) => handlePortMouseUp(e, node, port, false)}
+                                    onClick={(e) => handlePortClick(e, node, port, false, pIdx)}
+                                    title={`Вход: ${port.label} (${port.type}). Нажмите или потяните провод.`}
                                   >
                                     {/* Точка сокета */}
                                     <div
-                                      className={`w-3 h-3 rounded-full border-2 transition-all flex items-center justify-center ${
-                                        isPortConnected
+                                      className={`w-3.5 h-3.5 rounded-full border-2 transition-all flex items-center justify-center ${
+                                        isConnectingThis
+                                          ? 'bg-amber-400 border-white ring-4 ring-amber-500/50 scale-125'
+                                          : isPortConnected
                                           ? 'bg-emerald-400 border-white ring-2 ring-emerald-500/40'
                                           : 'bg-slate-900 border-slate-600 hover:border-cyan-400 hover:scale-125'
                                       }`}
-                                      style={{ borderColor: port.color || '#10b981' }}
+                                      style={{ borderColor: isConnectingThis ? '#f59e0b' : port.color || '#10b981' }}
                                     >
-                                      {isPortConnected && <div className="w-1 h-1 rounded-full bg-slate-950"></div>}
+                                      {isPortConnected && !isConnectingThis && <div className="w-1 h-1 rounded-full bg-slate-950"></div>}
                                     </div>
                                     <span className="text-[10px] text-slate-300 truncate max-w-[70px] group-hover/port:text-cyan-300">
                                       {port.label}
@@ -747,26 +816,31 @@ export const ExportRoutingModal: React.FC<ExportRoutingModalProps> = ({
                                 const isPortConnected = safeConnections.some(
                                   (c) => c.fromNodeId === node.id && c.fromPortId === port.id
                                 );
+                                const isConnectingThis = connectingStart?.nodeId === node.id && connectingStart?.portId === port.id;
                                 return (
                                   <div
                                     key={port.id}
                                     className="flex items-center justify-end gap-1.5 group/port cursor-pointer"
-                                    onMouseDown={(e) => handleStartCableFromPort(e, node, port, true, pIdx)}
-                                    title={`Выход: ${port.label} (${port.type}). Потяните отсюда провод.`}
+                                    onMouseDown={(e) => handlePortMouseDown(e, node, port, true, pIdx)}
+                                    onMouseUp={(e) => handlePortMouseUp(e, node, port, true)}
+                                    onClick={(e) => handlePortClick(e, node, port, true, pIdx)}
+                                    title={`Выход: ${port.label} (${port.type}). Нажмите или потяните провод.`}
                                   >
                                     <span className="text-[10px] text-slate-300 truncate max-w-[70px] group-hover/port:text-cyan-300">
                                       {port.label}
                                     </span>
                                     {/* Точка сокета */}
                                     <div
-                                      className={`w-3 h-3 rounded-full border-2 transition-all flex items-center justify-center ${
-                                        isPortConnected
+                                      className={`w-3.5 h-3.5 rounded-full border-2 transition-all flex items-center justify-center ${
+                                        isConnectingThis
+                                          ? 'bg-amber-400 border-white ring-4 ring-amber-500/50 scale-125'
+                                          : isPortConnected
                                           ? 'bg-cyan-400 border-white ring-2 ring-cyan-500/40'
                                           : 'bg-slate-900 border-slate-600 hover:border-cyan-400 hover:scale-125'
                                       }`}
-                                      style={{ borderColor: port.color || '#06b6d4' }}
+                                      style={{ borderColor: isConnectingThis ? '#f59e0b' : port.color || '#06b6d4' }}
                                     >
-                                      {isPortConnected && <div className="w-1 h-1 rounded-full bg-slate-950"></div>}
+                                      {isPortConnected && !isConnectingThis && <div className="w-1 h-1 rounded-full bg-slate-950"></div>}
                                     </div>
                                   </div>
                                 );
@@ -2027,6 +2101,70 @@ export const ExportRoutingModal: React.FC<ExportRoutingModalProps> = ({
                       </div>
                     </div>
                   )}
+
+                  {/* Универсальный инспектор для 16 нативных C++ DSP модулей */}
+                  {selectedNode.type.startsWith('dsp_') && (() => {
+                    const typeId = DSP_NODE_TYPE_MAP[selectedNode.type];
+                    const effectDef = typeId ? getEffectDefinition(typeId) : undefined;
+                    if (!effectDef) return null;
+                    return (
+                      <div className="space-y-3 p-3.5 bg-slate-900/90 border border-slate-700/80 rounded-2xl text-xs shadow-inner">
+                        <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                          <div className="flex items-center gap-2">
+                            <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: effectDef.color }} />
+                            <span className="font-bold text-slate-100">{effectDef.name}</span>
+                          </div>
+                          <span
+                            className="px-2 py-0.5 rounded text-[10px] font-mono font-bold"
+                            style={{ color: effectDef.color, backgroundColor: `${effectDef.color}20` }}
+                          >
+                            DSP #{effectDef.typeId}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-400">{effectDef.description}</p>
+
+                        <div className="space-y-3 pt-1">
+                          {effectDef.params.map((param) => {
+                            const val =
+                              selectedNode.parameters[param.key] !== undefined
+                                ? selectedNode.parameters[param.key]
+                                : param.default;
+                            return (
+                              <div key={param.id} className="space-y-1 bg-slate-950/60 p-2 rounded-xl border border-slate-800/80">
+                                <div className="flex items-center justify-between text-[11px]">
+                                  <span className="text-slate-300 font-medium">{param.name}:</span>
+                                  <span className="font-mono text-cyan-300 font-bold">
+                                    {typeof val === 'number'
+                                      ? Number.isInteger(param.step) && param.step >= 1
+                                        ? val
+                                        : val.toFixed(1)
+                                      : val}{' '}
+                                    {param.unit}
+                                  </span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min={param.min}
+                                  max={param.max}
+                                  step={param.step}
+                                  value={val}
+                                  onChange={(e) =>
+                                    handleUpdateParam(selectedNode.id, param.key, parseFloat(e.target.value))
+                                  }
+                                  className="w-full accent-cyan-400 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
+                                />
+                                <div className="flex justify-between text-[9px] text-slate-500 font-mono">
+                                  <span>{param.min} {param.unit}</span>
+                                  <span>Def: {param.default} {param.unit}</span>
+                                  <span>{param.max} {param.unit}</span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {/* 14. Auto Ducking */}
                   {selectedNode.type === 'auto_ducking' && (
