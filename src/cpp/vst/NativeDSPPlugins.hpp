@@ -1063,61 +1063,74 @@ public:
 // 14. Waves Renaissance DeEsser (PluginTypeId = 14)
 // ============================================================================
 class NativeDeEsserPlugin : public NativePluginBase {
-    DeEsser deEsser;
+    DAWCore::DeEsserPro deEsser;
 
 public:
     NativeDeEsserPlugin()
         : NativePluginBase("Waves Renaissance DeEsser", "Restoration", "vst-deesser", 0)
     {
         registerParam(0, "Bypass", "", 0.0f);
-        registerParam(1, "Threshold", "dB", 0.5f);
-        registerParam(2, "Frequency", "Hz", 0.6f); // 4000 .. 10000 Hz
-        registerParam(3, "Range", "dB", 0.5f);
-        deEsser.setup(static_cast<float>(sampleRate));
+        registerParam(1, "Threshold", "dB", -20.0f);          // -50.0 .. 0.0 dB
+        registerParam(2, "Frequency", "Hz", 6200.0f);         // 3500 .. 11000 Hz
+        registerParam(3, "Max Reduction", "dB", -14.0f);      // -24.0 .. -2.0 dB
+        registerParam(4, "Ratio", ":1", 5.0f);                // 1.5 .. 20.0
+        registerParam(5, "Split Band", "bool", 1.0f);         // 1 = Split, 0 = Wide
+        deEsser.setSampleRate(static_cast<float>(sampleRate));
         updateDeEsser();
     }
 
     void updateDeEsser() {
-        deEsser.thresholdDb = -36.0f + paramValues[1] * 28.0f;
-        deEsser.frequency = 4000.0f + paramValues[2] * 6000.0f;
-        deEsser.setup(static_cast<float>(sampleRate));
+        DAWCore::DeEsserProParams p;
+        p.enabled = !(paramValues[0] > 0.5f);
+
+        float thresh = paramValues[1];
+        if (thresh >= 0.0f && thresh <= 1.0f) {
+            p.thresholdDb = -50.0f + thresh * 50.0f;
+        } else {
+            p.thresholdDb = thresh;
+        }
+
+        float freq = paramValues[2];
+        if (freq >= 0.0f && freq <= 1.0f) {
+            p.frequency = 3500.0f + freq * 7500.0f;
+        } else {
+            p.frequency = freq;
+        }
+
+        float range = paramValues[3];
+        if (range >= 0.0f && range <= 1.0f) {
+            p.maxReductionDb = -24.0f + range * 22.0f;
+        } else {
+            p.maxReductionDb = range;
+        }
+
+        if (paramValues.size() > 4) {
+            float r = paramValues[4];
+            p.ratio = (r >= 0.0f && r <= 1.0f) ? (1.5f + r * 18.5f) : r;
+        }
+        if (paramValues.size() > 5) {
+            p.splitBand = paramValues[5] > 0.5f;
+        }
+
+        deEsser.setParams(p);
     }
 
     void onParamChanged(uint32_t paramId, float) override {
         if (paramId == 0) {
             setBypass(paramValues[0] > 0.5f);
-        } else {
-            updateDeEsser();
         }
+        updateDeEsser();
     }
 
     void reset() override {
-        deEsser.setup(static_cast<float>(sampleRate));
+        deEsser.setSampleRate(static_cast<float>(sampleRate));
+        deEsser.reset();
         updateDeEsser();
     }
 
     void processBlock(float** inputs, float** outputs, int32_t numFrames) override {
         if (!inputs || !outputs || numFrames <= 0) return;
-        const float* inL = inputs[0];
-        const float* inR = inputs[1] ? inputs[1] : inputs[0];
-        float* outL = outputs[0];
-        float* outR = outputs[1] ? outputs[1] : outputs[0];
-
-        float targetBypass = bypassed ? 0.0f : 1.0f;
-
-        for (int32_t i = 0; i < numFrames; ++i) {
-            smoothedBypassGain += 0.005f * (targetBypass - smoothedBypassGain);
-            smoothedWetDry += 0.005f * (wetDry - smoothedWetDry);
-
-            float procL = deEsser.process(inL[i]);
-            float procR = deEsser.process(inR[i]);
-
-            float mixedL = inL[i] * (1.0f - smoothedWetDry) + procL * smoothedWetDry;
-            float mixedR = inR[i] * (1.0f - smoothedWetDry) + procR * smoothedWetDry;
-
-            outL[i] = inL[i] * (1.0f - smoothedBypassGain) + mixedL * smoothedBypassGain;
-            outR[i] = inR[i] * (1.0f - smoothedBypassGain) + mixedR * smoothedBypassGain;
-        }
+        deEsser.processBlockSplit(inputs, outputs, static_cast<size_t>(numFrames));
     }
 };
 

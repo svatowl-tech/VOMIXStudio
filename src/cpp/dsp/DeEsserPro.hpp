@@ -71,9 +71,14 @@ public:
     float getCurrentGainReductionDb() const noexcept { return currentGainReductionDb_; }
 
     /**
-     * Потоковая In-Place обработка блока аудиосэмплов
+     * Потоковая In-Place обработка блока аудиосэмплов (Interleaved)
      */
     void processBlock(float* buffer, size_t numFrames, int channels) noexcept;
+
+    /**
+     * Потоковая раздельно-канальная обработка блока аудиосэмплов (Planar / VST pointers)
+     */
+    void processBlockSplit(const float* const* inputs, float* const* outputs, size_t numFrames) noexcept;
 
 private:
     void updateFilters() noexcept;

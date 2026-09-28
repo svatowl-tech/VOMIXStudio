@@ -168,4 +168,85 @@ void DeEsserPro::processBlock(float* buffer, size_t numFrames, int channels) noe
     currentGainReductionDb_ = gainToDb(std::max(1e-5f, currentGainReductionLinear_));
 }
 
+void DeEsserPro::processBlockSplit(const float* const* inputs, float* const* outputs, size_t numFrames) noexcept {
+    if (!inputs || !outputs || numFrames == 0) return;
+
+    const float* inL = inputs[0];
+    const float* inR = inputs[1] ? inputs[1] : inputs[0];
+    float* outL = outputs[0];
+    float* outR = outputs[1] ? outputs[1] : outputs[0];
+
+    if (!params_.enabled) {
+        if (inL != outL) std::copy(inL, inL + numFrames, outL);
+        if (inR != outR) std::copy(inR, inR + numFrames, outR);
+        return;
+    }
+
+    const float threshDb = params_.thresholdDb;
+    const float ratio = std::max(1.0f, params_.ratio);
+    const float maxReduction = std::min(-1.0f, params_.maxReductionDb);
+    const bool split = params_.splitBand;
+    const bool listen = params_.listenMode;
+
+    const float b0 = bpCoeffs_.b0, b1 = bpCoeffs_.b1, b2 = bpCoeffs_.b2;
+    const float a1 = bpCoeffs_.a1, a2 = bpCoeffs_.a2;
+
+    for (size_t i = 0; i < numFrames; ++i) {
+        float xL = inL[i];
+        float xR = inR[i];
+
+        // 1. Полосовая фильтрация
+        float sibilantL = b0 * xL + bpState_.s1L;
+        bpState_.s1L = b1 * xL - a1 * sibilantL + bpState_.s2L;
+        bpState_.s2L = b2 * xL - a2 * sibilantL;
+
+        float sibilantR = b0 * xR + bpState_.s1R;
+        bpState_.s1R = b1 * xR - a1 * sibilantR + bpState_.s2R;
+        bpState_.s2R = b2 * xR - a2 * sibilantR;
+
+        const float sibilantMono = (sibilantL + sibilantR) * 0.5f;
+
+        // 2. Детектор огибающей мощности сибилянта
+        const float absSib = std::fabs(sibilantMono);
+        if (absSib > detectorEnvelope_) {
+            detectorEnvelope_ += (absSib - detectorEnvelope_) * attackCoeff_;
+        } else {
+            detectorEnvelope_ += (absSib - detectorEnvelope_) * releaseCoeff_;
+        }
+
+        const float envDb = gainToDb(std::max(1e-6f, detectorEnvelope_));
+
+        // 3. Расчет редукции
+        float targetGainLinear = 1.0f;
+        if (envDb > threshDb) {
+            const float excessDb = envDb - threshDb;
+            const float grDb = -excessDb * (1.0f - (1.0f / ratio));
+            const float clampedGrDb = std::max(maxReduction, grDb);
+            targetGainLinear = dbToGain(clampedGrDb);
+        }
+
+        if (targetGainLinear < currentGainReductionLinear_) {
+            currentGainReductionLinear_ += (targetGainLinear - currentGainReductionLinear_) * attackCoeff_;
+        } else {
+            currentGainReductionLinear_ += (targetGainLinear - currentGainReductionLinear_) * releaseCoeff_;
+        }
+
+        const float gr = currentGainReductionLinear_;
+
+        // 4. Применение редукции
+        if (listen) {
+            outL[i] = sibilantL * (1.0f - gr);
+            outR[i] = sibilantR * (1.0f - gr);
+        } else if (split) {
+            outL[i] = (xL - sibilantL) + sibilantL * gr;
+            outR[i] = (xR - sibilantR) + sibilantR * gr;
+        } else {
+            outL[i] = xL * gr;
+            outR[i] = xR * gr;
+        }
+    }
+
+    currentGainReductionDb_ = gainToDb(std::max(1e-5f, currentGainReductionLinear_));
+}
+
 } // namespace DAWCore
