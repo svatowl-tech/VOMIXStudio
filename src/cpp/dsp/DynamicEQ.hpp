@@ -95,7 +95,10 @@ public:
      * Настройка параметров конкретной полосы (0 .. NUM_BANDS - 1)
      */
     void setBandParams(size_t bandIndex, const DynamicEQBand& params) noexcept;
+    inline void setBand(size_t bandIndex, const DynamicEQBand& params) noexcept { setBandParams(bandIndex, params); }
+
     const DynamicEQBand& getBandParams(size_t bandIndex) const noexcept;
+    inline const DynamicEQBand& getBand(size_t bandIndex) const noexcept { return getBandParams(bandIndex); }
 
     /**
      * Получение текущей величины динамического подавления/усиления в дБ (для UI измерителей)

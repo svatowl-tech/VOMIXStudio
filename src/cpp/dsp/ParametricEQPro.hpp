@@ -105,11 +105,13 @@ public:
      * Настройка параметров конкретной полосы (0 .. 4)
      */
     void setBandParams(size_t bandIndex, const EQBandParams& params) noexcept;
+    inline void setBand(size_t bandIndex, const EQBandParams& params) noexcept { setBandParams(bandIndex, params); }
 
     /**
      * Получение параметров конкретной полосы
      */
     const EQBandParams& getBandParams(size_t bandIndex) const noexcept;
+    inline const EQBandParams& getBand(size_t bandIndex) const noexcept { return getBandParams(bandIndex); }
 
     /**
      * Установка общего коэффициента Master Output Gain (дБ)
