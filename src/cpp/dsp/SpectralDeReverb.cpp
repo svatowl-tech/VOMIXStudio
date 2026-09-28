@@ -16,8 +16,6 @@
 
 namespace DAWCore {
 
-static constexpr float PI_F = 3.14159265358979323846f;
-
 // 16 стандартных ISO частот полос банка фильтров
 static constexpr float BAND_FREQUENCIES[16] = {
     80.0f,   125.0f,  200.0f,  315.0f,

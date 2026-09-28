@@ -16,9 +16,6 @@
 
 namespace DAWCore {
 
-static constexpr float PI_F = 3.14159265358979323846f;
-static constexpr float SQRT2_F = 1.4142135623730950488f;
-
 VocalThickener::VocalThickener(float sampleRate) noexcept
     : sampleRate_(sampleRate > 8000.0f ? sampleRate : 48000.0f) {
     updateFilters();

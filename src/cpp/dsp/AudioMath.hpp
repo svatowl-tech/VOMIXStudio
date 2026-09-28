@@ -27,6 +27,8 @@ namespace DAWCore {
 // Основные математические и аудиоконстанты
 constexpr float PI_F = 3.14159265358979323846f;
 constexpr float TWO_PI_F = 6.28318530717958647692f;
+constexpr float SQRT2_F = 1.4142135623730950488f;
+constexpr float INV_SQRT2_F = 0.7071067811865475244f;
 constexpr float MIN_DB = -120.0f;
 constexpr float EPSILON = 1e-6f;
 constexpr size_t MAX_TRACKS = 32;
