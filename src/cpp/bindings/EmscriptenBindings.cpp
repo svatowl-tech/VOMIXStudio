@@ -1067,7 +1067,7 @@ EMSCRIPTEN_BINDINGS(daw_core_module) {
         float sampleRate,
         const PhraseNormalizerConfig& config
     ) {
-        return PhraseLoudnessNormalizer::processTrackPhrasesNative(
+        return OfflinePhraseNormalizer::processTrackPhrasesNative(
             bufferPtr, totalFrames, channels, sampleRate, config
         );
     }));
