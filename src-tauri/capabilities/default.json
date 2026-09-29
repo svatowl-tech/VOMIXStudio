@@ -16,6 +16,6 @@
     "fs:allow-write-file",
     "fs:allow-read-dir",
     "fs:allow-exists",
-    "path:default"
+    "core:path:default"
   ]
 }

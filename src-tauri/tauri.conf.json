@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "VOMIXStudio - C++ Audio Dubbing Workstation",
         "width": 1280,
         "height": 800,
