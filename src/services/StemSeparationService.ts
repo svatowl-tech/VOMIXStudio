@@ -98,7 +98,7 @@ export interface SeparationOptions {
 export function checkDeviceMemoryForModel(modelSizeMb: number): { supported: boolean; reason?: string } {
   if (typeof navigator !== 'undefined' && 'deviceMemory' in navigator) {
     const devMemGb = (navigator as any).deviceMemory || 4;
-    if (devMemGb < 3 && modelSizeMb > 50) {
+    if (devMemGb < 2 && modelSizeMb > 50) {
       return {
         supported: false,
         reason: `Ограничение ОЗУ устройства (${devMemGb} ГБ) для модели ${modelSizeMb} МБ. Активирован нативный C++ DSP режим.`
@@ -108,11 +108,11 @@ export function checkDeviceMemoryForModel(modelSizeMb: number): { supported: boo
 
   if (typeof performance !== 'undefined' && (performance as any).memory) {
     const mem = (performance as any).memory;
-    const usedHeapMb = mem.usedJSHeapSize / (1024 * 1024);
-    const heapLimitMb = mem.jsHeapSizeLimit / (1024 * 1024);
-    const freeHeapMb = heapLimitMb - usedHeapMb;
+    const usedHeapMb = (mem.usedJSHeapSize || 0) / (1024 * 1024);
+    const heapLimitMb = (mem.jsHeapSizeLimit || 2048 * 1024 * 1024) / (1024 * 1024);
+    const freeHeapMb = Math.max(0, heapLimitMb - usedHeapMb);
 
-    if (freeHeapMb < modelSizeMb * 2.5) {
+    if (heapLimitMb < 512 || (freeHeapMb > 0 && freeHeapMb < modelSizeMb * 1.5)) {
       return {
         supported: false,
         reason: `Мало свободной памяти JS Heap (${Math.round(freeHeapMb)} МБ) для модели ${modelSizeMb} МБ. Активирован C++ DSP режим.`

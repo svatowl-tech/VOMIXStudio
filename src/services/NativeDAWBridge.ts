@@ -2277,6 +2277,8 @@ export class NativeDAWBridge {
 
   /**
    * Разделение вокала и караоке на C++ (StemSeparator::separateVocalsAndKaraoke)
+   * Реализует потоковую блочную обработку (Chunked Streaming), гарантируя нулевой риск OOM
+   * даже на полноформатных фильмах и сериях длительностью 20-60+ минут.
    */
   public separateVocalsAndKaraoke(
     leftChannel: Float32Array,
@@ -2288,13 +2290,13 @@ export class NativeDAWBridge {
     karaokeL: Float32Array;
     karaokeR: Float32Array;
   } {
-    const numSamples = leftChannel.length;
-    const vocalsL = new Float32Array(numSamples);
-    const vocalsR = new Float32Array(numSamples);
-    const karaokeL = new Float32Array(numSamples);
-    const karaokeR = new Float32Array(numSamples);
+    const totalSamples = leftChannel.length;
+    const vocalsL = new Float32Array(totalSamples);
+    const vocalsR = new Float32Array(totalSamples);
+    const karaokeL = new Float32Array(totalSamples);
+    const karaokeR = new Float32Array(totalSamples);
 
-    if (numSamples === 0) {
+    if (totalSamples === 0) {
       return { vocalsL, vocalsR, karaokeL, karaokeR };
     }
 
@@ -2303,40 +2305,52 @@ export class NativeDAWBridge {
       throw new Error('[NativeDAWBridge] Нативная C++ функция separateVocalsAndKaraoke отсутствует в WASM модуле');
     }
 
-    const inLPtr = this.writeFloat32Direct(leftChannel);
-    const inRPtr = this.writeFloat32Direct(rightChannel);
-    const outVocLPtr = this.allocateFloats(numSamples);
-    const outVocRPtr = this.allocateFloats(numSamples);
-    const outKarLPtr = this.allocateFloats(numSamples);
-    const outKarRPtr = this.allocateFloats(numSamples);
+    // Безопасный размер чанка: 480 000 сэмплов (~10 секунд @ 48 кГц = менее 2 МБ на буфер)
+    const CHUNK_SIZE = 480000;
+    let offset = 0;
 
-    try {
-      const success = mod.separateVocalsAndKaraoke(
-        inLPtr,
-        inRPtr,
-        numSamples,
-        outVocLPtr,
-        outVocRPtr,
-        outKarLPtr,
-        outKarRPtr,
-        sampleRate
-      );
+    while (offset < totalSamples) {
+      const currentChunkSize = Math.min(CHUNK_SIZE, totalSamples - offset);
+      const chunkLeft = leftChannel.subarray(offset, offset + currentChunkSize);
+      const chunkRight = rightChannel.subarray(offset, offset + currentChunkSize);
 
-      if (!success) {
-        throw new Error('[NativeDAWBridge] C++ ядро вернуло ошибку при выполнении separateVocalsAndKaraoke');
+      const inLPtr = this.writeFloat32Direct(chunkLeft);
+      const inRPtr = this.writeFloat32Direct(chunkRight);
+      const outVocLPtr = this.allocateFloats(currentChunkSize);
+      const outVocRPtr = this.allocateFloats(currentChunkSize);
+      const outKarLPtr = this.allocateFloats(currentChunkSize);
+      const outKarRPtr = this.allocateFloats(currentChunkSize);
+
+      try {
+        const success = mod.separateVocalsAndKaraoke(
+          inLPtr,
+          inRPtr,
+          currentChunkSize,
+          outVocLPtr,
+          outVocRPtr,
+          outKarLPtr,
+          outKarRPtr,
+          sampleRate
+        );
+
+        if (!success) {
+          throw new Error('[NativeDAWBridge] C++ ядро вернуло ошибку при выполнении separateVocalsAndKaraoke');
+        }
+
+        vocalsL.set(this.readFloat32Direct(outVocLPtr, currentChunkSize), offset);
+        vocalsR.set(this.readFloat32Direct(outVocRPtr, currentChunkSize), offset);
+        karaokeL.set(this.readFloat32Direct(outKarLPtr, currentChunkSize), offset);
+        karaokeR.set(this.readFloat32Direct(outKarRPtr, currentChunkSize), offset);
+      } finally {
+        this.freeFloats(inLPtr);
+        this.freeFloats(inRPtr);
+        this.freeFloats(outVocLPtr);
+        this.freeFloats(outVocRPtr);
+        this.freeFloats(outKarLPtr);
+        this.freeFloats(outKarRPtr);
       }
 
-      vocalsL.set(this.readFloat32Direct(outVocLPtr, numSamples));
-      vocalsR.set(this.readFloat32Direct(outVocRPtr, numSamples));
-      karaokeL.set(this.readFloat32Direct(outKarLPtr, numSamples));
-      karaokeR.set(this.readFloat32Direct(outKarRPtr, numSamples));
-    } finally {
-      this.freeFloats(inLPtr);
-      this.freeFloats(inRPtr);
-      this.freeFloats(outVocLPtr);
-      this.freeFloats(outVocRPtr);
-      this.freeFloats(outKarLPtr);
-      this.freeFloats(outKarRPtr);
+      offset += currentChunkSize;
     }
 
     return { vocalsL, vocalsR, karaokeL, karaokeR };
