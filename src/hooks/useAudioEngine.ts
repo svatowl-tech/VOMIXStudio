@@ -213,53 +213,100 @@ const getParamIdAsNumber = (paramName: string | number): number => {
   }
 };
 
+// ============================================================================
+// GLOBAL AUDIO ENGINE SINGLETON & MULTI-COMPONENT BROADCASTER
+// ============================================================================
+// Предотвращает дублирование AudioContext, утечки 2GB WASM-памяти и лаги от двух параллельных ядер
+let globalAudioCtx: AudioContext | null = null;
+let globalWorkletNode: AudioWorkletNode | null = null;
+let globalInitPromise: Promise<void> | null = null;
+let globalIsInitialized = false;
+let globalIsPlaying = false;
+let globalIsAudioWorkletActive = false;
+let globalCurrentTimeSec = 0;
+let globalError: string | null = null;
+
+const globalTrackMeters = new Map<number, TrackMeterData>();
+let globalVocalBusMeter: VocalBusMeterData = { peakL: 0, peakR: 0, latencySamples: 0, pdcMs: 0 };
+let globalMasterMeter: MasterMeterData = { peakL: 0, peakR: 0, clipped: false, latencySamples: 0, pdcMs: 0 };
+
+const globalSyncedClipIds = new Set<number>();
+const globalClipWasmPtrs = new Map<number, number>();
+const globalPendingPluginLoads = new Map<string, () => void>();
+const globalPendingChunkRequests = new Map<string, (chunk: string) => void>();
+const globalPendingClipAcks = new Map<number, () => void>();
+
+type StateSubscriber = {
+  setIsInitialized: (val: boolean) => void;
+  setIsPlaying: (val: boolean) => void;
+  setIsAudioWorkletActive: (val: boolean) => void;
+  setCurrentTimeSec: (val: number) => void;
+  setError: (val: string | null) => void;
+  setTrackMeters: React.Dispatch<React.SetStateAction<Map<number, TrackMeterData>>>;
+  setVocalBusMeter: React.Dispatch<React.SetStateAction<VocalBusMeterData>>;
+  setMasterMeter: React.Dispatch<React.SetStateAction<MasterMeterData>>;
+};
+const globalSubscribers = new Set<StateSubscriber>();
+
+function broadcastState(updater: (sub: StateSubscriber) => void) {
+  for (const sub of globalSubscribers) {
+    try {
+      updater(sub);
+    } catch (e) {
+      console.warn('[useAudioEngine] Ошибка уведомления подписчика состояния:', e);
+    }
+  }
+}
+
 export const useAudioEngine = (): UseAudioEngineReturn => {
-  const [isInitialized, setIsInitialized] = useState(false);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [isAudioWorkletActive, setIsAudioWorkletActive] = useState(false);
-  const [currentTimeSec, setCurrentTimeSec] = useState(0);
-  const [error, setError] = useState<string | null>(null);
+  const [isInitialized, setIsInitialized] = useState(globalIsInitialized);
+  const [isPlaying, setIsPlaying] = useState(globalIsPlaying);
+  const [isAudioWorkletActive, setIsAudioWorkletActive] = useState(globalIsAudioWorkletActive);
+  const [currentTimeSec, setCurrentTimeSec] = useState(globalCurrentTimeSec);
+  const [error, setError] = useState<string | null>(globalError);
 
-  const [trackMeters, setTrackMeters] = useState<Map<number, TrackMeterData>>(new Map());
-  const [vocalBusMeter, setVocalBusMeter] = useState<VocalBusMeterData>({
-    peakL: 0,
-    peakR: 0,
-    latencySamples: 0,
-    pdcMs: 0
-  });
-  const [masterMeter, setMasterMeter] = useState<MasterMeterData>({
-    peakL: 0,
-    peakR: 0,
-    clipped: false,
-    latencySamples: 0,
-    pdcMs: 0
-  });
+  const [trackMeters, setTrackMeters] = useState<Map<number, TrackMeterData>>(() => new Map(globalTrackMeters));
+  const [vocalBusMeter, setVocalBusMeter] = useState<VocalBusMeterData>(globalVocalBusMeter);
+  const [masterMeter, setMasterMeter] = useState<MasterMeterData>(globalMasterMeter);
 
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const workletNodeRef = useRef<AudioWorkletNode | null>(null);
-  const initPromiseRef = useRef<Promise<void> | null>(null);
-  const isInitializedRef = useRef<boolean>(false);
-  const pendingClipAcksRef = useRef<Map<number, () => void>>(new Map());
+  // Подписка на глобальные события единственного аудиоядра
+  useEffect(() => {
+    const subscriber: StateSubscriber = {
+      setIsInitialized,
+      setIsPlaying,
+      setIsAudioWorkletActive,
+      setCurrentTimeSec,
+      setError,
+      setTrackMeters,
+      setVocalBusMeter,
+      setMasterMeter
+    };
+    globalSubscribers.add(subscriber);
+    return () => {
+      globalSubscribers.delete(subscriber);
+    };
+  }, []);
+
+  const audioCtxRef = useRef<AudioContext | null>(globalAudioCtx);
+  audioCtxRef.current = globalAudioCtx;
+  const workletNodeRef = useRef<AudioWorkletNode | null>(globalWorkletNode);
+  workletNodeRef.current = globalWorkletNode;
+  const isInitializedRef = useRef<boolean>(globalIsInitialized);
+  isInitializedRef.current = globalIsInitialized;
 
   // Согласование времени плейхеда без дрожания с помощью performance.now()
   const playheadStartPerfRef = useRef<number>(performance.now());
-  const playheadStartTimeSecRef = useRef<number>(0);
-  const lastReportedTimeSecRef = useRef<number>(0);
-  const currentTimeSecRef = useRef<number>(0);
-  const currentWorkletTimeSecRef = useRef<number>(0);
+  const playheadStartTimeSecRef = useRef<number>(globalCurrentTimeSec);
+  const lastReportedTimeSecRef = useRef<number>(globalCurrentTimeSec);
+  const currentTimeSecRef = useRef<number>(globalCurrentTimeSec);
+  const currentWorkletTimeSecRef = useRef<number>(globalCurrentTimeSec);
 
   // Реестры ожидающих промисов для асинхронных VST операций
-  // key: `${trackId}_${slotIdx}` -> resolve callback
-  const pendingPluginLoadsRef = useRef<Map<string, () => void>>(new Map());
-  // requestId -> resolve callback с Base64 строкой чанка
-  const pendingChunkRequestsRef = useRef<Map<string, (chunk: string) => void>>(new Map());
-
-  // Множество ID клипов, уже переданных в AudioWorklet (clipId)
-  // Исключает катастрофическое повторное клонирование сотен мегабайт PCM буферов через postMessage
-  const syncedClipIdsRef = useRef<Set<number>>(new Set());
-
-  // Мапа активных указателей кучи C++ WebAssembly для клипов (clipId -> wasmBufferPtr)
-  const clipWasmPtrs = useRef<Map<number, number>>(new Map());
+  const pendingPluginLoadsRef = useRef<Map<string, () => void>>(globalPendingPluginLoads);
+  const pendingChunkRequestsRef = useRef<Map<string, (chunk: string) => void>>(globalPendingChunkRequests);
+  const syncedClipIdsRef = useRef<Set<number>>(globalSyncedClipIds);
+  const clipWasmPtrs = useRef<Map<number, number>>(globalClipWasmPtrs);
+  const pendingClipAcksRef = useRef<Map<number, () => void>>(globalPendingClipAcks);
 
   /**
    * Принудительное освобождение памяти WASM буфера клипа (HEAPF32 _free)
@@ -329,16 +376,20 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
    * Инициализация AudioContext, загрузка C++ WebAssembly ядра и запуск AudioWorklet
    */
   const initAudioEngine = useCallback(async () => {
-    if (isInitializedRef.current && workletNodeRef.current) {
+    if (globalIsInitialized && globalWorkletNode) {
+      setIsInitialized(true);
+      setIsAudioWorkletActive(true);
       return;
     }
-    if (initPromiseRef.current) {
-      return initPromiseRef.current;
+    if (globalInitPromise) {
+      return globalInitPromise;
     }
 
     const doInit = async () => {
       try {
         setError(null);
+        globalError = null;
+        broadcastState((sub) => sub.setError(null));
         systemLogger.info('AudioWorklet', 'Инициализация Web AudioContext и загрузка C++ WASM ядра...');
 
         // 1. Загрузка бинарника /wasm/daw_core.wasm с резервным запуском из Base64 константы
@@ -367,7 +418,8 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             wasmBytes = bytes.buffer;
           } catch (base64Err) {
             const errMessage = 'Фатальная ошибка: Не удалось декодировать встроенное Base64 C++ ядро.';
-            setError(errMessage);
+            globalError = errMessage;
+            broadcastState((sub) => sub.setError(errMessage));
             systemLogger.error('AudioWorklet', errMessage);
             throw new Error(errMessage);
           }
@@ -379,11 +431,11 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
           throw new Error('Ваш браузер не поддерживает Web Audio API.');
         }
 
-        if (!audioCtxRef.current) {
-          audioCtxRef.current = new AudioCtxClass({ sampleRate: 48000 });
+        if (!globalAudioCtx) {
+          globalAudioCtx = new AudioCtxClass({ sampleRate: 48000 });
         }
-
-        const ctx = audioCtxRef.current;
+        audioCtxRef.current = globalAudioCtx;
+        const ctx = globalAudioCtx;
 
         // Снятие блокировки автоплея браузером
         if (ctx.state === 'suspended') {
@@ -392,7 +444,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
         }
 
         // 3. Подключение AudioWorklet модуля
-        if (!workletNodeRef.current) {
+        if (!globalWorkletNode) {
           try {
             await ctx.audioWorklet.addModule('/audio-engine-processor.js');
             const workletNode = new AudioWorkletNode(ctx, 'audio-engine-processor', {
@@ -403,45 +455,114 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
 
             // Слушаем сообщения телеметрии и статуса из AudioWorklet
             let lastMetersUpdateTimestamp = 0;
-            const METERS_THROTTLE_MS = 33; // Жесткий throttle индикаторов не чаще 1 раза в 33 мс (~30 FPS)
+            const METERS_THROTTLE_MS = 50; // Оптимальный throttle ~20 FPS с балластным подавлением шума
             let lastTracksData: TrackMeterData[] | null = null;
             let lastVocalBusData: VocalBusMeterData | null = null;
-            let lastMasterData: MasterMeterData | null = null;
+            let lastMasterData: MasterMeterData[] | null = null;
+            let lastMasterSingleData: MasterMeterData | null = null;
             let metersFrameId: number | null = null;
             let metersTimerId: number | null = null;
+            let wasMetersSilent = false;
 
             const updateMetersThrottled = () => {
               metersFrameId = null;
 
-              // Жесткая проверка на массив перед вызовом итерации для предотвращения TypeError
+              let hasAnyAudioActivity = false;
+
               if (Array.isArray(lastTracksData) && lastTracksData.length > 0) {
                 const tracksSnapshot = lastTracksData;
                 lastTracksData = null;
-                setTrackMeters((prevMap) => {
-                  const safeMap = prevMap instanceof Map ? prevMap : new Map();
-                  const newMap = new Map(safeMap);
-                  const safeItems = toSafeArray<TrackMeterData>(tracksSnapshot);
-                  for (let i = 0; i < safeItems.length; i++) {
-                    const item = safeItems[i];
-                    if (item && typeof item.trackId === 'number') {
-                      newMap.set(item.trackId, item);
-                    }
+
+                for (let i = 0; i < tracksSnapshot.length; i++) {
+                  if (tracksSnapshot[i] && (tracksSnapshot[i].peakL > 0.001 || tracksSnapshot[i].peakR > 0.001)) {
+                    hasAnyAudioActivity = true;
+                    break;
                   }
-                  return newMap;
-                });
+                }
+
+                if (hasAnyAudioActivity || !wasMetersSilent) {
+                  broadcastState((sub) => {
+                    sub.setTrackMeters((prevMap) => {
+                      const safeMap = prevMap instanceof Map ? prevMap : new Map();
+                      const safeItems = toSafeArray<TrackMeterData>(tracksSnapshot);
+                      let changed = false;
+
+                      for (let i = 0; i < safeItems.length; i++) {
+                        const item = safeItems[i];
+                        if (!item || typeof item.trackId !== 'number') continue;
+                        const prev = safeMap.get(item.trackId);
+                        if (!prev ||
+                            Math.abs(prev.peakL - item.peakL) > 0.005 ||
+                            Math.abs(prev.peakR - item.peakR) > 0.005 ||
+                            prev.clipped !== item.clipped) {
+                          changed = true;
+                          break;
+                        }
+                      }
+
+                      if (!changed && safeMap.size === safeItems.length) {
+                        return prevMap; // React Bailout: нулевой ре-рендер
+                      }
+
+                      const newMap = new Map(safeMap);
+                      for (let i = 0; i < safeItems.length; i++) {
+                        const item = safeItems[i];
+                        if (item && typeof item.trackId === 'number') {
+                          newMap.set(item.trackId, item);
+                        }
+                      }
+                      globalTrackMeters.clear();
+                      newMap.forEach((v, k) => globalTrackMeters.set(k, v));
+                      return newMap;
+                    });
+                  });
+                }
               } else {
                 lastTracksData = null;
               }
+
               if (lastVocalBusData) {
                 const vocalBusSnapshot = { ...lastVocalBusData };
                 lastVocalBusData = null;
-                setVocalBusMeter(vocalBusSnapshot);
+                if (vocalBusSnapshot.peakL > 0.001 || vocalBusSnapshot.peakR > 0.001) {
+                  hasAnyAudioActivity = true;
+                }
+                if (hasAnyAudioActivity || !wasMetersSilent) {
+                  globalVocalBusMeter = vocalBusSnapshot;
+                  broadcastState((sub) => {
+                    sub.setVocalBusMeter((prev) => {
+                      if (Math.abs(prev.peakL - vocalBusSnapshot.peakL) < 0.005 &&
+                          Math.abs(prev.peakR - vocalBusSnapshot.peakR) < 0.005) {
+                        return prev; // React Bailout
+                      }
+                      return vocalBusSnapshot;
+                    });
+                  });
+                }
               }
-              if (lastMasterData) {
-                const masterSnapshot = { ...lastMasterData };
-                lastMasterData = null;
-                setMasterMeter(masterSnapshot);
+
+              if (lastMasterSingleData) {
+                const masterSnapshot = { ...lastMasterSingleData };
+                lastMasterSingleData = null;
+                if (masterSnapshot.peakL > 0.001 || masterSnapshot.peakR > 0.001) {
+                  hasAnyAudioActivity = true;
+                }
+                if (hasAnyAudioActivity || !wasMetersSilent) {
+                  globalMasterMeter = masterSnapshot;
+                  broadcastState((sub) => {
+                    sub.setMasterMeter((prev) => {
+                      if (Math.abs(prev.peakL - masterSnapshot.peakL) < 0.005 &&
+                          Math.abs(prev.peakR - masterSnapshot.peakR) < 0.005 &&
+                          prev.clipped === masterSnapshot.clipped) {
+                        return prev; // React Bailout
+                      }
+                      return masterSnapshot;
+                    });
+                  });
+                }
               }
+
+              wasMetersSilent = !hasAnyAudioActivity;
             };
 
             const handleHostMessage = (e: MessageEvent) => {
@@ -451,16 +572,18 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
               if (data.type === 'METERS_TELEMETRY') {
                 const workletTime = typeof data.currentTimeSec === 'number' ? data.currentTimeSec : 0;
                 currentWorkletTimeSecRef.current = workletTime;
+                globalCurrentTimeSec = workletTime;
 
-                // 1. Прием METERS_TELEMETRY не должен дергать setCurrentTimeSec, если разница во времени менее 100 мс (0.1с).
-                // UI курсор интерполируется через requestAnimationFrame независимо от стейта.
+                // 1. Прием METERS_TELEMETRY не должен спамить setCurrentTimeSec каждые 100 мс.
+                // Курсор таймлайна интерполируется на 60 FPS через performance.now() и requestAnimationFrame напрямую.
+                // React стейт обновляется плавно раз в 250 мс для отображения таймкода без лагов.
                 const timeDiff = Math.abs(workletTime - lastReportedTimeSecRef.current);
-                if (timeDiff >= 0.1) {
+                if (timeDiff >= 0.25) {
                   lastReportedTimeSecRef.current = workletTime;
                   playheadStartTimeSecRef.current = workletTime;
                   playheadStartPerfRef.current = performance.now();
                   currentTimeSecRef.current = workletTime;
-                  setCurrentTimeSec(Math.max(0, workletTime));
+                  broadcastState((sub) => sub.setCurrentTimeSec(Math.max(0, workletTime)));
                 }
 
                 // 2. Буферизация данных телеметрии уровней (TrackMeters, VocalBus, Master)
@@ -471,10 +594,10 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
                   lastVocalBusData = data.vocalBus;
                 }
                 if (data.master) {
-                  lastMasterData = data.master;
+                  lastMasterSingleData = data.master;
                 }
 
-                // 3. Жесткий throttle индикаторов громкости не чаще 1 раза в 33 мс (~30 FPS)
+                // 3. Жесткий throttle индикаторов громкости не чаще 1 раза в 50 мс (~20 FPS)
                 const now = performance.now();
                 if (now - lastMetersUpdateTimestamp >= METERS_THROTTLE_MS) {
                   lastMetersUpdateTimestamp = now;
@@ -491,25 +614,25 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
                 }
               } else if (data.type === 'VST_PLUGIN_LOADED') {
                 const key = `${data.trackId}_${data.slotIdx}`;
-                const cb = pendingPluginLoadsRef.current.get(key);
+                const cb = globalPendingPluginLoads.get(key);
                 if (cb) {
-                  pendingPluginLoadsRef.current.delete(key);
+                  globalPendingPluginLoads.delete(key);
                   cb();
                 }
                 systemLogger.debug('VSTHost', `VST плагин успешно смонтирован в слот ${data.slotIdx} дорожки ${data.trackId}. PDC задержка: ${data.latencySamples} сэмплов.`);
               } else if (data.type === 'VST_CHUNK_SAVED') {
-                const cb = pendingChunkRequestsRef.current.get(data.requestId);
+                const cb = globalPendingChunkRequests.get(data.requestId);
                 if (cb) {
-                  pendingChunkRequestsRef.current.delete(data.requestId);
+                  globalPendingChunkRequests.delete(data.requestId);
                   cb(data.chunk || '');
                 }
               } else if (data.type === 'CLIP_LOADED_SUCCESS') {
                 if (typeof data.clipId === 'number' && typeof data.wasmPtr === 'number' && data.wasmPtr > 0) {
-                  clipWasmPtrs.current.set(data.clipId, data.wasmPtr);
+                  globalClipWasmPtrs.set(data.clipId, data.wasmPtr);
                 }
-                const cb = pendingClipAcksRef.current.get(data.clipId);
+                const cb = globalPendingClipAcks.get(data.clipId);
                 if (cb) {
-                  pendingClipAcksRef.current.delete(data.clipId);
+                  globalPendingClipAcks.delete(data.clipId);
                   cb();
                 }
               } else if (data.type === 'FREE_CLIP_BUFFER') {
@@ -517,7 +640,8 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
                   freeClipWasmPointer(data.clipId);
                 }
               } else if (data.type === 'WASM_INIT_SUCCESS') {
-                setIsAudioWorkletActive(true);
+                globalIsAudioWorkletActive = true;
+                broadcastState((sub) => sub.setIsAudioWorkletActive(true));
                 systemLogger.info('C++ WASM', 'C++ DSP аудиомикшер успешно инициализирован в AudioWorklet (48000 Hz).');
               } else if (data.type === 'WORKLET_PROCESS_ERROR') {
                 systemLogger.error('AudioWorklet', `Сбой реалтайм C++ Mixer processBlock в фоновом потоке: ${data.error}`);
@@ -525,8 +649,8 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             };
 
             workletNode.port.onmessage = handleHostMessage;
-
             workletNode.connect(ctx.destination);
+            globalWorkletNode = workletNode;
             workletNodeRef.current = workletNode;
 
             // Инициализируем C++ мост в основном потоке
@@ -541,72 +665,84 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
               sampleRate: ctx.sampleRate || 48000
             }, [wasmBytes]);
 
-            setIsAudioWorkletActive(true);
+            globalIsAudioWorkletActive = true;
+            broadcastState((sub) => sub.setIsAudioWorkletActive(true));
             systemLogger.info('AudioWorklet', 'AudioWorklet-процессор успешно смонтирован и запущен.');
           } catch (workletErr) {
             const errMessage = 'Критическая ошибка: C++ ядро не скомпилировано! Скомпилируйте public/wasm/daw_core.wasm через build_wasm.sh.';
-            setError(errMessage);
-            setIsAudioWorkletActive(false);
+            globalError = errMessage;
+            globalIsAudioWorkletActive = false;
+            broadcastState((sub) => {
+              sub.setError(errMessage);
+              sub.setIsAudioWorkletActive(false);
+            });
             systemLogger.error('AudioWorklet', `Сбой загрузки AudioWorklet: ${errMessage}`, workletErr);
             throw workletErr;
           }
         }
 
+        globalIsInitialized = true;
         isInitializedRef.current = true;
-        setIsInitialized(true);
+        broadcastState((sub) => sub.setIsInitialized(true));
         systemLogger.info('System', 'Аудиосистема C++ готова к воспроизведению и микшированию.');
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : 'Критическая ошибка: C++ ядро не скомпилировано! Скомпилируйте public/wasm/daw_core.wasm через build_wasm.sh.';
-        setError(errMsg);
+        globalError = errMsg;
+        broadcastState((sub) => sub.setError(errMsg));
         systemLogger.error('AudioWorklet', `Сбой инициализации аудиосистемы: ${errMsg}`, err, err instanceof Error ? err.stack : undefined);
       }
     };
 
-    initPromiseRef.current = doInit().finally(() => {
-      initPromiseRef.current = null;
+    globalInitPromise = doInit().finally(() => {
+      globalInitPromise = null;
     });
 
-    return initPromiseRef.current;
-  }, []);
+    return globalInitPromise;
+  }, [freeClipWasmPointer]);
 
   /**
    * Воспроизведение / Пауза
    */
   const play = useCallback(async () => {
-    if (!isInitialized) {
+    if (!globalIsInitialized) {
       await initAudioEngine();
     }
-    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-      await audioCtxRef.current.resume();
+    if (globalAudioCtx && globalAudioCtx.state === 'suspended') {
+      await globalAudioCtx.resume();
     }
     playheadStartPerfRef.current = performance.now();
     playheadStartTimeSecRef.current = currentTimeSec;
     lastReportedTimeSecRef.current = currentTimeSec;
     currentTimeSecRef.current = currentTimeSec;
-    if (workletNodeRef.current) {
-      workletNodeRef.current.port.postMessage({ type: 'PLAY' });
+    if (globalWorkletNode) {
+      globalWorkletNode.port.postMessage({ type: 'PLAY' });
     }
-    setIsPlaying(true);
-  }, [isInitialized, initAudioEngine, currentTimeSec]);
+    globalIsPlaying = true;
+    broadcastState((sub) => sub.setIsPlaying(true));
+  }, [initAudioEngine, currentTimeSec]);
 
   const pause = useCallback(() => {
-    if (workletNodeRef.current) {
-      workletNodeRef.current.port.postMessage({ type: 'PAUSE' });
+    if (globalWorkletNode) {
+      globalWorkletNode.port.postMessage({ type: 'PAUSE' });
     }
     const finalTime = currentWorkletTimeSecRef.current || currentTimeSecRef.current;
     lastReportedTimeSecRef.current = finalTime;
     currentTimeSecRef.current = finalTime;
-    setCurrentTimeSec(finalTime);
-    setIsPlaying(false);
+    globalCurrentTimeSec = finalTime;
+    globalIsPlaying = false;
+    broadcastState((sub) => {
+      sub.setIsPlaying(false);
+      sub.setCurrentTimeSec(finalTime);
+    });
   }, []);
 
   const togglePlay = useCallback(async () => {
-    if (isPlaying) {
+    if (globalIsPlaying) {
       pause();
     } else {
       await play();
     }
-  }, [isPlaying, play, pause]);
+  }, [play, pause]);
 
   const seek = useCallback((timeSec: number) => {
     const safeTime = Math.max(0, timeSec);
@@ -615,10 +751,11 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     lastReportedTimeSecRef.current = safeTime;
     currentTimeSecRef.current = safeTime;
     currentWorkletTimeSecRef.current = safeTime;
-    if (workletNodeRef.current) {
-      workletNodeRef.current.port.postMessage({ type: 'SEEK', timeSec: safeTime });
+    globalCurrentTimeSec = safeTime;
+    if (globalWorkletNode) {
+      globalWorkletNode.port.postMessage({ type: 'SEEK', timeSec: safeTime });
     }
-    setCurrentTimeSec(safeTime);
+    broadcastState((sub) => sub.setCurrentTimeSec(safeTime));
   }, []);
 
   /**

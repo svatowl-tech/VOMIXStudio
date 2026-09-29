@@ -380,7 +380,7 @@ const SubtitleCueItem = React.memo<SubtitleCueItemProps>(({
 }, areSubtitleCuePropsEqual);
 SubtitleCueItem.displayName = 'SubtitleCueItem';
 
-export const TimelineView: React.FC<TimelineViewProps> = ({
+const TimelineViewComponent: React.FC<TimelineViewProps> = ({
   tracks,
   currentTimeSec,
   totalTimeSec = 30,
@@ -3366,3 +3366,5 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
     </div>
   );
 };
+
+export const TimelineView = React.memo(TimelineViewComponent);

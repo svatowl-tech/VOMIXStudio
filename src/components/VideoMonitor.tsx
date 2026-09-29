@@ -99,73 +99,52 @@ export const VideoMonitor: React.FC<VideoMonitorProps> = ({
     );
   }, [subtitles, currentTimeSec]);
 
-  // Синтетический холст при отсутствии загруженного видео
+  const syntheticCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // Прямая легковесная отрисовка синтетического кадра при отсутствии загруженного видеофайла
   useEffect(() => {
     if (videoSrc) return;
 
-    const canvas = document.createElement('canvas');
-    canvas.width = 640;
-    canvas.height = 360;
+    const canvas = syntheticCanvasRef.current;
+    if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const stream = canvas.captureStream(30);
-    const video = videoRef.current;
-    if (video) {
-      video.srcObject = stream;
-      video.play().catch(() => {});
-    }
+    ctx.fillStyle = '#050811';
+    ctx.fillRect(0, 0, 640, 360);
 
-    let animId: number;
-    const drawSyntheticFrame = () => {
-      ctx.fillStyle = '#050811';
-      ctx.fillRect(0, 0, 640, 360);
+    // Рамка кадрирования
+    ctx.strokeStyle = '#1e293b';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(32, 18, 640 - 64, 360 - 36);
 
-      // Рамка кадрирования
-      ctx.strokeStyle = '#1e293b';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(32, 18, 640 - 64, 360 - 36);
+    const time = currentTimeSec;
+    const cx = 320;
+    const cy = 180;
+    const radius = 80;
 
-      const time = currentTimeSec;
-      const cx = 320;
-      const cy = 180;
-      const radius = 80;
+    ctx.strokeStyle = '#059669';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.stroke();
 
-      ctx.strokeStyle = '#059669';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-      ctx.stroke();
+    const angle = (time * Math.PI * 2 * (120 / 60)) % (Math.PI * 2);
+    ctx.strokeStyle = '#10b981';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius);
+    ctx.stroke();
 
-      const angle = (time * Math.PI * 2 * (120 / 60)) % (Math.PI * 2);
-      ctx.strokeStyle = '#10b981';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.lineTo(cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius);
-      ctx.stroke();
+    ctx.fillStyle = '#f8fafc';
+    ctx.font = 'bold 22px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(formatSMPTE(time, fps), cx, cy - 15);
 
-      ctx.fillStyle = '#f8fafc';
-      ctx.font = 'bold 22px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText(formatSMPTE(time, fps), cx, cy - 15);
-
-      ctx.fillStyle = '#94a3b8';
-      ctx.font = '12px monospace';
-      ctx.fillText(`FRAME-ACCURATE SYNC • ${fps} FPS`, cx, cy + 25);
-
-      animId = requestAnimationFrame(drawSyntheticFrame);
-    };
-
-    animId = requestAnimationFrame(drawSyntheticFrame);
-
-    return () => {
-      cancelAnimationFrame(animId);
-      if (video && video.srcObject && typeof (video.srcObject as MediaStream).getTracks === 'function') {
-        const s = video.srcObject as MediaStream;
-        (s.getTracks() || []).forEach((t) => t.stop());
-      }
-    };
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '12px monospace';
+    ctx.fillText(`FRAME-ACCURATE SYNC • ${fps} FPS`, cx, cy + 25);
   }, [videoSrc, currentTimeSec, fps]);
 
   const toggleFullscreen = () => {
@@ -229,14 +208,23 @@ export const VideoMonitor: React.FC<VideoMonitorProps> = ({
 
       {/* Окно видеокадра */}
       <div className="relative bg-black aspect-video flex items-center justify-center overflow-hidden group select-none">
-        <video
-          ref={videoRef}
-          src={videoSrc || undefined}
-          muted={isMuted}
-          playsInline
-          onLoadedMetadata={handleLoadedMetadata}
-          className="w-full h-full object-contain pointer-events-none"
-        />
+        {videoSrc ? (
+          <video
+            ref={videoRef}
+            src={videoSrc}
+            muted={isMuted}
+            playsInline
+            onLoadedMetadata={handleLoadedMetadata}
+            className="w-full h-full object-contain pointer-events-none"
+          />
+        ) : (
+          <canvas
+            ref={syntheticCanvasRef}
+            width={640}
+            height={360}
+            className="w-full h-full object-contain pointer-events-none"
+          />
+        )}
 
         {/* Оверлей субтитров */}
         {showSubtitles && currentSubtitle && (

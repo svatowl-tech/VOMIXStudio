@@ -41,6 +41,8 @@ import {
   HardDrive,
   Copy,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   ListFilter,
   Plus
 } from 'lucide-react';
@@ -66,7 +68,8 @@ import {
   AlignedSpeechPhrase
 } from '../services/AudioAIEngine';
 import { globalStemSeparationService } from '../services/StemSeparationService';
-import { TrackState } from '../audio/dawEngine';
+import { TrackState, getDubbingSpeechPresetDSP, getFlatOriginalTrackDSP } from '../audio/dawEngine';
+import { TrackDSPPanel } from './TrackDSPPanel';
 import { formatSMPTE } from '../utils/waveformUtils';
 import { toSafeArray } from '../utils/safeIterables';
 import { BlobUrlRegistry } from '../utils/BlobUrlRegistry';
@@ -93,8 +96,9 @@ const PURPOSE_TO_CATEGORY_MAP: Record<AIPurposeType, ModelCategory> = {
 
 export interface DubbingAIStudioProps {
   tracks: TrackState[];
-  currentTimeSec: number;
-  onSeek: (timeSec: number) => void;
+  onUpdateTrack?: (updated: TrackState) => void;
+  currentTimeSec?: number;
+  onSeek?: (timeSec: number) => void;
   onAddStemTracks?: (vocalsPcm: Float32Array, karaokePcm: Float32Array, vocalsName?: string, karaokeName?: string) => void;
   onApplyProcessedAudioToTrack?: (trackId: number, newPcm: Float32Array, clipName?: string) => void;
   mode?: 'full' | 'matrix-only';
@@ -216,8 +220,9 @@ Silero VAD детектирует паузы, а Whisper транскрибир�
 00:00:11,000 --> 00:00:13,600
 Смарт-выравнивание синхронизирует реплики с оригиналом.`;
 
-export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
+const DubbingAIStudioComponent: React.FC<DubbingAIStudioProps> = ({
   tracks,
+  onUpdateTrack,
   currentTimeSec,
   onSeek,
   onAddStemTracks,
@@ -233,10 +238,177 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
 
   const safeTracks = useMemo(() => toSafeArray<TrackState>(tracks), [tracks]);
 
-  // --- 0. MATRIX / ROUTER STATE ---
+  // --- 0. MATRIX / ROUTER STATE & ACCORDION ---
+  const [isMatrixExpanded, setIsMatrixExpanded] = useState<boolean>(true);
+  const [expandedTrackCards, setExpandedTrackCards] = useState<Record<number, boolean>>({});
   const [trackConfigs, setTrackConfigs] = useState<Record<number, TrackAIConfig>>(() => {
     return globalAIPipelineStore.getConfigs();
   });
+
+  // --- 0.1 DSP RACK STATE (НАД МАТРИЦЕЙ) ---
+  const [isDspRackExpanded, setIsDspRackExpanded] = useState<boolean>(true);
+  const [selectedDspTrackId, setSelectedDspTrackId] = useState<number | null>(null);
+  const [activeFullDspTrack, setActiveFullDspTrack] = useState<TrackState | null>(null);
+
+  const currentDspTrack = useMemo(() => {
+    if (selectedDspTrackId !== null) {
+      const found = safeTracks.find((t) => t.id === selectedDspTrackId);
+      if (found) return found;
+    }
+    const firstVoice = safeTracks.find((t) => !t.isOriginalAudio && !t.name?.startsWith('🎬'));
+    return firstVoice || safeTracks[0] || null;
+  }, [safeTracks, selectedDspTrackId]);
+
+  const handleApplyPreset = (presetType: 'dialogue' | 'broadcast' | 'podcast' | 'clean' | 'flat') => {
+    if (!currentDspTrack || !onUpdateTrack) return;
+    let dspSettings: any = {};
+    if (presetType === 'dialogue') {
+      dspSettings = getDubbingSpeechPresetDSP();
+    } else if (presetType === 'broadcast') {
+      dspSettings = {
+        eq: {
+          lowShelf: { type: 'lowshelf', frequency: 100, gainDb: -4.0, Q: 0.7071, enabled: true },
+          peaking: { type: 'peaking', frequency: 2800, gainDb: 4.5, Q: 1.4, enabled: true },
+          highShelf: { type: 'highshelf', frequency: 12000, gainDb: 3.0, Q: 0.7071, enabled: true },
+          enabled: true
+        },
+        compressor: {
+          thresholdDb: -18,
+          ratio: 4.5,
+          attackMs: 8,
+          releaseMs: 90,
+          makeupGainDb: 3.5,
+          kneeDb: 4,
+          enabled: true,
+          currentGainReductionDb: 0
+        },
+        noiseGate: {
+          thresholdDb: -45.0,
+          attackMs: 2.0,
+          holdMs: 30.0,
+          releaseMs: 100.0,
+          floorDb: -60.0,
+          enabled: true,
+          currentGain: 0
+        },
+        deEsser: {
+          thresholdDb: -22.0,
+          frequency: 6000.0,
+          ratio: 5.0,
+          attackMs: 1.0,
+          releaseMs: 40.0,
+          enabled: true
+        },
+        deClicker: { threshold: 0.05, repairWindow: 3, enabled: true, clicksDetected: 0 },
+        dePlosive: { thresholdDb: -22.0, frequency: 90.0, attackMs: 2.0, releaseMs: 45.0, enabled: true, currentReduction: 0 },
+        autoDucker: { enabled: true, sidechainSourceTrackId: -1, duckDepthDb: -18.0, attackMs: 15.0, releaseMs: 250.0, thresholdDb: -32.0, currentDuckingDb: 0 }
+      };
+    } else if (presetType === 'podcast') {
+      dspSettings = {
+        eq: {
+          lowShelf: { type: 'lowshelf', frequency: 140, gainDb: 1.5, Q: 0.7071, enabled: true },
+          peaking: { type: 'peaking', frequency: 3500, gainDb: 2.5, Q: 1.1, enabled: true },
+          highShelf: { type: 'highshelf', frequency: 9000, gainDb: 1.5, Q: 0.7071, enabled: true },
+          enabled: true
+        },
+        compressor: {
+          thresholdDb: -14,
+          ratio: 3.0,
+          attackMs: 15,
+          releaseMs: 140,
+          makeupGainDb: 1.5,
+          kneeDb: 6,
+          enabled: true,
+          currentGainReductionDb: 0
+        },
+        noiseGate: { thresholdDb: -52.0, attackMs: 3.0, holdMs: 50.0, releaseMs: 150.0, floorDb: -60.0, enabled: true, currentGain: 0 },
+        deEsser: { thresholdDb: -18.0, frequency: 6500.0, ratio: 3.5, attackMs: 1.0, releaseMs: 50.0, enabled: true },
+        deClicker: { threshold: 0.06, repairWindow: 3, enabled: true, clicksDetected: 0 },
+        dePlosive: { thresholdDb: -26.0, frequency: 75.0, attackMs: 2.0, releaseMs: 60.0, enabled: true, currentReduction: 0 },
+        autoDucker: { enabled: true, sidechainSourceTrackId: -1, duckDepthDb: -15.0, attackMs: 20.0, releaseMs: 300.0, thresholdDb: -35.0, currentDuckingDb: 0 }
+      };
+    } else if (presetType === 'clean') {
+      dspSettings = {
+        eq: {
+          lowShelf: { type: 'lowshelf', frequency: 100, gainDb: -6.0, Q: 0.7071, enabled: true },
+          peaking: { type: 'peaking', frequency: 1000, gainDb: 0.0, Q: 1.0, enabled: true },
+          highShelf: { type: 'highshelf', frequency: 8000, gainDb: 0.0, Q: 0.7071, enabled: true },
+          enabled: true
+        },
+        compressor: { thresholdDb: -12, ratio: 2.5, attackMs: 20, releaseMs: 160, makeupGainDb: 1.0, kneeDb: 8, enabled: true, currentGainReductionDb: 0 },
+        noiseGate: { thresholdDb: -42.0, attackMs: 2.0, holdMs: 40.0, releaseMs: 120.0, floorDb: -60.0, enabled: true, currentGain: 0 },
+        deEsser: { thresholdDb: -16.0, frequency: 5800.0, ratio: 4.0, attackMs: 1.0, releaseMs: 40.0, enabled: true },
+        deClicker: { threshold: 0.04, repairWindow: 4, enabled: true, clicksDetected: 0 },
+        dePlosive: { thresholdDb: -20.0, frequency: 85.0, attackMs: 1.5, releaseMs: 40.0, enabled: true, currentReduction: 0 },
+        autoDucker: { enabled: true, sidechainSourceTrackId: -1, duckDepthDb: -18.0, attackMs: 15.0, releaseMs: 250.0, thresholdDb: -32.0, currentDuckingDb: 0 }
+      };
+    } else {
+      dspSettings = getFlatOriginalTrackDSP();
+    }
+    const updated: TrackState = {
+      ...currentDspTrack,
+      ...dspSettings
+    };
+    onUpdateTrack(updated);
+  };
+
+  const handleUpdateCurrentDsp = (patch: Partial<TrackState>) => {
+    if (!currentDspTrack || !onUpdateTrack) return;
+    const updated: TrackState = {
+      ...currentDspTrack,
+      ...patch
+    };
+    onUpdateTrack(updated);
+  };
+
+  const handleCopyDspToAllVoices = () => {
+    if (!currentDspTrack || !onUpdateTrack) return;
+    const dspSlice = {
+      eq: currentDspTrack.eq,
+      compressor: currentDspTrack.compressor,
+      noiseGate: currentDspTrack.noiseGate,
+      deEsser: currentDspTrack.deEsser,
+      deClicker: currentDspTrack.deClicker,
+      dePlosive: currentDspTrack.dePlosive,
+      autoDucker: currentDspTrack.autoDucker
+    };
+    safeTracks.forEach((t) => {
+      if (t.id !== currentDspTrack.id && !t.isOriginalAudio && !t.name?.startsWith('🎬')) {
+        onUpdateTrack({ ...t, ...dspSlice });
+      }
+    });
+  };
+
+  const toggleTrackCard = (trackId: number) => {
+    setExpandedTrackCards((prev) => ({
+      ...prev,
+      [trackId]: prev[trackId] === undefined ? false : !prev[trackId]
+    }));
+  };
+
+  const expandAllTrackCards = () => {
+    const next: Record<number, boolean> = {};
+    safeTracks.forEach((t) => { next[t.id] = true; });
+    setExpandedTrackCards(next);
+  };
+
+  const collapseAllTrackCards = () => {
+    const next: Record<number, boolean> = {};
+    safeTracks.forEach((t) => { next[t.id] = false; });
+    setExpandedTrackCards(next);
+  };
+
+  const totalActiveTracks = useMemo(() => {
+    return safeTracks.filter((t) => trackConfigs[t.id]?.enabled).length;
+  }, [safeTracks, trackConfigs]);
+
+  const totalConfiguredSteps = useMemo(() => {
+    return safeTracks.reduce((acc, t) => {
+      const cfg = trackConfigs[t.id];
+      if (!cfg || !cfg.enabled) return acc;
+      return acc + (toSafeArray(cfg.steps).filter((s) => s.enabled).length || 1);
+    }, 0);
+  }, [safeTracks, trackConfigs]);
 
   useEffect(() => {
     const unsub = globalAIPipelineStore.subscribe(() => {
@@ -1366,8 +1538,576 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
       {/* ===================================================================== */}
       {/* TAB 0: MATRIX / TRACK ROUTING & NEURAL PROCESSING */}
       {(mode === 'matrix-only' || activeTab === 'matrix') && (
-        <div className="space-y-6 animate-fadeIn">
-          {/* Top Matrix Control Bar */}
+        <div className="space-y-4 animate-fadeIn">
+          {/* ===================================================================== */}
+          {/* C++ NATIVE DSP VOCAL PROCESSING RACK (РАСПОЛОЖЕН НАД МАТРИЦЕЙ) */}
+          {/* ===================================================================== */}
+          <div className="bg-[#090e1a] border border-cyan-500/40 rounded-2xl p-4 sm:p-5 shadow-xl space-y-4">
+            {/* Header Рэка */}
+            <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-cyan-500/20">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-cyan-500/15 border border-cyan-500/30 rounded-xl text-cyan-400 shadow-sm">
+                  <SlidersHorizontal size={22} />
+                </div>
+                <div>
+                  <div className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                    C++ Native DSP Vocal Processing Engine (SIMD128)
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-mono">
+                      DSP рэк над матрицей
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Аппаратная низкоуровневая обработка дорожек (EQ, компрессор, де-эссер, гейт, дакинг) перед подачей в нейросети. 0.0 ms задержки.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-1 bg-slate-950 border border-slate-800 rounded-lg text-emerald-400 text-xs font-mono flex items-center gap-1.5 shadow-sm">
+                  <Zap size={12} /> C++ WASM SIMD
+                </span>
+                <span className="px-2.5 py-1 bg-slate-950 border border-slate-800 rounded-lg text-cyan-400 text-xs font-mono flex items-center gap-1.5 shadow-sm">
+                  <Cpu size={12} /> 0.0 ms PDC
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setIsDspRackExpanded((prev) => !prev)}
+                  className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-cyan-300 border border-cyan-500/30 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-sm"
+                  title={isDspRackExpanded ? "Свернуть рэк DSP" : "Развернуть рэк DSP"}
+                >
+                  {isDspRackExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                  <span>{isDspRackExpanded ? 'Свернуть DSP' : 'Развернуть DSP'}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Содержимое DSP Рэка */}
+            {isDspRackExpanded && currentDspTrack && (
+              <div className="space-y-4 animate-fadeIn">
+                {/* 1. Селектор дорожки и быстрые студийные пресеты */}
+                <div className="flex flex-wrap items-center justify-between gap-3 bg-[#0c1222] p-3 rounded-xl border border-slate-800">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-slate-300">Дорожка для DSP:</span>
+                    <select
+                      value={currentDspTrack.id}
+                      onChange={(e) => setSelectedDspTrackId(Number(e.target.value))}
+                      className="px-3 py-1.5 bg-slate-950 border border-cyan-500/40 rounded-lg text-xs font-bold text-slate-100 focus:outline-none focus:border-cyan-400 cursor-pointer"
+                    >
+                      {safeTracks.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          CH #{t.id}: {t.name} {t.isOriginalAudio || t.name?.startsWith('🎬') ? '[🎬 Видео]' : '[🎙️ Голос]'}
+                        </option>
+                      ))}
+                    </select>
+                    <div
+                      className="w-3.5 h-3.5 rounded-full shrink-0"
+                      style={{ backgroundColor: currentDspTrack.color || '#10b981' }}
+                    />
+                  </div>
+
+                  {/* Пресеты */}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] text-slate-400 font-mono mr-1">C++ Пресет:</span>
+                    <button
+                      type="button"
+                      onClick={() => handleApplyPreset('dialogue')}
+                      className="px-2.5 py-1 bg-cyan-950/80 hover:bg-cyan-900 border border-cyan-600/50 text-cyan-200 rounded-lg text-[11px] font-semibold flex items-center gap-1 transition-all cursor-pointer"
+                      title="Стандартный пресет дубляжа для диалогов"
+                    >
+                      🎙️ Дубляж / Речь
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleApplyPreset('broadcast')}
+                      className="px-2.5 py-1 bg-blue-950/80 hover:bg-blue-900 border border-blue-600/50 text-blue-200 rounded-lg text-[11px] font-semibold flex items-center gap-1 transition-all cursor-pointer"
+                      title="Плотный радиовещательный голос"
+                    >
+                      📻 Broadcast
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleApplyPreset('podcast')}
+                      className="px-2.5 py-1 bg-violet-950/80 hover:bg-violet-900 border border-violet-600/50 text-violet-200 rounded-lg text-[11px] font-semibold flex items-center gap-1 transition-all cursor-pointer"
+                      title="Теплый подкаст голос"
+                    >
+                      🎧 Подкаст
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleApplyPreset('clean')}
+                      className="px-2.5 py-1 bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-600/50 text-emerald-200 rounded-lg text-[11px] font-semibold flex items-center gap-1 transition-all cursor-pointer"
+                      title="Очистка щелчков и взрывных звуков"
+                    >
+                      ✨ Чистый
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleApplyPreset('flat')}
+                      className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-400 rounded-lg text-[11px] font-medium transition-all cursor-pointer"
+                      title="Линейная АЧХ без обработки"
+                    >
+                      ⚡ Flat
+                    </button>
+                  </div>
+                </div>
+
+                {/* 2. Сетка интерактивных DSP модулей (EQ, Compressor, NoiseGate, DeEsser, AutoDucker) */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                  {/* EQ Block */}
+                  <div className="bg-[#0b101e] border border-cyan-950/80 p-3 rounded-xl space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-cyan-300 flex items-center gap-1">
+                        <Sliders size={13} /> 3-Band EQ
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleUpdateCurrentDsp({
+                            eq: { ...currentDspTrack.eq, enabled: !currentDspTrack.eq.enabled }
+                          })
+                        }
+                        className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-bold cursor-pointer transition-all ${
+                          currentDspTrack.eq.enabled
+                            ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                            : 'bg-slate-900 text-slate-500 border border-slate-800'
+                        }`}
+                      >
+                        {currentDspTrack.eq.enabled ? 'ON' : 'BYPASS'}
+                      </button>
+                    </div>
+
+                    <div className="space-y-1.5 text-[11px]">
+                      <div>
+                        <div className="flex justify-between text-slate-400 text-[10px]">
+                          <span>Low (120Hz):</span>
+                          <span className="font-mono text-cyan-400">{currentDspTrack.eq.lowShelf.gainDb > 0 ? `+${currentDspTrack.eq.lowShelf.gainDb.toFixed(1)}` : currentDspTrack.eq.lowShelf.gainDb.toFixed(1)} dB</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="-12"
+                          max="12"
+                          step="0.5"
+                          value={currentDspTrack.eq.lowShelf.gainDb}
+                          onChange={(e) =>
+                            handleUpdateCurrentDsp({
+                              eq: {
+                                ...currentDspTrack.eq,
+                                lowShelf: { ...currentDspTrack.eq.lowShelf, gainDb: parseFloat(e.target.value) }
+                              }
+                            })
+                          }
+                          className="w-full accent-cyan-500 h-1 bg-slate-800 rounded cursor-pointer"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-slate-400 text-[10px]">
+                          <span>Mid (3.2kHz):</span>
+                          <span className="font-mono text-cyan-400">{currentDspTrack.eq.peaking.gainDb > 0 ? `+${currentDspTrack.eq.peaking.gainDb.toFixed(1)}` : currentDspTrack.eq.peaking.gainDb.toFixed(1)} dB</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="-12"
+                          max="12"
+                          step="0.5"
+                          value={currentDspTrack.eq.peaking.gainDb}
+                          onChange={(e) =>
+                            handleUpdateCurrentDsp({
+                              eq: {
+                                ...currentDspTrack.eq,
+                                peaking: { ...currentDspTrack.eq.peaking, gainDb: parseFloat(e.target.value) }
+                              }
+                            })
+                          }
+                          className="w-full accent-cyan-500 h-1 bg-slate-800 rounded cursor-pointer"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-slate-400 text-[10px]">
+                          <span>Air (10kHz):</span>
+                          <span className="font-mono text-cyan-400">{currentDspTrack.eq.highShelf.gainDb > 0 ? `+${currentDspTrack.eq.highShelf.gainDb.toFixed(1)}` : currentDspTrack.eq.highShelf.gainDb.toFixed(1)} dB</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="-12"
+                          max="12"
+                          step="0.5"
+                          value={currentDspTrack.eq.highShelf.gainDb}
+                          onChange={(e) =>
+                            handleUpdateCurrentDsp({
+                              eq: {
+                                ...currentDspTrack.eq,
+                                highShelf: { ...currentDspTrack.eq.highShelf, gainDb: parseFloat(e.target.value) }
+                              }
+                            })
+                          }
+                          className="w-full accent-cyan-500 h-1 bg-slate-800 rounded cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Compressor Block */}
+                  <div className="bg-[#0b101e] border border-emerald-950/80 p-3 rounded-xl space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-emerald-300 flex items-center gap-1">
+                        <Activity size={13} /> Компрессор
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleUpdateCurrentDsp({
+                            compressor: { ...currentDspTrack.compressor, enabled: !currentDspTrack.compressor.enabled }
+                          })
+                        }
+                        className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-bold cursor-pointer transition-all ${
+                          currentDspTrack.compressor.enabled
+                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                            : 'bg-slate-900 text-slate-500 border border-slate-800'
+                        }`}
+                      >
+                        {currentDspTrack.compressor.enabled ? 'ON' : 'BYPASS'}
+                      </button>
+                    </div>
+
+                    <div className="space-y-1.5 text-[11px]">
+                      <div>
+                        <div className="flex justify-between text-slate-400 text-[10px]">
+                          <span>Порог (Thresh):</span>
+                          <span className="font-mono text-emerald-400">{currentDspTrack.compressor.thresholdDb.toFixed(1)} dB</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="-40"
+                          max="0"
+                          step="1"
+                          value={currentDspTrack.compressor.thresholdDb}
+                          onChange={(e) =>
+                            handleUpdateCurrentDsp({
+                              compressor: { ...currentDspTrack.compressor, thresholdDb: parseFloat(e.target.value) }
+                            })
+                          }
+                          className="w-full accent-emerald-500 h-1 bg-slate-800 rounded cursor-pointer"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-slate-400 text-[10px]">
+                          <span>Степень (Ratio):</span>
+                          <span className="font-mono text-emerald-400">{currentDspTrack.compressor.ratio.toFixed(1)}:1</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="1"
+                          max="10"
+                          step="0.5"
+                          value={currentDspTrack.compressor.ratio}
+                          onChange={(e) =>
+                            handleUpdateCurrentDsp({
+                              compressor: { ...currentDspTrack.compressor, ratio: parseFloat(e.target.value) }
+                            })
+                          }
+                          className="w-full accent-emerald-500 h-1 bg-slate-800 rounded cursor-pointer"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-slate-400 text-[10px]">
+                          <span>Gain (Makeup):</span>
+                          <span className="font-mono text-emerald-400">+{currentDspTrack.compressor.makeupGainDb.toFixed(1)} dB</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="12"
+                          step="0.5"
+                          value={currentDspTrack.compressor.makeupGainDb}
+                          onChange={(e) =>
+                            handleUpdateCurrentDsp({
+                              compressor: { ...currentDspTrack.compressor, makeupGainDb: parseFloat(e.target.value) }
+                            })
+                          }
+                          className="w-full accent-emerald-500 h-1 bg-slate-800 rounded cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Noise Gate Block */}
+                  <div className="bg-[#0b101e] border border-blue-950/80 p-3 rounded-xl space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-blue-300 flex items-center gap-1">
+                        <Gauge size={13} /> Noise Gate
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleUpdateCurrentDsp({
+                            noiseGate: { ...currentDspTrack.noiseGate, enabled: !currentDspTrack.noiseGate.enabled }
+                          })
+                        }
+                        className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-bold cursor-pointer transition-all ${
+                          currentDspTrack.noiseGate.enabled
+                            ? 'bg-blue-500/20 text-blue-300 border border-blue-500/40'
+                            : 'bg-slate-900 text-slate-500 border border-slate-800'
+                        }`}
+                      >
+                        {currentDspTrack.noiseGate.enabled ? 'ON' : 'BYPASS'}
+                      </button>
+                    </div>
+
+                    <div className="space-y-1.5 text-[11px]">
+                      <div>
+                        <div className="flex justify-between text-slate-400 text-[10px]">
+                          <span>Порог (Threshold):</span>
+                          <span className="font-mono text-blue-400">{currentDspTrack.noiseGate.thresholdDb.toFixed(1)} dB</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="-70"
+                          max="-20"
+                          step="1"
+                          value={currentDspTrack.noiseGate.thresholdDb}
+                          onChange={(e) =>
+                            handleUpdateCurrentDsp({
+                              noiseGate: { ...currentDspTrack.noiseGate, thresholdDb: parseFloat(e.target.value) }
+                            })
+                          }
+                          className="w-full accent-blue-500 h-1 bg-slate-800 rounded cursor-pointer"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-slate-400 text-[10px]">
+                          <span>Удержание (Hold):</span>
+                          <span className="font-mono text-blue-400">{currentDspTrack.noiseGate.holdMs.toFixed(0)} ms</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="10"
+                          max="150"
+                          step="5"
+                          value={currentDspTrack.noiseGate.holdMs}
+                          onChange={(e) =>
+                            handleUpdateCurrentDsp({
+                              noiseGate: { ...currentDspTrack.noiseGate, holdMs: parseFloat(e.target.value) }
+                            })
+                          }
+                          className="w-full accent-blue-500 h-1 bg-slate-800 rounded cursor-pointer"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-slate-400 text-[10px]">
+                          <span>Спад (Floor):</span>
+                          <span className="font-mono text-blue-400">{currentDspTrack.noiseGate.floorDb.toFixed(0)} dB</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="-90"
+                          max="-40"
+                          step="2"
+                          value={currentDspTrack.noiseGate.floorDb}
+                          onChange={(e) =>
+                            handleUpdateCurrentDsp({
+                              noiseGate: { ...currentDspTrack.noiseGate, floorDb: parseFloat(e.target.value) }
+                            })
+                          }
+                          className="w-full accent-blue-500 h-1 bg-slate-800 rounded cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* De-Esser Block */}
+                  <div className="bg-[#0b101e] border border-amber-950/80 p-3 rounded-xl space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-amber-300 flex items-center gap-1">
+                        <Scissors size={13} /> De-Esser
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleUpdateCurrentDsp({
+                            deEsser: { ...currentDspTrack.deEsser, enabled: !currentDspTrack.deEsser.enabled }
+                          })
+                        }
+                        className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-bold cursor-pointer transition-all ${
+                          currentDspTrack.deEsser.enabled
+                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                            : 'bg-slate-900 text-slate-500 border border-slate-800'
+                        }`}
+                      >
+                        {currentDspTrack.deEsser.enabled ? 'ON' : 'BYPASS'}
+                      </button>
+                    </div>
+
+                    <div className="space-y-1.5 text-[11px]">
+                      <div>
+                        <div className="flex justify-between text-slate-400 text-[10px]">
+                          <span>Порог (Thresh):</span>
+                          <span className="font-mono text-amber-400">{currentDspTrack.deEsser.thresholdDb.toFixed(1)} dB</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="-35"
+                          max="0"
+                          step="1"
+                          value={currentDspTrack.deEsser.thresholdDb}
+                          onChange={(e) =>
+                            handleUpdateCurrentDsp({
+                              deEsser: { ...currentDspTrack.deEsser, thresholdDb: parseFloat(e.target.value) }
+                            })
+                          }
+                          className="w-full accent-amber-500 h-1 bg-slate-800 rounded cursor-pointer"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-slate-400 text-[10px]">
+                          <span>Частота (Freq):</span>
+                          <span className="font-mono text-amber-400">{(currentDspTrack.deEsser.frequency / 1000).toFixed(1)} kHz</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="4000"
+                          max="9500"
+                          step="100"
+                          value={currentDspTrack.deEsser.frequency}
+                          onChange={(e) =>
+                            handleUpdateCurrentDsp({
+                              deEsser: { ...currentDspTrack.deEsser, frequency: parseFloat(e.target.value) }
+                            })
+                          }
+                          className="w-full accent-amber-500 h-1 bg-slate-800 rounded cursor-pointer"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-slate-400 text-[10px]">
+                          <span>Сжатие (Ratio):</span>
+                          <span className="font-mono text-amber-400">{currentDspTrack.deEsser.ratio.toFixed(1)}:1</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="2"
+                          max="8"
+                          step="0.5"
+                          value={currentDspTrack.deEsser.ratio}
+                          onChange={(e) =>
+                            handleUpdateCurrentDsp({
+                              deEsser: { ...currentDspTrack.deEsser, ratio: parseFloat(e.target.value) }
+                            })
+                          }
+                          className="w-full accent-amber-500 h-1 bg-slate-800 rounded cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Auto-Ducker Block */}
+                  <div className="bg-[#0b101e] border border-purple-950/80 p-3 rounded-xl space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-purple-300 flex items-center gap-1">
+                        <Volume2 size={13} /> Auto-Ducker
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleUpdateCurrentDsp({
+                            autoDucker: { ...currentDspTrack.autoDucker, enabled: !currentDspTrack.autoDucker.enabled }
+                          })
+                        }
+                        className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-bold cursor-pointer transition-all ${
+                          currentDspTrack.autoDucker.enabled
+                            ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
+                            : 'bg-slate-900 text-slate-500 border border-slate-800'
+                        }`}
+                      >
+                        {currentDspTrack.autoDucker.enabled ? 'ON' : 'BYPASS'}
+                      </button>
+                    </div>
+
+                    <div className="space-y-1.5 text-[11px]">
+                      <div>
+                        <div className="flex justify-between text-slate-400 text-[10px]">
+                          <span>Глубина (Depth):</span>
+                          <span className="font-mono text-purple-400">{currentDspTrack.autoDucker.duckDepthDb.toFixed(1)} dB</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="-30"
+                          max="-6"
+                          step="1"
+                          value={currentDspTrack.autoDucker.duckDepthDb}
+                          onChange={(e) =>
+                            handleUpdateCurrentDsp({
+                              autoDucker: { ...currentDspTrack.autoDucker, duckDepthDb: parseFloat(e.target.value) }
+                            })
+                          }
+                          className="w-full accent-purple-500 h-1 bg-slate-800 rounded cursor-pointer"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between text-slate-400 text-[10px]">
+                          <span>Спад (Release):</span>
+                          <span className="font-mono text-purple-400">{currentDspTrack.autoDucker.releaseMs.toFixed(0)} ms</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="100"
+                          max="600"
+                          step="20"
+                          value={currentDspTrack.autoDucker.releaseMs}
+                          onChange={(e) =>
+                            handleUpdateCurrentDsp({
+                              autoDucker: { ...currentDspTrack.autoDucker, releaseMs: parseFloat(e.target.value) }
+                            })
+                          }
+                          className="w-full accent-purple-500 h-1 bg-slate-800 rounded cursor-pointer"
+                        />
+                      </div>
+
+                      <div className="pt-1">
+                        <span className="text-[10px] text-slate-500 block truncate">
+                          Приглушает фон при речи
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Нитро-действия DSP рэка */}
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800/80">
+                  <button
+                    type="button"
+                    onClick={handleCopyDspToAllVoices}
+                    className="px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
+                    title="Применить текущие настройки EQ, Compressor и Gate ко всем актерским дорожкам"
+                  >
+                    <Copy size={13} className="text-cyan-400" />
+                    Скопировать DSP на все дикторские дорожки
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setActiveFullDspTrack(currentDspTrack)}
+                    className="px-4 py-1.5 bg-cyan-950/80 hover:bg-cyan-900 text-cyan-200 border border-cyan-500/50 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer shadow-lg shadow-cyan-950/40"
+                    title="Открыть визуализатор АЧХ, де-кликер, де-плозив и 16 C++ плагинов"
+                  >
+                    <SlidersHorizontal size={14} className="text-cyan-400" />
+                    Параметрический C++ DSP рэк (EqCurve &amp; 16 Inserts)
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* ===================================================================== */}
+          {/* МАТРИЦА МАРШРУТИЗАЦИИ СЕТЕВОЙ ОБРАБОТКИ (СВОРАЧИВАЕМАЯ) */}
+          {/* ===================================================================== */}
           <div className="bg-[#0f1422] border border-[#1e293b] p-4 sm:p-5 rounded-2xl shadow-xl flex flex-wrap items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-emerald-400">
@@ -1375,7 +2115,7 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
               </div>
               <div>
                 <h3 className="text-sm sm:text-base font-bold text-slate-100 flex items-center gap-2">
-                  Матрица маршрутизации нейросетевой обработки
+                  Матрица маршрутизации сетевой обработки
                   <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
                     {safeTracks.length} Дорожек в проекте
                   </span>
@@ -1387,6 +2127,37 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
             </div>
 
             <div className="flex flex-wrap items-center gap-2.5">
+              {isMatrixExpanded && (
+                <>
+                  <button
+                    type="button"
+                    onClick={collapseAllTrackCards}
+                    className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800 rounded-xl text-xs font-medium transition-all cursor-pointer shadow-sm"
+                    title="Свернуть все карточки для ускорения интерфейса"
+                  >
+                    Свернуть все карточки
+                  </button>
+                  <button
+                    type="button"
+                    onClick={expandAllTrackCards}
+                    className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800 rounded-xl text-xs font-medium transition-all cursor-pointer shadow-sm"
+                    title="Развернуть все карточки"
+                  >
+                    Развернуть все
+                  </button>
+                </>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setIsMatrixExpanded((prev) => !prev)}
+                className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/80 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
+                title={isMatrixExpanded ? "Свернуть матрицу маршрутизации" : "Развернуть матрицу маршрутизации"}
+              >
+                {isMatrixExpanded ? <ChevronUp size={14} className="text-emerald-400" /> : <ChevronDown size={14} className="text-emerald-400" />}
+                <span>{isMatrixExpanded ? 'Свернуть матрицу' : `Развернуть матрицу (${totalActiveTracks}/${safeTracks.length} активных)`}</span>
+              </button>
+
               <button
                 type="button"
                 onClick={handleRunMatrixBatch}
@@ -1408,6 +2179,47 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
             </div>
           </div>
 
+          {/* Collapsed State Summary Bar (для сверхбыстрой отрисовки и экономии CPU) */}
+          {!isMatrixExpanded && (
+            <div className="bg-[#0b0f19]/90 border border-slate-800 p-4 rounded-xl space-y-3 shadow-md">
+              <div className="flex flex-wrap items-center justify-between gap-4 text-xs text-slate-400">
+                <div className="flex items-center gap-2.5">
+                  <Workflow size={16} className="text-emerald-400 shrink-0" />
+                  <span>
+                    Матрица маршрутизации свернута для максимальной производительности: <strong>{totalActiveTracks}</strong> из <strong>{safeTracks.length}</strong> дорожек активно ({totalConfiguredSteps} настроенных шагов).
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsMatrixExpanded(true)}
+                  className="px-3.5 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded-lg font-semibold transition-all cursor-pointer flex items-center gap-1.5 shadow-sm"
+                >
+                  <ChevronDown size={14} />
+                  Развернуть матрицу
+                </button>
+              </div>
+
+              {/* Маршрутные чипы активных дорожек */}
+              <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-800/60">
+                {safeTracks.map((t) => {
+                  const cfg = trackConfigs[t.id];
+                  if (!cfg || !cfg.enabled) return null;
+                  return (
+                    <span
+                      key={t.id}
+                      className="px-2.5 py-1 rounded-lg text-[11px] font-mono bg-slate-950 border border-slate-800 text-slate-300 flex items-center gap-1.5 shadow-xs"
+                    >
+                      <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: t.color || '#10b981' }} />
+                      <span className="font-bold text-slate-200">CH #{t.id}:</span>
+                      <span className="text-emerald-400">{cfg.modelId}</span>
+                      <span className="text-slate-500">({cfg.intensity}%)</span>
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Batch Progress Banner */}
           {isBatchProcessing && (
             <div className="bg-emerald-950/20 border border-emerald-500/30 p-4 rounded-xl space-y-2 animate-fadeIn">
@@ -1428,9 +2240,10 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
             </div>
           )}
 
-          {/* Tracks Neural Processing Cards */}
-          <div className="space-y-4">
-            {safeTracks.map((track) => {
+          {/* Tracks Neural Processing Cards (рендерятся ТОЛЬКО при развернутой матрице) */}
+          {isMatrixExpanded && (
+            <div className="space-y-4">
+              {safeTracks.map((track) => {
               const cfg: TrackAIConfig = trackConfigs[track.id] || {
                 trackId: track.id,
                 enabled: true,
@@ -1585,9 +2398,49 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                           </>
                         )}
                       </button>
+
+                      {/* Кнопка сворачивания/разворачивания отдельной карточки */}
+                      <button
+                        type="button"
+                        onClick={() => toggleTrackCard(track.id)}
+                        className="px-2 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-300 rounded-xl border border-slate-700/80 transition-all cursor-pointer shadow-sm flex items-center gap-1 text-xs"
+                        title={expandedTrackCards[track.id] === false ? "Развернуть карточку" : "Свернуть карточку"}
+                      >
+                        {expandedTrackCards[track.id] === false ? <ChevronDown size={14} className="text-emerald-400" /> : <ChevronUp size={14} className="text-emerald-400" />}
+                        <span className="text-[10px] text-slate-400">{expandedTrackCards[track.id] === false ? 'Развернуть' : 'Свернуть'}</span>
+                      </button>
                     </div>
                   </div>
 
+                  {/* Свернутый вид карточки (быстрый превью без тяжелого DOM) */}
+                  {expandedTrackCards[track.id] === false && (
+                    <div className="pt-1 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-[10px] text-slate-500 font-mono">Настроенные шаги:</span>
+                        {toSafeArray(cfg.steps).map((step, idx) => (
+                          <span
+                            key={step.id || idx}
+                            className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-950 border border-slate-800 text-slate-300 flex items-center gap-1"
+                          >
+                            <span>{PURPOSE_DESCRIPTIONS[step.purpose]?.icon || '⚙️'}</span>
+                            <span className="text-emerald-400 font-semibold">{step.modelId}</span>
+                            <span className="text-slate-500">({step.intensity}%)</span>
+                          </span>
+                        ))}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => toggleTrackCard(track.id)}
+                        className="text-[11px] text-emerald-400 hover:underline cursor-pointer"
+                      >
+                        Детальные настройки шагов →
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Полный вид карточки со всеми шагами и слайдерами */}
+                  {expandedTrackCards[track.id] !== false && (
+                    <>
                   {/* AI Chain Sequential Steps */}
                   <div className="space-y-3 bg-slate-950/70 p-3.5 rounded-xl border border-slate-800/80">
                     <div className="flex items-center justify-between pb-2 border-b border-slate-800/60">
@@ -1773,10 +2626,13 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
                       </div>
                     </div>
                   )}
+                  </>
+                  )}
                 </div>
               );
             })}
           </div>
+          )}
         </div>
       )}
 
@@ -2948,6 +3804,20 @@ export const DubbingAIStudio: React.FC<DubbingAIStudioProps> = ({
           </div>
         </div>
       )}
+      {/* Модальное окно расширенного параметрического C++ DSP рэка */}
+      {activeFullDspTrack && (
+        <TrackDSPPanel
+          track={activeFullDspTrack}
+          allTracks={safeTracks}
+          onUpdateTrack={(updated) => {
+            onUpdateTrack?.(updated);
+            setActiveFullDspTrack(updated);
+          }}
+          onClose={() => setActiveFullDspTrack(null)}
+        />
+      )}
     </div>
   );
 };
+
+export const DubbingAIStudio = React.memo(DubbingAIStudioComponent);

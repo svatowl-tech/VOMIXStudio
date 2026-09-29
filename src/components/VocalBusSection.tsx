@@ -17,7 +17,7 @@ interface VocalBusSectionProps {
   onUpdateVstWetDry?: (instanceId: string, wetDry: number) => void;
 }
 
-export const VocalBusSection: React.FC<VocalBusSectionProps> = ({
+const VocalBusSectionComponent: React.FC<VocalBusSectionProps> = ({
   vocalBus,
   vocalBusMeter,
   onUpdateVocalBus,
@@ -492,3 +492,5 @@ export const VocalBusSection: React.FC<VocalBusSectionProps> = ({
     </div>
   );
 };
+
+export const VocalBusSection = React.memo(VocalBusSectionComponent);

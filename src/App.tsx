@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Header, NavigationTab } from './components/Header';
 import { TrackStrip } from './components/TrackStrip';
 import { MasterSection } from './components/MasterSection';
@@ -94,41 +94,23 @@ export default function App() {
     ])
   );
 
-  // Синхронизация реальных пиков телеметрии из AudioWorklet с полной защитой от null/undefined
-  useEffect(() => {
-    setTracks((prevTracks) => {
-      const safePrev = toSafeArray<TrackState>(prevTracks);
-      return safePrev.map((t) => {
-        const m = trackMeters ? trackMeters.get(t.id) : null;
-        if (m) {
-          return { ...t, peakL: m.peakL ?? 0, peakR: m.peakR ?? 0 };
-        }
-        return t;
-      });
-    });
-  }, [trackMeters]);
-
-  useEffect(() => {
-    if (!masterMeter) return;
-    setMaster((prev) => ({
-      ...prev,
-      peakL: masterMeter.peakL ?? 0,
-      peakR: masterMeter.peakR ?? 0,
-      clipped: Boolean(masterMeter.clipped)
-    }));
-  }, [masterMeter]);
+  // Синхронизация пиков телеметрии: мутировать tracks через setTracks на 30 FPS запрещено,
+  // так как это вызывает циклический ре-рендер App и MinimalStudio. Телеметрия передается
+  // напрямую в индикаторы через trackMeters Map без перезапуска дерева React.
+  const tracksRef = useRef(tracks);
+  tracksRef.current = tracks;
 
   // Периодическая принудительная чистка неиспользуемой памяти WebAssembly и отставших клипов
   useEffect(() => {
     const interval = setInterval(() => {
       if (isInitialized) {
-        garbageCollectWasm(tracks);
+        garbageCollectWasm(tracksRef.current);
       }
     }, 25000); // Каждые 25 секунд
     return () => clearInterval(interval);
-  }, [isInitialized, tracks, garbageCollectWasm]);
+  }, [isInitialized, garbageCollectWasm]);
 
-  const handleUpdateTrack = (updatedTrack: TrackState) => {
+  const handleUpdateTrack = useCallback((updatedTrack: TrackState) => {
     if (!updatedTrack) return;
     setTracks((prev) =>
       toSafeArray<TrackState>(prev).map((t) => (t.id === updatedTrack.id ? updatedTrack : t))
@@ -167,16 +149,16 @@ export default function App() {
         sourceTrackId: updatedTrack.autoDucker.sourceTrackId ?? 1
       });
     }
-  };
+  }, [setTrackVolume, setTrackPan, setTrackSolo, setTrackMute, setTrackEq, setTrackCompressor, setTrackAutoDucker]);
 
-  const handleUpdateMaster = (updatedMaster: MasterState) => {
+  const handleUpdateMaster = useCallback((updatedMaster: MasterState) => {
     if (!updatedMaster) return;
     setMaster(updatedMaster);
     setMasterVolume(updatedMaster.volumeDb ?? 0);
     setMasterLimiter(Boolean(updatedMaster.limiterEnabled), updatedMaster.limiterCeilingDb ?? -0.1);
-  };
+  }, [setMasterVolume, setMasterLimiter]);
 
-  const handleUpdateTrackVstChain = (trackId: number, vstPlugins: VSTPluginInstance[]) => {
+  const handleUpdateTrackVstChain = useCallback((trackId: number, vstPlugins: VSTPluginInstance[]) => {
     const safePlugins = toSafeArray<VSTPluginInstance>(vstPlugins);
     setTracks((prev) =>
       toSafeArray<TrackState>(prev).map((t) =>
@@ -184,19 +166,19 @@ export default function App() {
       )
     );
     setTrackVstChain(trackId, safePlugins);
-  };
+  }, [setTrackVstChain]);
 
-  const handleUpdateVocalBusVstChain = (vstPlugins: VSTPluginInstance[]) => {
+  const handleUpdateVocalBusVstChain = useCallback((vstPlugins: VSTPluginInstance[]) => {
     const safePlugins = toSafeArray<VSTPluginInstance>(vstPlugins);
     setVocalBusState((prev) => ({ ...prev, vstPlugins: safePlugins }));
     setVocalBusVstChain(safePlugins);
-  };
+  }, [setVocalBusVstChain]);
 
-  const handleUpdateMasterVstChain = (vstPlugins: VSTPluginInstance[]) => {
+  const handleUpdateMasterVstChain = useCallback((vstPlugins: VSTPluginInstance[]) => {
     const safePlugins = toSafeArray<VSTPluginInstance>(vstPlugins);
     setMaster((prev) => ({ ...prev, vstPlugins: safePlugins }));
     setMasterVstChain(safePlugins);
-  };
+  }, [setMasterVstChain]);
 
   const handleUpdateVstParam = (
     target: 'track' | 'vocalBus' | 'master',

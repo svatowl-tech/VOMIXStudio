@@ -18,7 +18,7 @@ interface MasterSectionProps {
   onUpdateVstWetDry?: (instanceId: string, wetDry: number) => void;
 }
 
-export const MasterSection: React.FC<MasterSectionProps> = ({
+const MasterSectionComponent: React.FC<MasterSectionProps> = ({
   master,
   isPlaying,
   onTogglePlay,
@@ -251,3 +251,5 @@ export const MasterSection: React.FC<MasterSectionProps> = ({
     </div>
   );
 };
+
+export const MasterSection = React.memo(MasterSectionComponent);

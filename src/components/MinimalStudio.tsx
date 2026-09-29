@@ -53,7 +53,7 @@ import {
   Scissors
 } from 'lucide-react';
 import { systemLogger } from '../services/SystemLogger';
-import { useAudioEngine } from '../hooks/useAudioEngine';
+import { useAudioEngine, TrackMeterData } from '../hooks/useAudioEngine';
 import { TrackState, MasterState, LiveDAWEngine, createNewTrack, VocalBusState, createDefaultVocalBus, ClipConfig } from '../audio/dawEngine';
 import { VSTPluginInstance } from '../audio/vstTypes';
 import { MediaNormalizer } from '../services/MediaNormalizer';
@@ -81,7 +81,315 @@ import { globalStemSeparationService } from '../services/StemSeparationService';
 import { globalAudioAICleanupEngine } from '../services/AudioAICleanupEngine';
 import { toSafeArray, toSafeMap, toSafeSet } from '../utils/safeIterables';
 
-export const MinimalStudio: React.FC = () => {
+interface TrackChannelStripProps {
+  track: TrackState;
+  meter: TrackMeterData | undefined;
+  canRemove: boolean;
+  isDspActive: boolean;
+  isVstActive: boolean;
+  onRemoveTrack: (id: number) => void;
+  onStripSilence: (id: number) => void;
+  onUploadFile: (id: number, file: File) => void;
+  onToggleDsp: (id: number) => void;
+  onToggleVst: (id: number) => void;
+  onVolumeChange: (id: number, volDb: number) => void;
+  onPanChange: (id: number, pan: number) => void;
+  onToggleMute: (id: number) => void;
+  onToggleSolo: (id: number) => void;
+}
+
+interface TrackVUMeterBarsProps {
+  meter?: TrackMeterData;
+}
+
+const TrackVUMeterBars = React.memo<TrackVUMeterBarsProps>(({ meter }) => {
+  const peakDbL = meter ? MediaNormalizer.linearToDb(meter.peakL) : -60;
+  const peakDbR = meter ? MediaNormalizer.linearToDb(meter.peakR) : -60;
+  const isClipping = (meter?.peakL || 0) >= 0.9999 || (meter?.peakR || 0) >= 0.9999;
+
+  return (
+    <div className="space-y-1 bg-slate-950 p-2.5 rounded-lg border border-slate-800 mb-4">
+      <div className="flex justify-between text-[10px] font-mono">
+        <span className="text-slate-500">L / R</span>
+        <span className={isClipping ? 'text-rose-400 font-bold' : 'text-slate-400'}>
+          {peakDbL > -60 ? `${peakDbL.toFixed(1)} dB` : '-inf'}
+        </span>
+      </div>
+
+      <div className="space-y-1">
+        <div className="w-full h-1.5 bg-slate-900 rounded-full overflow-hidden flex">
+          <div
+            className={`h-full transition-all duration-75 ${
+              peakDbL > -0.1
+                ? 'bg-rose-500'
+                : peakDbL > -6
+                ? 'bg-amber-400'
+                : 'bg-emerald-500'
+            }`}
+            style={{
+              width: `${Math.max(0, Math.min(100, ((peakDbL + 60) / 60) * 100))}%`
+            }}
+          />
+        </div>
+        <div className="w-full h-1.5 bg-slate-900 rounded-full overflow-hidden flex">
+          <div
+            className={`h-full transition-all duration-75 ${
+              peakDbR > -0.1
+                ? 'bg-rose-500'
+                : peakDbR > -6
+                ? 'bg-amber-400'
+                : 'bg-emerald-500'
+            }`}
+            style={{
+              width: `${Math.max(0, Math.min(100, ((peakDbR + 60) / 60) * 100))}%`
+            }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}, (prev, next) => {
+  if (!prev.meter && !next.meter) return true;
+  if (!prev.meter || !next.meter) return false;
+  return (
+    Math.abs(prev.meter.peakL - next.meter.peakL) < 0.008 &&
+    Math.abs(prev.meter.peakR - next.meter.peakR) < 0.008 &&
+    prev.meter.clipped === next.meter.clipped
+  );
+});
+TrackVUMeterBars.displayName = 'TrackVUMeterBars';
+
+const TrackChannelStrip = React.memo<TrackChannelStripProps>(({
+  track,
+  meter,
+  canRemove,
+  isDspActive,
+  isVstActive,
+  onRemoveTrack,
+  onStripSilence,
+  onUploadFile,
+  onToggleDsp,
+  onToggleVst,
+  onVolumeChange,
+  onPanChange,
+  onToggleMute,
+  onToggleSolo
+}) => {
+  const safeClips = toSafeArray<ClipConfig>(track.clips);
+  const hasClips = safeClips.length > 0;
+  const safeVstPlugins = toSafeArray<VSTPluginInstance>(track.vstPlugins);
+
+  return (
+    <div
+      className={`bg-[#0a0e17] border rounded-xl p-4 flex flex-col justify-between transition-all ${
+        track.solo
+          ? 'border-amber-500/50 shadow-lg shadow-amber-950/20'
+          : track.mute
+          ? 'border-slate-800 opacity-60'
+          : 'border-slate-800 hover:border-slate-700'
+      }`}
+    >
+      <div>
+        <div className="flex items-center justify-between gap-2 mb-2">
+          <div className="flex items-center gap-2 truncate">
+            <div
+              className="w-3 h-3 rounded-full shrink-0"
+              style={{ backgroundColor: track.color || '#10b981' }}
+            />
+            <span className="text-xs font-bold text-slate-200 truncate" title={track.name}>
+              {track.name}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-900 text-slate-400 border border-slate-800">
+              CH {track.id}
+            </span>
+            {canRemove && (
+              <button
+                onClick={() => onRemoveTrack(track.id)}
+                className="p-1 text-slate-500 hover:text-rose-400 hover:bg-slate-900 rounded transition-all cursor-pointer"
+                title="Удалить дорожку"
+              >
+                <Trash2 size={13} />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Аудиоклип & Загрузка файла */}
+        <div className="flex items-center justify-between gap-2 mb-3 bg-slate-950/60 p-2 rounded-lg border border-slate-800/80">
+          <div className="text-[11px] truncate flex-1">
+            {hasClips ? (
+              <span className="text-emerald-400 font-medium truncate block" title={safeClips[0].name}>
+                {safeClips[0].name} ({((safeClips[0].lengthSamples || 0) / 48000).toFixed(1)}с, {safeClips.length} фраз)
+              </span>
+            ) : (
+              <span className="text-slate-500">Нет аудиофайла</span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1 shrink-0">
+            {hasClips && (
+              <button
+                onClick={() => onStripSilence(track.id)}
+                className="px-2 py-1 bg-teal-950/80 hover:bg-teal-900 border border-teal-700/60 text-teal-300 rounded text-[10px] font-semibold flex items-center gap-1 cursor-pointer transition-all"
+                title="Вырезать тишину из этой дорожки (C++ VAD)"
+              >
+                <Scissors size={10} />
+                <span>VAD</span>
+              </button>
+            )}
+
+            <label className="px-2 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 rounded text-[10px] font-semibold flex items-center gap-1 cursor-pointer transition-all">
+              <Upload size={10} />
+              <span>{hasClips ? 'Заменить' : 'Загрузить'}</span>
+              <input
+                type="file"
+                accept="audio/*"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) onUploadFile(track.id, f);
+                }}
+                className="hidden"
+              />
+            </label>
+          </div>
+        </div>
+
+        {/* Кнопка открытия C++ DSP рэка */}
+        <button
+          onClick={() => onToggleDsp(track.id)}
+          className={`w-full mb-3 px-2.5 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-between transition-all cursor-pointer shadow-sm ${
+            isDspActive ? 'bg-cyan-950/80 border border-cyan-500/80 text-cyan-200' : 'bg-[#0f1422] hover:bg-slate-800 border border-slate-700/80 text-slate-200'
+          }`}
+        >
+          <div className="flex items-center gap-1.5">
+            <SlidersHorizontal size={13} className="text-cyan-400" />
+            <span>C++ DSP Vocal Rack</span>
+          </div>
+
+          <div className="flex items-center gap-1">
+            <span
+              className={`text-[9px] px-1 py-0.2 rounded font-mono ${
+                track.eq.enabled ? 'bg-cyan-950 text-cyan-400 border border-cyan-800' : 'bg-slate-900 text-slate-600'
+              }`}
+            >
+              EQ
+            </span>
+            <span
+              className={`text-[9px] px-1 py-0.2 rounded font-mono ${
+                track.compressor.enabled
+                  ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                  : 'bg-slate-900 text-slate-600'
+              }`}
+            >
+              COMP
+            </span>
+            <span
+              className={`text-[9px] px-1 py-0.2 rounded font-mono ${
+                track.autoDucker.enabled
+                  ? 'bg-purple-950 text-purple-400 border border-purple-800'
+                  : 'bg-slate-900 text-slate-600'
+              }`}
+            >
+              DUCK
+            </span>
+          </div>
+        </button>
+
+        {/* Кнопка открытия VST Рэка инсертов */}
+        <button
+          onClick={() => onToggleVst(track.id)}
+          className={`w-full mb-3 px-2.5 py-1.5 rounded-lg text-xs font-semibold flex items-center justify-between transition-all cursor-pointer shadow-sm ${
+            isVstActive ? 'bg-violet-950/80 border border-violet-500/80 text-violet-200' : 'bg-[#141026] hover:bg-slate-800 border border-violet-800/60 text-slate-200'
+          }`}
+        >
+          <div className="flex items-center gap-1.5">
+            <Layers size={13} className="text-violet-400" />
+            <span>VST Инсерты</span>
+          </div>
+
+          <span className="text-[10px] px-1.5 py-0.2 rounded font-mono bg-violet-950 text-violet-300 border border-violet-800">
+            {safeVstPlugins.length > 0 ? `${safeVstPlugins.length} плаг.` : 'Пусто'}
+          </span>
+        </button>
+
+        {/* Peak/RMS Индикаторы (Изолированный компонент без ре-рендера полосы канала) */}
+        <TrackVUMeterBars meter={meter} />
+
+        {/* Фейдер громкости */}
+        <div className="space-y-1.5 mb-3">
+          <div className="flex justify-between text-xs">
+            <span className="text-slate-400 font-medium">Громкость:</span>
+            <span className="font-mono text-emerald-400 font-bold">
+              {track.volumeDb > 0 ? `+${track.volumeDb.toFixed(1)}` : track.volumeDb.toFixed(1)} dB
+            </span>
+          </div>
+          <input
+            type="range"
+            min="-48"
+            max="12"
+            step="0.5"
+            value={track.volumeDb}
+            onChange={(e) => onVolumeChange(track.id, parseFloat(e.target.value))}
+            className="w-full accent-emerald-500 h-1.5 bg-slate-800 rounded-lg cursor-pointer"
+          />
+        </div>
+
+        {/* Панорама */}
+        <div className="space-y-1.5 mb-4">
+          <div className="flex justify-between text-xs">
+            <span className="text-slate-400 font-medium">Панорама:</span>
+            <span className="font-mono text-slate-300 text-[11px]">
+              {track.pan === 0
+                ? 'Center'
+                : track.pan < 0
+                ? `L ${Math.round(Math.abs(track.pan) * 100)}%`
+                : `R ${Math.round(track.pan * 100)}%`}
+            </span>
+          </div>
+          <input
+            type="range"
+            min="-1"
+            max="1"
+            step="0.05"
+            value={track.pan}
+            onChange={(e) => onPanChange(track.id, parseFloat(e.target.value))}
+            className="w-full accent-cyan-500 h-1.5 bg-slate-800 rounded-lg cursor-pointer"
+          />
+        </div>
+      </div>
+
+      {/* Кнопки Mute / Solo */}
+      <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-800/80">
+        <button
+          onClick={() => onToggleMute(track.id)}
+          className={`py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+            track.mute
+              ? 'bg-rose-600 text-white shadow-md shadow-rose-950/30'
+              : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
+          }`}
+        >
+          MUTE
+        </button>
+
+        <button
+          onClick={() => onToggleSolo(track.id)}
+          className={`py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+            track.solo
+              ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-950/30'
+              : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
+          }`}
+        >
+          SOLO
+        </button>
+      </div>
+    </div>
+  );
+});
+
+const MinimalStudioComponent: React.FC = () => {
   // --- 1. Аудиодвижок DAW и AudioWorklet ---
   const {
     isInitialized,
@@ -689,159 +997,184 @@ export const MinimalStudio: React.FC = () => {
     await extractAndLoadVideoAudio(videoFile);
   };
 
-  // --- 9. Изменение параметров микшера ---
-  const handleVolumeChange = (trackId: number, volumeDb: number) => {
+  // --- 9. Изменение параметров микшера с мемоизацией ---
+  const handleVolumeChange = useCallback((trackId: number, volumeDb: number) => {
     setTrackVolume(trackId, volumeDb);
     setTracks((prev) => toSafeArray<TrackState>(prev).map((t) => (t.id === trackId ? { ...t, volumeDb } : t)));
     triggerAutoSave();
-  };
+  }, [setTrackVolume, triggerAutoSave]);
 
-  const handlePanChange = (trackId: number, pan: number) => {
+  const handlePanChange = useCallback((trackId: number, pan: number) => {
     setTrackPan(trackId, pan);
     setTracks((prev) => toSafeArray<TrackState>(prev).map((t) => (t.id === trackId ? { ...t, pan } : t)));
     triggerAutoSave();
-  };
+  }, [setTrackPan, triggerAutoSave]);
 
-  const handleMuteToggle = (trackId: number) => {
-    const safeTracks = toSafeArray<TrackState>(tracks);
-    const track = safeTracks.find((t) => t && t.id === trackId);
-    if (!track) return;
-    const newMute = !track.mute;
-    setTrackMute(trackId, newMute);
-    setTracks((prev) => toSafeArray<TrackState>(prev).map((t) => (t.id === trackId ? { ...t, mute: newMute } : t)));
+  const handleMuteToggle = useCallback((trackId: number) => {
+    setTracks((prev) => {
+      const safeTracks = toSafeArray<TrackState>(prev);
+      const track = safeTracks.find((t) => t && t.id === trackId);
+      if (!track) return prev;
+      const newMute = !track.mute;
+      setTrackMute(trackId, newMute);
+      return safeTracks.map((t) => (t.id === trackId ? { ...t, mute: newMute } : t));
+    });
     triggerAutoSave();
-  };
+  }, [setTrackMute, triggerAutoSave]);
 
-  const handleSoloToggle = (trackId: number) => {
-    const safeTracks = toSafeArray<TrackState>(tracks);
-    const track = safeTracks.find((t) => t && t.id === trackId);
-    if (!track) return;
-    const newSolo = !track.solo;
-    setTrackSolo(trackId, newSolo);
-    setTracks((prev) => toSafeArray<TrackState>(prev).map((t) => (t.id === trackId ? { ...t, solo: newSolo } : t)));
+  const handleSoloToggle = useCallback((trackId: number) => {
+    setTracks((prev) => {
+      const safeTracks = toSafeArray<TrackState>(prev);
+      const track = safeTracks.find((t) => t && t.id === trackId);
+      if (!track) return prev;
+      const newSolo = !track.solo;
+      setTrackSolo(trackId, newSolo);
+      return safeTracks.map((t) => (t.id === trackId ? { ...t, solo: newSolo } : t));
+    });
     triggerAutoSave();
-  };
+  }, [setTrackSolo, triggerAutoSave]);
+
+  const handleToggleDsp = useCallback((id: number) => {
+    setActiveDspTrackId((prev) => (prev === id ? null : id));
+  }, []);
+
+  const handleToggleVst = useCallback((id: number) => {
+    setActiveVstTrackId((prev) => (prev === id ? null : id));
+  }, []);
 
   // Добавление новой аудиодорожки (поддержка 20-25+ дорожек)
-  const handleAddNewTrack = () => {
-    const safeTracks = toSafeArray<TrackState>(tracks);
-    if (safeTracks.length >= 32) {
-      alert('Достигнут максимальный лимит дорожек (32).');
-      return;
-    }
-    const trackIds = safeTracks.map((t) => t.id).filter((id) => typeof id === 'number');
-    const nextId = trackIds.length > 0 ? Math.max(...trackIds) + 1 : 1;
-    const newTr = createNewTrack(nextId, `Dubber ${nextId}`);
-    setTracks((prev) => [...toSafeArray<TrackState>(prev), newTr]);
+  const handleAddNewTrack = useCallback(() => {
+    setTracks((prev) => {
+      const safeTracks = toSafeArray<TrackState>(prev);
+      if (safeTracks.length >= 32) {
+        alert('Достигнут максимальный лимит дорожек (32).');
+        return prev;
+      }
+      const trackIds = safeTracks.map((t) => t.id).filter((id) => typeof id === 'number');
+      const nextId = trackIds.length > 0 ? Math.max(...trackIds) + 1 : 1;
+      const newTr = createNewTrack(nextId, `Dubber ${nextId}`);
+      setStatusMessage(`Добавлена новая дорожка CH ${nextId} (всего дорожек: ${safeTracks.length + 1})`);
+      return [...safeTracks, newTr];
+    });
     triggerAutoSave();
-    setStatusMessage(`Добавлена новая дорожка CH ${nextId} (всего дорожек: ${safeTracks.length + 1})`);
-  };
+  }, [triggerAutoSave]);
 
   // Удаление дорожки
-  const handleRemoveTrack = (trackId: number) => {
-    const safeTracks = toSafeArray<TrackState>(tracks);
-    if (safeTracks.length <= 1) {
-      alert('Нельзя удалить последнюю дорожку.');
-      return;
-    }
-    setTracks((prev) => toSafeArray<TrackState>(prev).filter((t) => t.id !== trackId));
+  const handleRemoveTrack = useCallback((trackId: number) => {
+    setTracks((prev) => {
+      const safeTracks = toSafeArray<TrackState>(prev);
+      if (safeTracks.length <= 1) {
+        alert('Нельзя удалить последнюю дорожку.');
+        return prev;
+      }
+      return safeTracks.filter((t) => t.id !== trackId);
+    });
     triggerAutoSave();
     setStatusMessage(`Дорожка CH ${trackId} удалена.`);
-  };
+  }, [triggerAutoSave]);
 
   // Добавление стем-дорожек после AI разделения (Вокал + Фонограмма M&E)
-  const handleAddStemTracks = (
-    vocalsPcm: Float32Array,
-    karaokePcm: Float32Array,
-    vocalsName = 'Изолированный вокал',
-    karaokeName = 'Фонограмма M&E'
-  ) => {
-    const safeTracks = toSafeArray<TrackState>(tracks);
-    const trackIds = safeTracks.map((t) => t.id).filter((id) => typeof id === 'number');
-    const nextId = trackIds.length > 0 ? Math.max(...trackIds) + 1 : 1;
-    const vocalsClip: ClipConfig = {
-      id: Date.now() + 1,
-      name: vocalsName,
-      offsetSamples: 0,
-      lengthSamples: Math.floor(vocalsPcm.length / 2),
-      gain: 1.0,
-      pan: 0,
-      fadeInSamples: 2400,
-      fadeOutSamples: 2400,
-      buffer: vocalsPcm,
-      color: '#10b981'
-    };
-    const karaokeClip: ClipConfig = {
-      id: Date.now() + 2,
-      name: karaokeName,
-      offsetSamples: 0,
-      lengthSamples: Math.floor(karaokePcm.length / 2),
-      gain: 0.85,
-      pan: 0,
-      fadeInSamples: 2400,
-      fadeOutSamples: 2400,
-      buffer: karaokePcm,
-      color: '#06b6d4'
-    };
+  const handleAddStemTracks = useCallback(
+    (
+      vocalsPcm: Float32Array,
+      karaokePcm: Float32Array,
+      vocalsName = 'Изолированный вокал',
+      karaokeName = 'Фонограмма M&E'
+    ) => {
+      setTracks((prev) => {
+        const safeTracks = toSafeArray<TrackState>(prev);
+        const trackIds = safeTracks.map((t) => t.id).filter((id) => typeof id === 'number');
+        const nextId = trackIds.length > 0 ? Math.max(...trackIds) + 1 : 1;
+        const vocalsClip: ClipConfig = {
+          id: Date.now() + 1,
+          name: vocalsName,
+          offsetSamples: 0,
+          lengthSamples: Math.floor(vocalsPcm.length / 2),
+          gain: 1.0,
+          pan: 0,
+          fadeInSamples: 2400,
+          fadeOutSamples: 2400,
+          buffer: vocalsPcm,
+          color: '#10b981'
+        };
+        const karaokeClip: ClipConfig = {
+          id: Date.now() + 2,
+          name: karaokeName,
+          offsetSamples: 0,
+          lengthSamples: Math.floor(karaokePcm.length / 2),
+          gain: 0.85,
+          pan: 0,
+          fadeInSamples: 2400,
+          fadeOutSamples: 2400,
+          buffer: karaokePcm,
+          color: '#06b6d4'
+        };
 
-    const newVocalsTrack: TrackState = {
-      ...createNewTrack(nextId, vocalsName, '#10b981'),
-      clips: [vocalsClip]
-    };
+        const newVocalsTrack: TrackState = {
+          ...createNewTrack(nextId, vocalsName, '#10b981'),
+          clips: [vocalsClip]
+        };
 
-    const newKaraokeTrack: TrackState = {
-      ...createNewTrack(nextId + 1, karaokeName, '#06b6d4'),
-      volumeDb: -1.5,
-      clips: [karaokeClip]
-    };
+        const newKaraokeTrack: TrackState = {
+          ...createNewTrack(nextId + 1, karaokeName, '#06b6d4'),
+          volumeDb: -1.5,
+          clips: [karaokeClip]
+        };
 
-    const updatedTracks = [...safeTracks, newVocalsTrack, newKaraokeTrack];
-    setTracks(updatedTracks);
-    syncAllTracks(updatedTracks);
-    triggerAutoSave();
-    setStatusMessage(`Стемы успешно добавлены в проект: "${vocalsName}" и "${karaokeName}"!`);
-  };
+        const updatedTracks = [...safeTracks, newVocalsTrack, newKaraokeTrack];
+        syncAllTracks(updatedTracks);
+        return updatedTracks;
+      });
+      triggerAutoSave();
+      setStatusMessage(`Стемы успешно добавлены в проект: "${vocalsName}" и "${karaokeName}"!`);
+    },
+    [syncAllTracks, triggerAutoSave]
+  );
 
   // Применение обработанного нейросетью аудио к целевой дорожке
-  const handleApplyProcessedAudioToTrack = (
-    trackId: number,
-    newPcm: Float32Array,
-    clipName = 'Обработанное аудио'
-  ) => {
-    const lengthSamples = Math.floor(newPcm.length / 2);
-    const clipId = Date.now();
-    const newClip: ClipConfig = {
-      id: clipId,
-      name: clipName,
-      offsetSamples: 0,
-      lengthSamples: lengthSamples,
-      gain: 1.0,
-      pan: 0,
-      fadeInSamples: 2400,
-      fadeOutSamples: 2400,
-      buffer: newPcm,
-      color: '#10b981'
-    };
+  const handleApplyProcessedAudioToTrack = useCallback(
+    (
+      trackId: number,
+      newPcm: Float32Array,
+      clipName = 'Обработанное аудио'
+    ) => {
+      const lengthSamples = Math.floor(newPcm.length / 2);
+      const clipId = Date.now();
+      const newClip: ClipConfig = {
+        id: clipId,
+        name: clipName,
+        offsetSamples: 0,
+        lengthSamples: lengthSamples,
+        gain: 1.0,
+        pan: 0,
+        fadeInSamples: 2400,
+        fadeOutSamples: 2400,
+        buffer: newPcm,
+        color: '#10b981'
+      };
 
-    const updatedTracks = toSafeArray<TrackState>(tracks).map((t) => {
-      if (t.id === trackId) {
-        return {
-          ...t,
-          clips: [newClip]
-        };
-      }
-      return t;
-    });
-
-    setTracks(updatedTracks);
-    syncAllTracks(updatedTracks);
-    uploadRawPCMToTrack(newPcm, trackId, clipId, 0, 1.0, 0.0, true);
-    triggerAutoSave();
-    setStatusMessage(`AI-обработанное аудио успешно применено к Дорожке CH #${trackId}!`);
-  };
+      setTracks((prev) => {
+        const updatedTracks = toSafeArray<TrackState>(prev).map((t) => {
+          if (t.id === trackId) {
+            return {
+              ...t,
+              clips: [newClip]
+            };
+          }
+          return t;
+        });
+        syncAllTracks(updatedTracks);
+        return updatedTracks;
+      });
+      uploadRawPCMToTrack(newPcm, trackId, clipId, 0, 1.0, 0.0, true);
+      triggerAutoSave();
+      setStatusMessage(`AI-обработанное аудио успешно применено к Дорожке CH #${trackId}!`);
+    },
+    [syncAllTracks, uploadRawPCMToTrack, triggerAutoSave]
+  );
 
   // Загрузка аудиофайла напрямую в дорожку
-  const handleTrackFileUpload = async (trackId: number, file: File) => {
+  const handleTrackFileUpload = useCallback(async (trackId: number, file: File) => {
     if (!isInitialized) {
       await initAudioEngine();
     }
@@ -895,7 +1228,7 @@ export const MinimalStudio: React.FC = () => {
     } catch (err: any) {
       setStatusMessage(`Ошибка загрузки аудио: ${err.message}`);
     }
-  };
+  }, [isInitialized, initAudioEngine, uploadAudioFileToTrack, triggerAutoSave]);
 
   // --- 8.5. Универсальный импорт через MediaImportModal ---
   const handleModalImportVideo = async (file: File, audioPcm?: Float32Array, durationSec?: number) => {
@@ -1100,7 +1433,7 @@ export const MinimalStudio: React.FC = () => {
   /**
    * Удаление тишины и нарезка на фразы для конкретной дорожки с индивидуальным акустическим профилем
    */
-  const handleStripSilenceTrack = async (trackId: number) => {
+  const handleStripSilenceTrack = useCallback(async (trackId: number) => {
     try {
       const safeTracks = toSafeArray<TrackState>(tracks);
       const target = safeTracks.find((t) => t.id === trackId);
@@ -1134,7 +1467,7 @@ export const MinimalStudio: React.FC = () => {
       console.error('Ошибка нарезки тишины на дорожке:', err);
       setStatusMessage(`Ошибка удаления тишины: ${err?.message || err}`);
     }
-  };
+  }, [tracks, syncAllTracks, uploadRawPCMToTrack, triggerAutoSave]);
 
   const handleModalImportSubtitles = async (cues: SubtitleCue[], sourceFileName?: string) => {
     const safeCues = toSafeArray<SubtitleCue>(cues);
@@ -1459,14 +1792,14 @@ export const MinimalStudio: React.FC = () => {
   };
 
   // Обновление дорожки и клипов из TimelineView (Сплит, Time Stretch, перемещение клипов)
-  const handleUpdateTrack = (updatedTrack: TrackState) => {
+  const handleUpdateTrack = useCallback((updatedTrack: TrackState) => {
     setTracks((prev) => toSafeArray<TrackState>(prev).map((t) => (t.id === updatedTrack.id ? updatedTrack : t)));
 
     // Синхронизируем клипы с AudioWorklet и C++ ядром
     syncTrackClips(updatedTrack.id, toSafeArray(updatedTrack.clips));
 
     triggerAutoSave();
-  };
+  }, [syncTrackClips, triggerAutoSave]);
 
   // --- 10. Шаг 3: Автоматическое выравнивание громкости (C++ Loudness Match EBU R128) ---
   const handleAutoLoudnessMatch = (targetRmsDb = -18.0) => {
@@ -2424,261 +2757,27 @@ export const MinimalStudio: React.FC = () => {
           </div>
         )}
 
-        {/* Сетка полос микшера */}
+        {/* Сетка полос микшера (мемоизированные каналы) */}
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 pt-2">
-          {safeTracksList.map((track) => {
-            const meterData = trackMeters?.get?.(track.id);
-            const peakDbL = meterData ? MediaNormalizer.linearToDb(meterData.peakL) : -60;
-            const peakDbR = meterData ? MediaNormalizer.linearToDb(meterData.peakR) : -60;
-            const isClipping = (meterData?.peakL || 0) >= 0.9999 || (meterData?.peakR || 0) >= 0.9999;
-            const safeClips = toSafeArray<ClipConfig>(track.clips);
-            const hasClips = safeClips.length > 0;
-            const safeVstPlugins = toSafeArray<VSTPluginInstance>(track.vstPlugins);
-
-            return (
-              <div
-                key={track.id}
-                className={`bg-[#0a0e17] border rounded-xl p-4 flex flex-col justify-between transition-all ${
-                  track.solo
-                    ? 'border-amber-500/50 shadow-lg shadow-amber-950/20'
-                    : track.mute
-                    ? 'border-slate-800 opacity-60'
-                    : 'border-slate-800 hover:border-slate-700'
-                }`}
-              >
-                <div>
-                  <div className="flex items-center justify-between gap-2 mb-2">
-                    <div className="flex items-center gap-2 truncate">
-                      <div
-                        className="w-3 h-3 rounded-full shrink-0"
-                        style={{ backgroundColor: track.color || '#10b981' }}
-                      />
-                      <span className="text-xs font-bold text-slate-200 truncate" title={track.name}>
-                        {track.name}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-900 text-slate-400 border border-slate-800">
-                        CH {track.id}
-                      </span>
-                      {safeTracksList.length > 1 && (
-                        <button
-                          onClick={() => handleRemoveTrack(track.id)}
-                          className="p-1 text-slate-500 hover:text-rose-400 hover:bg-slate-900 rounded transition-all cursor-pointer"
-                          title="Удалить дорожку"
-                        >
-                          <Trash2 size={13} />
-                        </button>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Аудиоклип & Загрузка файла */}
-                  <div className="flex items-center justify-between gap-2 mb-3 bg-slate-950/60 p-2 rounded-lg border border-slate-800/80">
-                    <div className="text-[11px] truncate flex-1">
-                      {hasClips ? (
-                        <span className="text-emerald-400 font-medium truncate block" title={safeClips[0].name}>
-                          {safeClips[0].name} ({((safeClips[0].lengthSamples || 0) / 48000).toFixed(1)}с, {safeClips.length} фраз)
-                        </span>
-                      ) : (
-                        <span className="text-slate-500">Нет аудиофайла</span>
-                      )}
-                    </div>
-
-                    <div className="flex items-center gap-1 shrink-0">
-                      {hasClips && (
-                        <button
-                          onClick={() => handleStripSilenceTrack(track.id)}
-                          className="px-2 py-1 bg-teal-950/80 hover:bg-teal-900 border border-teal-700/60 text-teal-300 rounded text-[10px] font-semibold flex items-center gap-1 cursor-pointer transition-all"
-                          title="Вырезать тишину из этой дорожки (C++ VAD)"
-                        >
-                          <Scissors size={10} />
-                          <span>VAD</span>
-                        </button>
-                      )}
-
-                      <label className="px-2 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 rounded text-[10px] font-semibold flex items-center gap-1 cursor-pointer transition-all">
-                        <Upload size={10} />
-                        <span>{hasClips ? 'Заменить' : 'Загрузить'}</span>
-                        <input
-                          type="file"
-                          accept="audio/*"
-                          onChange={(e) => {
-                            const f = e.target.files?.[0];
-                            if (f) handleTrackFileUpload(track.id, f);
-                          }}
-                          className="hidden"
-                        />
-                      </label>
-                    </div>
-                  </div>
-
-                  {/* Кнопка открытия C++ DSP рэка */}
-                  <button
-                    onClick={() => setActiveDspTrackId(activeDspTrackId === track.id ? null : track.id)}
-                    className="w-full mb-3 px-2.5 py-1.5 bg-[#0f1422] hover:bg-slate-800 border border-slate-700/80 rounded-lg text-xs font-semibold text-slate-200 flex items-center justify-between transition-all cursor-pointer shadow-sm"
-                  >
-                    <div className="flex items-center gap-1.5">
-                      <SlidersHorizontal size={13} className="text-cyan-400" />
-                      <span>C++ DSP Vocal Rack</span>
-                    </div>
-
-                    <div className="flex items-center gap-1">
-                      <span
-                        className={`text-[9px] px-1 py-0.2 rounded font-mono ${
-                          track.eq.enabled ? 'bg-cyan-950 text-cyan-400 border border-cyan-800' : 'bg-slate-900 text-slate-600'
-                        }`}
-                      >
-                        EQ
-                      </span>
-                      <span
-                        className={`text-[9px] px-1 py-0.2 rounded font-mono ${
-                          track.compressor.enabled
-                            ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
-                            : 'bg-slate-900 text-slate-600'
-                        }`}
-                      >
-                        COMP
-                      </span>
-                      <span
-                        className={`text-[9px] px-1 py-0.2 rounded font-mono ${
-                          track.autoDucker.enabled
-                            ? 'bg-purple-950 text-purple-400 border border-purple-800'
-                            : 'bg-slate-900 text-slate-600'
-                        }`}
-                      >
-                        DUCK
-                      </span>
-                    </div>
-                  </button>
-
-                  {/* Кнопка открытия VST Рэка инсертов */}
-                  <button
-                    onClick={() => setActiveVstTrackId(activeVstTrackId === track.id ? null : track.id)}
-                    className="w-full mb-3 px-2.5 py-1.5 bg-[#141026] hover:bg-slate-800 border border-violet-800/60 rounded-lg text-xs font-semibold text-slate-200 flex items-center justify-between transition-all cursor-pointer shadow-sm"
-                  >
-                    <div className="flex items-center gap-1.5">
-                      <Layers size={13} className="text-violet-400" />
-                      <span>VST Инсерты</span>
-                    </div>
-
-                    <span className="text-[10px] px-1.5 py-0.2 rounded font-mono bg-violet-950 text-violet-300 border border-violet-800">
-                      {safeVstPlugins.length > 0 ? `${safeVstPlugins.length} плаг.` : 'Пусто'}
-                    </span>
-                  </button>
-
-                  {/* Peak/RMS Индикаторы */}
-                  <div className="space-y-1 bg-slate-950 p-2.5 rounded-lg border border-slate-800 mb-4">
-                    <div className="flex justify-between text-[10px] font-mono">
-                      <span className="text-slate-500">L / R</span>
-                      <span className={isClipping ? 'text-rose-400 font-bold' : 'text-slate-400'}>
-                        {peakDbL > -60 ? `${peakDbL.toFixed(1)} dB` : '-inf'}
-                      </span>
-                    </div>
-
-                    <div className="space-y-1">
-                      <div className="w-full h-1.5 bg-slate-900 rounded-full overflow-hidden flex">
-                        <div
-                          className={`h-full transition-all duration-75 ${
-                            peakDbL > -0.1
-                              ? 'bg-rose-500'
-                              : peakDbL > -6
-                              ? 'bg-amber-400'
-                              : 'bg-emerald-500'
-                          }`}
-                          style={{
-                            width: `${Math.max(0, Math.min(100, ((peakDbL + 60) / 60) * 100))}%`
-                          }}
-                        />
-                      </div>
-                      <div className="w-full h-1.5 bg-slate-900 rounded-full overflow-hidden flex">
-                        <div
-                          className={`h-full transition-all duration-75 ${
-                            peakDbR > -0.1
-                              ? 'bg-rose-500'
-                              : peakDbR > -6
-                              ? 'bg-amber-400'
-                              : 'bg-emerald-500'
-                          }`}
-                          style={{
-                            width: `${Math.max(0, Math.min(100, ((peakDbR + 60) / 60) * 100))}%`
-                          }}
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Фейдер громкости */}
-                  <div className="space-y-1.5 mb-3">
-                    <div className="flex justify-between text-xs">
-                      <span className="text-slate-400 font-medium">Громкость:</span>
-                      <span className="font-mono text-emerald-400 font-bold">
-                        {track.volumeDb > 0 ? `+${track.volumeDb.toFixed(1)}` : track.volumeDb.toFixed(1)} dB
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min="-48"
-                      max="12"
-                      step="0.5"
-                      value={track.volumeDb}
-                      onChange={(e) => handleVolumeChange(track.id, parseFloat(e.target.value))}
-                      className="w-full accent-emerald-500 h-1.5 bg-slate-800 rounded-lg cursor-pointer"
-                    />
-                  </div>
-
-                  {/* Панорама */}
-                  <div className="space-y-1.5 mb-4">
-                    <div className="flex justify-between text-xs">
-                      <span className="text-slate-400 font-medium">Панорама:</span>
-                      <span className="font-mono text-slate-300 text-[11px]">
-                        {track.pan === 0
-                          ? 'Center'
-                          : track.pan < 0
-                          ? `L ${Math.round(Math.abs(track.pan) * 100)}%`
-                          : `R ${Math.round(track.pan * 100)}%`}
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min="-1"
-                      max="1"
-                      step="0.05"
-                      value={track.pan}
-                      onChange={(e) => handlePanChange(track.id, parseFloat(e.target.value))}
-                      className="w-full accent-cyan-500 h-1.5 bg-slate-800 rounded-lg cursor-pointer"
-                    />
-                  </div>
-                </div>
-
-                {/* Кнопки Mute / Solo */}
-                <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-800/80">
-                  <button
-                    onClick={() => handleMuteToggle(track.id)}
-                    className={`py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                      track.mute
-                        ? 'bg-rose-600 text-white shadow-md shadow-rose-950/30'
-                        : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
-                    }`}
-                  >
-                    MUTE
-                  </button>
-
-                  <button
-                    onClick={() => handleSoloToggle(track.id)}
-                    className={`py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                      track.solo
-                        ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-950/30'
-                        : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
-                    }`}
-                  >
-                    SOLO
-                  </button>
-                </div>
-              </div>
-            );
-          })}
+          {safeTracksList.map((track) => (
+            <TrackChannelStrip
+              key={track.id}
+              track={track}
+              meter={trackMeters?.get?.(track.id)}
+              canRemove={safeTracksList.length > 1}
+              isDspActive={activeDspTrackId === track.id}
+              isVstActive={activeVstTrackId === track.id}
+              onRemoveTrack={handleRemoveTrack}
+              onStripSilence={handleStripSilenceTrack}
+              onUploadFile={handleTrackFileUpload}
+              onToggleDsp={handleToggleDsp}
+              onToggleVst={handleToggleVst}
+              onVolumeChange={handleVolumeChange}
+              onPanChange={handlePanChange}
+              onToggleMute={handleMuteToggle}
+              onToggleSolo={handleSoloToggle}
+            />
+          ))}
         </div>
 
         {/* 3.1. Мастер-секция вокальной шины (Master Voiceover Bus) и Мастер-микс */}
@@ -2721,7 +2820,7 @@ export const MinimalStudio: React.FC = () => {
         <DubbingAIStudio
           mode="matrix-only"
           tracks={safeTracksList}
-          currentTimeSec={currentTimeSec}
+          onUpdateTrack={handleUpdateTrack}
           onSeek={seek}
           onAddStemTracks={handleAddStemTracks}
           onApplyProcessedAudioToTrack={handleApplyProcessedAudioToTrack}
@@ -2846,3 +2945,5 @@ export const MinimalStudio: React.FC = () => {
     </div>
   );
 };
+
+export const MinimalStudio = React.memo(MinimalStudioComponent);
