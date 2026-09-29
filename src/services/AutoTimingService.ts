@@ -22,6 +22,7 @@ import { SubtitleCue } from './ProjectManager';
 import { globalNativeDAWBridge } from './NativeDAWBridge';
 import { systemLogger } from './SystemLogger';
 import { toSafeArray } from '../utils/safeIterables';
+import { resolvePairwiseCollisions } from '../utils/collisionDetector';
 
 export interface ActorTrackMapping {
   speaker: string;
@@ -689,93 +690,25 @@ export class AutoTimingService {
       clips: [...toSafeArray<ClipConfig>(t.clips)]
     }));
 
-    // ЕСЛИ СУБТИТРЫ НЕ ЗАГРУЖЕНЫ:
-    // Автоматически нарезаем все дорожки на фразы (VAD Strip Silence)
-    // и каскадно разводим наезды между дорожками дикторов!
+    // ВАРИАНТ 2: ЕСЛИ СУБТИТРЫ НЕ ЗАГРУЖЕНЫ (или не указаны):
+    // Работает чистый детектор коллизий:
+    // - Разводятся ТОЛЬКО парные коллизии (2 фразы наезжают друг на друга).
+    // - Массовые коллизии (3 и более дорожек одновременно) СОХРАНЯЮТСЯ (хор, гур-гур, совместный возглас).
+    // - Неконфликтующие дорожки и фразы остаются 100% нетронутыми (НЕ нарезаются и НЕ двигаются).
     if (safeSubtitles.length === 0) {
-      logs.push('[AutoTiming] Субтитры не загружены: запуск адаптивного разделения фраз и разведения коллизий между дорожками...');
-      
-      let totalSlicedPhrases = 0;
-      workingTracks = workingTracks.map((t) => {
-        if (t.isOriginalAudio || /оригинал|original|видео|video/i.test(t.name)) {
-          return t;
-        }
-        const res = this.stripSilenceAdaptiveFromTrack(t, sampleRate);
-        totalSlicedPhrases += res.phraseCount;
-        return res.updatedTrack;
-      });
-
-      // Каскадный ресолвер коллизий между всеми фразами всех дорожек дубляжа
-      interface DubberPhrase {
-        trackId: number;
-        clip: ClipConfig;
-        startSec: number;
-        endSec: number;
-        durationSec: number;
-      }
-
-      const allPhrases: DubberPhrase[] = [];
-      workingTracks.forEach((t) => {
-        if (t.isOriginalAudio || /оригинал|original|видео|video/i.test(t.name)) return;
-        toSafeArray(t.clips).forEach((c) => {
-          const startSec = (c.offsetSamples || 0) / sampleRate;
-          const durSec = (c.lengthSamples || 0) / sampleRate;
-          allPhrases.push({
-            trackId: t.id,
-            clip: c,
-            startSec,
-            endSec: startSec + durSec,
-            durationSec: durSec
-          });
-        });
-      });
-
-      allPhrases.sort((a, b) => a.startSec - b.startSec);
-      let resolvedCount = 0;
-
-      for (let pass = 0; pass < 10; pass++) {
-        let changed = false;
-        for (let i = 0; i < allPhrases.length; i++) {
-          for (let j = i + 1; j < allPhrases.length; j++) {
-            const pA = allPhrases[i];
-            const pB = allPhrases[j];
-
-            if (pB.startSec >= pA.endSec + minSeparationSec) {
-              break;
-            }
-
-            // Наезд между репликами: сдвигаем pB вперед
-            const requiredStart = pA.endSec + minSeparationSec;
-            if (pB.startSec < requiredStart) {
-              pB.startSec = Number(requiredStart.toFixed(3));
-              pB.endSec = Number((pB.startSec + pB.durationSec).toFixed(3));
-              pB.clip.offsetSamples = Math.round(pB.startSec * sampleRate);
-              resolvedCount++;
-              changed = true;
-            }
-          }
-        }
-        if (!changed) break;
-        allPhrases.sort((a, b) => a.startSec - b.startSec);
-      }
-
-      // Применяем смещения клипов обратно к дорожкам
-      workingTracks = workingTracks.map((t) => {
-        const trackClips = allPhrases.filter((p) => p.trackId === t.id).map((p) => p.clip);
-        if (trackClips.length > 0) {
-          return { ...t, clips: trackClips };
-        }
-        return t;
-      });
-
-      logs.push(`[AutoTiming] Успешно нарезано ${totalSlicedPhrases} фраз, устранено ${resolvedCount} наездов между репликами.`);
+      logs.push('[AutoTiming] Субтитры не загружены: запуск интеллектуального детектора коллизий...');
+      const collisionRes = resolvePairwiseCollisions(workingTracks, sampleRate, minSeparationSec);
+      logs.push(...collisionRes.logs);
+      logs.push(
+        `[AutoTiming] Завершено: устранено ${collisionRes.resolvedPairwiseCount} парных наездов, сохранено ${collisionRes.preservedMassiveCount} массовых сцен (3+ дорожки). Затронуто дорожек: ${collisionRes.affectedTrackIds.length}.`
+      );
 
       return {
-        updatedTracks: workingTracks,
+        updatedTracks: collisionRes.updatedTracks,
         actorMappings: [],
-        totalPhrasesAligned: totalSlicedPhrases,
-        resolvedCollisionsCount: resolvedCount,
-        preservedScriptOverlapsCount: 0,
+        totalPhrasesAligned: 0,
+        resolvedCollisionsCount: collisionRes.resolvedPairwiseCount,
+        preservedScriptOverlapsCount: collisionRes.preservedMassiveCount,
         alignmentDetails: [],
         logs
       };
@@ -947,6 +880,29 @@ export class AutoTimingService {
               preservedScriptOverlapsCount++;
             }
             continue;
+          }
+
+          // Проверяем массовые перекрытия (3 и более дорожек одновременно):
+          // Хор, гур-гур, совместный выкрик — сохраняются без изменений
+          if (!isSameTrack) {
+            const activeTracksInOverlap = new Set<number>([phraseA.trackId, phraseB.trackId]);
+            const overlapStart = Math.max(phraseA.scheduledStartSec, phraseB.scheduledStartSec);
+            const overlapEnd = Math.min(phraseA.scheduledEndSec, phraseB.scheduledEndSec);
+            for (const other of allPositionedPhrases) {
+              if (other.trackId !== phraseA.trackId && other.trackId !== phraseB.trackId) {
+                const oS = Math.max(other.scheduledStartSec, overlapStart);
+                const oE = Math.min(other.scheduledEndSec, overlapEnd);
+                if (oE - oS > 0.06) {
+                  activeTracksInOverlap.add(other.trackId);
+                }
+              }
+            }
+            if (activeTracksInOverlap.size >= 3) {
+              if (pass === 0) {
+                preservedScriptOverlapsCount++;
+              }
+              continue;
+            }
           }
 
           // Нежелательная коллизия: в субтитрах фраза B должна звучать отдельно от A, но накладывается!

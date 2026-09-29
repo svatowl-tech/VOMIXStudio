@@ -9,6 +9,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
+import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import * as tauriPath from '@tauri-apps/api/path';
 import * as tauriFs from '@tauri-apps/plugin-fs';
 
@@ -38,6 +39,31 @@ export interface VstScannedEntry {
   category: string;
   vendor: string;
   sub_plugins?: WaveShellSubPlugin[];
+}
+
+export interface VstGuiOpenResult {
+  success: boolean;
+  window_label?: string;
+  width?: number;
+  height?: number;
+  plugin_name?: string;
+  message: string;
+}
+
+export interface VstPresetResult {
+  success: boolean;
+  preset_path: string;
+  preset_name: string;
+  bytes_loaded: number;
+  message: string;
+}
+
+export interface VstParamChangedPayload {
+  instance_id: string;
+  track_id: number;
+  slot_idx: number;
+  param_id: number;
+  value: number;
 }
 
 export class TauriNativeBridge {
@@ -204,58 +230,60 @@ export class TauriNativeBridge {
   /**
    * Открытие плавающего нативного окна с оригинальным GUI VST плагина (IPlugView / HWND / NSWindow)
    */
-  public static async openVstEditor(instanceId: string, trackId: number, slotIdx: number): Promise<boolean> {
-    if (!this.isTauriEnvironment()) {
-      return false;
-    }
-
-    try {
-      return await invoke<boolean>('open_vst_editor', {
-        instanceId,
-        trackId: Number(trackId),
-        slotIdx: Number(slotIdx)
-      });
-    } catch (e) {
-      console.warn('[TauriNativeBridge] Ошибка открытия нативного окна open_vst_editor:', e);
-      return false;
-    }
+  public static async openVstEditor(
+    instanceId: string,
+    trackId: number,
+    slotIdx: number,
+    pluginName?: string,
+    pluginPath?: string,
+    classUid?: string
+  ): Promise<boolean> {
+    const res = await this.openPluginGui(trackId, slotIdx, instanceId, pluginName, pluginPath, classUid);
+    return res.success;
   }
 
   /**
    * Открытие нативного плавающего окна с оригинальным интерфейсом VST/Waves плагина (IPlugView / effEditOpen)
    */
-  public static async openPluginGui(trackId: number, slotIdx: number, instanceId: string): Promise<boolean> {
+  public static async openPluginGui(
+    trackId: number,
+    slotIdx: number,
+    instanceId: string,
+    pluginName?: string,
+    pluginPath?: string,
+    classUid?: string
+  ): Promise<VstGuiOpenResult> {
     if (!this.isTauriEnvironment()) {
-      return false;
+      return {
+        success: false,
+        message: 'Родной GUI доступен только в десктопной версии VOMIXStudio (Tauri)'
+      };
     }
 
     try {
-      await invoke('open_plugin_gui', {
+      const result = await invoke<VstGuiOpenResult>('open_vst_gui', {
+        instanceId,
         trackId: Number(trackId),
         slotIdx: Number(slotIdx),
-        instanceId
+        pluginName: pluginName || undefined,
+        pluginPath: pluginPath || undefined,
+        classUid: classUid || undefined
       });
-      return true;
-    } catch (e) {
+      return result;
+    } catch (e: any) {
       console.warn('[TauriNativeBridge] Ошибка открытия нативного окна VST GUI:', e);
-      return false;
+      return {
+        success: false,
+        message: typeof e === 'string' ? e : e?.message || 'Ошибка открытия нативного окна VST'
+      };
     }
   }
 
   /**
-   * Закрытие нативного окна плагина
+   * Закрытие нативного окна плагина (вызывает IPlugView::removed)
    */
   public static async closeVstEditor(instanceId: string): Promise<boolean> {
-    if (!this.isTauriEnvironment()) {
-      return false;
-    }
-
-    try {
-      return await invoke<boolean>('close_vst_editor', { instanceId });
-    } catch (e) {
-      console.warn('[TauriNativeBridge] Ошибка закрытия нативного окна close_vst_editor:', e);
-      return false;
-    }
+    return await this.closePluginGui(instanceId);
   }
 
   /**
@@ -267,11 +295,125 @@ export class TauriNativeBridge {
     }
 
     try {
-      await invoke('close_plugin_gui', { instanceId });
+      await invoke('close_vst_gui', { instanceId });
       return true;
     } catch (e) {
       console.warn('[TauriNativeBridge] Ошибка закрытия нативного окна VST GUI:', e);
       return false;
+    }
+  }
+
+  /**
+   * Загрузка бинарного пресета (.vstpreset / .fxp) в плагин через Tauri VST Host
+   */
+  public static async loadVstPreset(instanceId: string, presetPath: string): Promise<VstPresetResult> {
+    if (!this.isTauriEnvironment()) {
+      return {
+        success: false,
+        preset_path: presetPath,
+        preset_name: '',
+        bytes_loaded: 0,
+        message: 'Загрузка системных пресетов VST3 доступна в десктопной версии Tauri'
+      };
+    }
+
+    try {
+      return await invoke<VstPresetResult>('load_vst_preset', {
+        instanceId,
+        presetPath
+      });
+    } catch (e: any) {
+      console.warn('[TauriNativeBridge] Ошибка loadVstPreset:', e);
+      return {
+        success: false,
+        preset_path: presetPath,
+        preset_name: '',
+        bytes_loaded: 0,
+        message: typeof e === 'string' ? e : e?.message || 'Ошибка загрузки пресета'
+      };
+    }
+  }
+
+  /**
+   * Вызов системного диалога @tauri-apps/plugin-dialog для выбора пресета (.vstpreset / .fxp) и применение к плагину
+   */
+  public static async pickAndLoadPresetNative(instanceId: string): Promise<VstPresetResult | null> {
+    if (this.isTauriEnvironment()) {
+      try {
+        const { open: openDialog } = await import('@tauri-apps/plugin-dialog');
+        const selected = await openDialog({
+          multiple: false,
+          directory: false,
+          title: 'Выберите файл пресета (.vstpreset / .fxp)',
+          filters: [
+            {
+              name: 'VST Presets (*.vstpreset, *.fxp)',
+              extensions: ['vstpreset', 'fxp', 'vst3', 'bin', 'json']
+            }
+          ]
+        });
+
+        if (typeof selected === 'string') {
+          return await this.loadVstPreset(instanceId, selected);
+        }
+      } catch (e) {
+        console.warn('[TauriNativeBridge] Ошибка диалога pickAndLoadPresetNative:', e);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Подписка на изменение параметров из нативного GUI плагина (через IComponentHandler::performEdit)
+   */
+  public static async onParamChanged(
+    callback: (payload: VstParamChangedPayload) => void
+  ): Promise<UnlistenFn | null> {
+    if (!this.isTauriEnvironment()) return null;
+    try {
+      return await listen<VstParamChangedPayload>('vst-param-changed', (event) => {
+        callback(event.payload);
+      });
+    } catch (e) {
+      console.warn('[TauriNativeBridge] Ошибка listen(vst-param-changed):', e);
+      return null;
+    }
+  }
+
+  /**
+   * Подписка на событие применения пресета к плагину
+   */
+  public static async onPresetApplied(
+    callback: (payload: { instanceId: string; presetName: string; presetPath: string }) => void
+  ): Promise<UnlistenFn | null> {
+    if (!this.isTauriEnvironment()) return null;
+    try {
+      return await listen<{ instanceId: string; presetName: string; presetPath: string }>(
+        'vst-preset-applied',
+        (event) => {
+          callback(event.payload);
+        }
+      );
+    } catch (e) {
+      console.warn('[TauriNativeBridge] Ошибка listen(vst-preset-applied):', e);
+      return null;
+    }
+  }
+
+  /**
+   * Подписка на событие закрытия окна нативного GUI плагина
+   */
+  public static async onGuiClosed(
+    callback: (payload: { instanceId: string }) => void
+  ): Promise<UnlistenFn | null> {
+    if (!this.isTauriEnvironment()) return null;
+    try {
+      return await listen<{ instanceId: string }>('vst-gui-closed', (event) => {
+        callback(event.payload);
+      });
+    } catch (e) {
+      console.warn('[TauriNativeBridge] Ошибка listen(vst-gui-closed):', e);
+      return null;
     }
   }
 

@@ -1,11 +1,15 @@
 // Prevents additional console window on Windows in release builds
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod vst_host;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use tauri::AppHandle;
+use vst_host::{VstGuiOpenResult, VstHostController, VstPresetResult};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FileEntry {
@@ -324,48 +328,110 @@ pub mod commands {
             .collect()
     }
 
-    /// IPC Команда: Открытие плавающего нативного окна с графическим интерфейсом плагина (IPlugView / HWND / NSWindow)
+    /// IPC Команда: Открытие отдельного плавающего нативного окна с графическим интерфейсом плагина (IPlugView / HWND / NSWindow)
     #[tauri::command]
-    pub async fn open_vst_editor(
+    pub async fn open_vst_gui(
+        app: AppHandle,
         instance_id: String,
         track_id: u32,
         slot_idx: u32,
+        plugin_name: Option<String>,
+        plugin_path: Option<String>,
+        class_uid: Option<String>,
+    ) -> Result<VstGuiOpenResult, String> {
+        let name = plugin_name.unwrap_or_else(|| format!("VST Plugin {}", instance_id));
+        VstHostController::open_plugin_gui(
+            &app,
+            instance_id,
+            track_id,
+            slot_idx,
+            name,
+            plugin_path,
+            class_uid,
+        )
+    }
+
+    /// Совместимая IPC Команда: open_vst_editor
+    #[tauri::command]
+    pub async fn open_vst_editor(
+        app: AppHandle,
+        instance_id: String,
+        track_id: u32,
+        slot_idx: u32,
+        plugin_name: Option<String>,
+        plugin_path: Option<String>,
+        class_uid: Option<String>,
     ) -> Result<bool, String> {
-        println!(
-            "[Tauri VST Host] Открытие нативного окна IPlugView: Instance={}, Track={}, Slot={}",
-            instance_id, track_id, slot_idx
-        );
-
-        let mut lock = OPEN_PLUGIN_WINDOWS.lock().unwrap();
-        let windows = lock.get_or_insert_with(HashSet::new);
-        windows.insert(instance_id.clone());
-
-        Ok(true)
+        let name = plugin_name.unwrap_or_else(|| format!("Plugin {}", instance_id));
+        let res = VstHostController::open_plugin_gui(
+            &app,
+            instance_id,
+            track_id,
+            slot_idx,
+            name,
+            plugin_path,
+            class_uid,
+        )?;
+        Ok(res.success)
     }
 
     /// Совместимая IPC Команда: open_plugin_gui
     #[tauri::command]
-    pub async fn open_plugin_gui(track_id: u32, slot_idx: u32, instance_id: String) -> Result<(), String> {
-        let _ = open_vst_editor(instance_id, track_id, slot_idx).await;
+    pub async fn open_plugin_gui(
+        app: AppHandle,
+        track_id: u32,
+        slot_idx: u32,
+        instance_id: String,
+        plugin_name: Option<String>,
+        plugin_path: Option<String>,
+        class_uid: Option<String>,
+    ) -> Result<(), String> {
+        let name = plugin_name.unwrap_or_else(|| format!("Plugin {}", instance_id));
+        let _ = VstHostController::open_plugin_gui(
+            &app,
+            instance_id,
+            track_id,
+            slot_idx,
+            name,
+            plugin_path,
+            class_uid,
+        )?;
         Ok(())
     }
 
-    /// IPC Команда: Закрытие нативного окна GUI плагина
+    /// IPC Команда: Закрытие нативного окна GUI плагина (вызывает IPlugView::removed)
     #[tauri::command]
-    pub async fn close_vst_editor(instance_id: String) -> Result<bool, String> {
-        println!("[Tauri VST Host] Закрытие нативного окна плагина: {}", instance_id);
-        let mut lock = OPEN_PLUGIN_WINDOWS.lock().unwrap();
-        if let Some(windows) = lock.as_mut() {
-            windows.remove(&instance_id);
-        }
-        Ok(true)
+    pub async fn close_vst_gui(app: AppHandle, instance_id: String) -> Result<bool, String> {
+        VstHostController::close_plugin_gui(&app, instance_id)
+    }
+
+    /// Совместимая IPC Команда: close_vst_editor
+    #[tauri::command]
+    pub async fn close_vst_editor(app: AppHandle, instance_id: String) -> Result<bool, String> {
+        VstHostController::close_plugin_gui(&app, instance_id)
     }
 
     /// Совместимая IPC Команда: close_plugin_gui
     #[tauri::command]
-    pub async fn close_plugin_gui(instance_id: String) -> Result<(), String> {
-        let _ = close_vst_editor(instance_id).await;
+    pub async fn close_plugin_gui(app: AppHandle, instance_id: String) -> Result<(), String> {
+        let _ = VstHostController::close_plugin_gui(&app, instance_id)?;
         Ok(())
+    }
+
+    /// IPC Команда: Загрузка бинарного пресета .vstpreset / .fxp в плагин
+    #[tauri::command]
+    pub async fn load_vst_preset(
+        app: AppHandle,
+        instance_id: String,
+        preset_path: String,
+    ) -> Result<VstPresetResult, String> {
+        VstHostController::load_preset_file(&app, instance_id, preset_path)
+    }
+
+    /// IPC Команда: Установка нормализованного параметра (0.0 .. 1.0) в нативный GUI плагина
+    #[tauri::command]
+    pub fn set_vst_parameter_native(instance_id: String, param_id: u32, value: f64) -> bool {
+        VstHostController::set_plugin_parameter(&instance_id, param_id, value)
     }
 
     /// IPC Команда: Проверка поддержки нативного GUI у плагина
@@ -430,10 +496,14 @@ fn main() {
             commands::scan_vst_plugins,
             commands::scan_vst_directory_native,
             commands::get_standard_vst_directories_native,
+            commands::open_vst_gui,
             commands::open_vst_editor,
             commands::open_plugin_gui,
+            commands::close_vst_gui,
             commands::close_vst_editor,
             commands::close_plugin_gui,
+            commands::load_vst_preset,
+            commands::set_vst_parameter_native,
             commands::is_plugin_gui_supported,
             commands::save_file_direct,
             commands::read_file_binary,

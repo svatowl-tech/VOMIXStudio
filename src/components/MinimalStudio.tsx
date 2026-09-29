@@ -427,7 +427,25 @@ export const MinimalStudio: React.FC = () => {
         AssetDatabase.getInstance().getStats().then(setDbStats).catch(console.error);
       }
 
-      // 3. Восстановление сохраненного состояния project/project.json
+      // 3. Автоматическое обнаружение и загрузка субтитров (.srt, .vtt, .ass, .json)
+      const subtitleFile = discoveredFiles.find((f) => f && f.type === 'subtitle');
+      if (subtitleFile && subtitleFile.fileObj) {
+        try {
+          const text = await subtitleFile.fileObj.text();
+          const ext = subtitleFile.name.split('.').pop() || 'srt';
+          const parsedCues = globalProjectManager.parseSubtitleText(text, ext);
+          if (parsedCues && parsedCues.length > 0) {
+            setSubtitles(parsedCues);
+            setStatusMessage(`Обнаружены субтитры: ${subtitleFile.name} (${parsedCues.length} реплик)`);
+          }
+        } catch (subErr) {
+          console.warn('[MinimalStudio] Ошибка загрузки субтитров из папки:', subErr);
+        }
+      } else if (content.savedState?.subtitles && Array.isArray(content.savedState.subtitles) && content.savedState.subtitles.length > 0) {
+        setSubtitles(content.savedState.subtitles);
+      }
+
+      // 4. Восстановление сохраненного состояния project/project.json
       if (content.savedState) {
         const savedTracks = toSafeArray(content.savedState.tracks);
         if (savedTracks.length > 0) {
@@ -545,6 +563,23 @@ export const MinimalStudio: React.FC = () => {
         setTracks(workingTracks);
         AssetDatabase.getInstance().getStats().then(setDbStats).catch(console.error);
       }
+
+      // Автоматическое обнаружение субтитров в fallback режиме
+      const fallbackSubtitle = discoveredFiles.find((f) => f && f.type === 'subtitle');
+      if (fallbackSubtitle && fallbackSubtitle.fileObj) {
+        try {
+          const text = await fallbackSubtitle.fileObj.text();
+          const ext = fallbackSubtitle.name.split('.').pop() || 'srt';
+          const parsedCues = globalProjectManager.parseSubtitleText(text, ext);
+          if (parsedCues && parsedCues.length > 0) {
+            setSubtitles(parsedCues);
+            setStatusMessage(`Обнаружены субтитры: ${fallbackSubtitle.name} (${parsedCues.length} реплик)`);
+          }
+        } catch (subErr) {
+          console.warn('[MinimalStudio] Ошибка парсинга субтитров (fallback):', subErr);
+        }
+      }
+
       setStatusMessage(`Папка "${content.directoryName}" загружена (режим совместимости).`);
     } catch (err: any) {
       setStatusMessage(`Ошибка: ${err.message}`);
@@ -996,7 +1031,11 @@ export const MinimalStudio: React.FC = () => {
     const sourceSubtitles = customSubtitles || subtitles;
     const safeSubtitles = toSafeArray<SubtitleCue>(sourceSubtitles);
 
-    setStatusMessage('Запуск C++ конвейера авто-тайминга: адаптивное разделение фраз, устранение наездов и разведение коллизий...');
+    setStatusMessage(
+      safeSubtitles.length > 0
+        ? 'Синхронизация дорожек по субтитрам и устранение наездов...'
+        : 'Запуск интеллектуального детектора коллизий: разведение парных наездов с сохранением массовых сцен...'
+    );
     try {
       const result = globalAutoTimingService.runAutoTimingPipeline(sourceTracks, safeSubtitles);
       setTracks(result.updatedTracks);
@@ -1014,8 +1053,8 @@ export const MinimalStudio: React.FC = () => {
       triggerAutoSave();
 
       const summary = safeSubtitles.length > 0
-        ? `⚡ Авто-тайминг: сопоставлено ${result.actorMappings.length} актёров, выровнено ${result.totalPhrasesAligned} фраз, устранено ${result.resolvedCollisionsCount} наездов, сохранено ${result.preservedScriptOverlapsCount} сценарных одновременных реплик.`
-        : `⚡ Авто-тайминг (VAD): нарезано ${result.totalPhrasesAligned} отдельных реплик, каскадно устранено ${result.resolvedCollisionsCount} наездов между репликами.`;
+        ? `⚡ Авто-тайминг по субтитрам: выровнено ${result.totalPhrasesAligned} фраз, разведено ${result.resolvedCollisionsCount} нежелательных наездов, сохранено ${result.preservedScriptOverlapsCount} сценарных/массовых реплик.`
+        : `⚡ Детектор коллизий: разведено ${result.resolvedCollisionsCount} парных наездов, сохранено ${result.preservedScriptOverlapsCount} массовых сцен (3+ дорожки). Дорожки без коллизий не затронуты.`;
       setStatusMessage(summary);
       setLoudnessMatchReport(summary);
       return result.updatedTracks;

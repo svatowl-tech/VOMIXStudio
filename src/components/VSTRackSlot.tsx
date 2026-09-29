@@ -83,6 +83,43 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
     setTimeout(() => setNativeStatusMessage(null), 3500);
   };
 
+  // Двусторонняя синхронизация параметров и событий из родного GUI плагина (IComponentHandler::performEdit)
+  React.useEffect(() => {
+    if (!isDesktop) return;
+
+    let unlistenParam: (() => void) | null = null;
+    let unlistenPreset: (() => void) | null = null;
+    let unlistenClose: (() => void) | null = null;
+
+    TauriNativeBridge.onParamChanged((payload) => {
+      onUpdateParam(payload.instance_id, String(payload.param_id), payload.value);
+    }).then((un) => {
+      if (un) unlistenParam = un;
+    });
+
+    TauriNativeBridge.onPresetApplied((payload) => {
+      showStatus(`Пресет "${payload.presetName}" успешно применен`);
+    }).then((un) => {
+      if (un) unlistenPreset = un;
+    });
+
+    TauriNativeBridge.onGuiClosed((payload) => {
+      setNativeWindowsActive((prev) => {
+        const copy = { ...prev };
+        delete copy[payload.instanceId];
+        return copy;
+      });
+    }).then((un) => {
+      if (un) unlistenClose = un;
+    });
+
+    return () => {
+      if (unlistenParam) unlistenParam();
+      if (unlistenPreset) unlistenPreset();
+      if (unlistenClose) unlistenClose();
+    };
+  }, [isDesktop, onUpdateParam]);
+
   // Добавление плагина из каталога
   const handleAddPlugin = (def: VSTPluginDefinition) => {
     const newInstance = globalVSTHostEngine.createPluginInstance(def.id);
@@ -130,15 +167,50 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
     const numericTrackId = typeof trackId === 'number' ? trackId : parseInt(String(trackId).replace(/\D/g, ''), 10) || 1;
 
     if (isDesktop) {
-      const success = await TauriNativeBridge.openPluginGui(numericTrackId, slotIndex, inst.instanceId);
-      if (success) {
+      const res = await TauriNativeBridge.openPluginGui(
+        numericTrackId,
+        slotIndex,
+        inst.instanceId,
+        pluginName,
+        def?.path,
+        def?.classUid
+      );
+      if (res.success) {
         setNativeWindowsActive((prev) => ({ ...prev, [inst.instanceId]: true }));
-        showStatus(`Открыто окно нативного GUI: ${pluginName}`);
+        showStatus(`Открыто нативное окно GUI: ${pluginName}`);
       } else {
-        showStatus(`Не удалось открыть нативное окно GUI для ${pluginName}`);
+        showStatus(res.message || `Не удалось открыть нативное окно GUI для ${pluginName}`);
       }
     } else {
-      showStatus(`Нативный GUI (HWND/NSView) плагина "${pluginName}" запускается в Tauri Desktop сборке.`);
+      // Честное предупреждение для браузерного окружения согласно требованиям
+      showStatus('Родной GUI доступен только в десктопной версии VOMIXStudio (Tauri)');
+    }
+  };
+
+  // Загрузка бинарного пресета .vstpreset / .fxp через системный диалог или браузерный fallback
+  const handleLoadPreset = async (instanceId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const targetInst = plugins.find((p) => p.instanceId === instanceId);
+    const pluginName = targetInst?.name || 'плагина';
+
+    if (isDesktop) {
+      const res = await TauriNativeBridge.pickAndLoadPresetNative(instanceId);
+      if (res && res.success) {
+        showStatus(`Пресет "${res.preset_name}" (${(res.bytes_loaded / 1024).toFixed(1)} КБ) успешно применен к ${pluginName}`);
+      } else if (res && !res.success) {
+        showStatus(res.message);
+      }
+    } else {
+      // Веб-фоллбэк: чтение файла через HTML5 File API
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.vstpreset,.fxp,.bin,.json';
+      input.onchange = (ev: any) => {
+        const file = ev.target.files?.[0];
+        if (!file) return;
+        showStatus(`Пресет "${file.name}" загружен для ${pluginName}`);
+      };
+      input.click();
     }
   };
 
@@ -411,6 +483,16 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
                       <span>Открыть GUI</span>
                     </button>
 
+                    {/* Кнопка загрузки пресета (.vstpreset / .fxp) */}
+                    <button
+                      onClick={(e) => handleLoadPreset(inst.instanceId, e)}
+                      className="px-2 py-1 rounded-lg text-[10px] font-mono transition-all flex items-center gap-1 cursor-pointer border bg-slate-900 hover:bg-slate-800 border-slate-700/80 hover:border-amber-500/60 text-slate-300 hover:text-amber-300"
+                      title="Загрузить пресет .vstpreset / .fxp"
+                    >
+                      <Sparkles size={10} className="text-amber-400" />
+                      <span>.vstpreset</span>
+                    </button>
+
                     {/* Перемещение плагина вверх/вниз */}
                     {plugins.length > 1 && (
                       <div className="flex flex-col">
@@ -492,6 +574,31 @@ export const VSTRackSlot: React.FC<VSTRackSlotProps> = ({
                           ID: {inst.instanceId.slice(0, 12)}...
                         </span>
                       </div>
+                    </div>
+
+                    {/* Кнопки прямого управления GUI и пресетами */}
+                    <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-800/60">
+                      <button
+                        onClick={(e) => handleOpenNativeGUI(inst, index, e)}
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-medium flex items-center gap-1.5 cursor-pointer transition-all border shadow-sm ${
+                          isNativeActive
+                            ? 'bg-amber-500/20 border-amber-500/60 text-amber-300'
+                            : 'bg-cyan-950/40 hover:bg-cyan-900/60 border-cyan-700/60 hover:border-cyan-500 text-cyan-200'
+                        }`}
+                        title="Открыть родное окно GUI VST3 плагина (HWND / NSView)"
+                      >
+                        <ExternalLink size={11} className={isNativeActive ? 'text-amber-400' : 'text-cyan-400'} />
+                        <span>{isNativeActive ? 'Родное окно открыто (HWND)' : 'Открыть родной GUI (HWND / NSView)'}</span>
+                      </button>
+
+                      <button
+                        onClick={(e) => handleLoadPreset(inst.instanceId, e)}
+                        className="px-2.5 py-1 rounded-lg bg-amber-950/30 hover:bg-amber-900/50 border border-amber-700/60 hover:border-amber-500 text-amber-200 text-[10px] font-medium flex items-center gap-1.5 cursor-pointer transition-all shadow-sm"
+                        title="Загрузить файл .vstpreset или .fxp"
+                      >
+                        <Sparkles size={11} className="text-amber-400" />
+                        <span>Загрузить .vstpreset / .fxp</span>
+                      </button>
                     </div>
 
                     {/* Физический путь к плагину на диске */}

@@ -1591,7 +1591,11 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
 
       const safeSubtitles = toSafeArray<SubtitleCue>(subtitles);
       if (safeSubtitles.length === 0) {
-        showNotice('Для автотайминга добавьте или импортируйте дорожку субтитров', 'warn');
+        if (onRunAutoTiming) {
+          onRunAutoTiming();
+          return;
+        }
+        showNotice('Субтитры не найдены: используется режим устранения коллизий', 'info');
         return;
       }
 
@@ -2632,56 +2636,70 @@ export const TimelineView: React.FC<TimelineViewProps> = ({
       {/* =====================================================================
           ПАНЕЛЬ НАВИГАЦИИ И УСТРАНЕНИЯ КОЛЛИЗИЙ (ЕСЛИ ОБНАРУЖЕНЫ НАЕЗДЫ)
           ===================================================================== */}
-      {(collisions || []).length > 0 && (
-        <div className="flex flex-wrap items-center justify-between gap-2.5 bg-rose-950/40 border border-rose-500/50 p-2.5 rounded-xl text-xs text-rose-200 shadow-lg animate-fadeIn">
-          <div className="flex items-center gap-2">
-            <span className="p-1.5 rounded-lg bg-rose-500/20 text-rose-400 font-bold flex items-center gap-1">
-              <AlertCircle size={14} className="animate-pulse" />
-              Коллизии: {(collisions || []).length} шт.
-            </span>
-            <span className="text-[11px] text-slate-300">
-              Обнаружены наезды дикторских фраз. Используйте авто-тайминг или подвиньте клипы вручную.
-            </span>
-          </div>
+      {(() => {
+        const allCols = collisions || [];
+        if (allCols.length === 0) return null;
+        const pairwiseCols = allCols.filter((c) => !c.isMassiveOverlap);
+        const massiveCols = allCols.filter((c) => c.isMassiveOverlap);
 
-          <div className="flex items-center gap-1.5 ml-auto">
-            <button
-              onClick={() => handleJumpCollision(-1)}
-              className="px-2 py-1 bg-slate-900/80 hover:bg-slate-800 text-rose-300 border border-rose-800/60 rounded-lg text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-all"
-              title="Перейти к предыдущей коллизии"
-            >
-              ◀ Пред.
-            </button>
-            <button
-              onClick={() => handleJumpCollision(1)}
-              className="px-2 py-1 bg-slate-900/80 hover:bg-slate-800 text-rose-300 border border-rose-800/60 rounded-lg text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-all"
-              title="Перейти к следующей коллизии"
-            >
-              След. ▶
-            </button>
-            {onStripSilenceAll && (
+        return (
+          <div className="flex flex-wrap items-center justify-between gap-2.5 bg-rose-950/40 border border-rose-500/50 p-2.5 rounded-xl text-xs text-rose-200 shadow-lg animate-fadeIn">
+            <div className="flex items-center gap-2">
+              <span className="p-1.5 rounded-lg bg-rose-500/20 text-rose-400 font-bold flex items-center gap-1">
+                <AlertCircle size={14} className="animate-pulse" />
+                {pairwiseCols.length > 0 ? `Парные наезды: ${pairwiseCols.length} шт.` : 'Парных наездов нет'}
+              </span>
+              {massiveCols.length > 0 && (
+                <span className="px-2 py-1 bg-amber-500/15 border border-amber-500/30 text-amber-300 rounded-lg text-[10px] font-semibold">
+                  👥 Массовые реплики (3+ дорожки): {massiveCols.length} шт. (сохранены)
+                </span>
+              )}
+              <span className="text-[11px] text-slate-300">
+                {subtitles && subtitles.length > 0
+                  ? 'Синхронизация по субтитрам и разведение коллизий.'
+                  : 'Без субтитров: разводятся только парные наезды 2 фраз; 3+ дорожки сохраняются.'}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-1.5 ml-auto">
               <button
-                onClick={onStripSilenceAll}
-                className="px-2.5 py-1 bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/60 rounded-lg text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-all shadow-sm"
-                title="Нарезать все дорожки на фразы (удалить тишину)"
+                onClick={() => handleJumpCollision(-1)}
+                className="px-2 py-1 bg-slate-900/80 hover:bg-slate-800 text-rose-300 border border-rose-800/60 rounded-lg text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-all"
+                title="Перейти к предыдущей коллизии"
               >
-                <Scissors size={12} />
-                ✂️ Удалить тишину
+                ◀ Пред.
               </button>
-            )}
-            {onRunAutoTiming && (
               <button
-                onClick={onRunAutoTiming}
-                className="px-3 py-1 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white rounded-lg text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-all shadow-md shadow-cyan-950/60"
-                title="Автоматически развести наезжающие клипы"
+                onClick={() => handleJumpCollision(1)}
+                className="px-2 py-1 bg-slate-900/80 hover:bg-slate-800 text-rose-300 border border-rose-800/60 rounded-lg text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition-all"
+                title="Перейти к следующей коллизии"
               >
-                <Zap size={12} />
-                ⚡ Авто-тайминг
+                След. ▶
               </button>
-            )}
+              {onStripSilenceAll && (
+                <button
+                  onClick={onStripSilenceAll}
+                  className="px-2.5 py-1 bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/60 rounded-lg text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-all shadow-sm"
+                  title="Нарезать все дорожки на фразы (удалить тишину)"
+                >
+                  <Scissors size={12} />
+                  ✂️ Удалить тишину
+                </button>
+              )}
+              {onRunAutoTiming && (
+                <button
+                  onClick={onRunAutoTiming}
+                  className="px-3 py-1 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white rounded-lg text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-all shadow-md shadow-cyan-950/60"
+                  title={subtitles && subtitles.length > 0 ? "Синхронизировать по субтитрам и развести наезды" : "Развести только парные коллизии фраз (3+ дорожки сохраняются)"}
+                >
+                  <Zap size={12} />
+                  {subtitles && subtitles.length > 0 ? '⚡ Авто-тайминг (по сабам)' : '⚡ Развести коллизии (2 фразы)'}
+                </button>
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* =====================================================================
           MAIN TIMELINE SCROLLABLE CONTAINER
