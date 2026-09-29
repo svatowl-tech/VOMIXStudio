@@ -372,12 +372,10 @@ impl VstHostController {
         #[cfg(target_os = "macos")]
         {
             if let Ok(ns_view) = window.ns_view() {
-                let raw_view = ns_view.0 as *mut c_void;
+                let raw_view = ns_view as *mut c_void;
                 println!("[VstHost] Получен Cocoa NSView: {:p}", raw_view);
                 if !c_instance.is_null() {
-                    unsafe {
-                        vst3_host_attach_gui(c_instance, raw_view, &mut width, &mut height);
-                    }
+                    vst3_host_attach_gui(c_instance, raw_view, &mut width, &mut height);
                 }
             }
         }
@@ -450,10 +448,8 @@ impl VstHostController {
         with_sessions(|sessions| {
             if let Some(session) = sessions.remove(instance_id) {
                 if !session.c_instance.is_null() {
-                    unsafe {
-                        vst3_host_detach_gui(session.c_instance);
-                        vst3_host_destroy_instance(session.c_instance);
-                    }
+                    vst3_host_detach_gui(session.c_instance);
+                    vst3_host_destroy_instance(session.c_instance);
                 }
                 if let Some(app) = &session.app_handle {
                     if let Some(win) = app.get_webview_window(&session.window_label) {
@@ -498,13 +494,11 @@ impl VstHostController {
         with_sessions(|sessions| {
             if let Some(session) = sessions.get(&instance_id) {
                 if !session.c_instance.is_null() {
-                    unsafe {
-                        success = vst3_host_load_preset(
-                            session.c_instance,
-                            bytes.as_ptr(),
-                            bytes_len,
-                        );
-                    }
+                    success = vst3_host_load_preset(
+                        session.c_instance,
+                        bytes.as_ptr(),
+                        bytes_len,
+                    );
                 }
             }
         });
@@ -515,14 +509,10 @@ impl VstHostController {
             let c_path = CString::new("").unwrap();
             let c_uid = CString::new("").unwrap();
 
-            let temp_inst = unsafe {
-                vst3_host_create_instance(c_id.as_ptr(), c_path.as_ptr(), c_uid.as_ptr())
-            };
+            let temp_inst = vst3_host_create_instance(c_id.as_ptr(), c_path.as_ptr(), c_uid.as_ptr());
             if !temp_inst.is_null() {
-                unsafe {
-                    success = vst3_host_load_preset(temp_inst, bytes.as_ptr(), bytes_len);
-                    vst3_host_destroy_instance(temp_inst);
-                }
+                let _ = vst3_host_load_preset(temp_inst, bytes.as_ptr(), bytes_len);
+                vst3_host_destroy_instance(temp_inst);
             }
         }
 
@@ -553,9 +543,7 @@ impl VstHostController {
         with_sessions(|sessions| {
             if let Some(session) = sessions.get(instance_id) {
                 if !session.c_instance.is_null() {
-                    unsafe {
-                        ok = vst3_host_set_parameter(session.c_instance, param_id, value);
-                    }
+                    ok = vst3_host_set_parameter(session.c_instance, param_id, value);
                 }
             }
         });

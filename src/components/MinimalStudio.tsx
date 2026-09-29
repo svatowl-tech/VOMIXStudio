@@ -565,13 +565,12 @@ const MinimalStudioComponent: React.FC = () => {
     if (audioMonitoringMode === 'original') {
       video.muted = false;
       video.volume = 1.0;
-      setMasterVolume(-60); // Приглушаем мастер DAW
     } else {
       video.muted = true;
       video.volume = 0;
       setMasterVolume(master.volumeDb); // Включаем мастер DAW
     }
-  }, [audioMonitoringMode, master.volumeDb, setMasterVolume]);
+  }, [audioMonitoringMode, videoSrc, master.volumeDb, setMasterVolume]);
 
   // --- 7. Автосохранение project/project.json при изменении микшера ---
   const triggerAutoSave = useCallback(() => {
@@ -655,12 +654,13 @@ const MinimalStudioComponent: React.FC = () => {
 
       const discoveredFiles = toSafeArray(content.discoveredFiles);
 
-      // 1. Автоматическое обнаружение видеофайла
+      // 1. Автоматическое обнаружение видеофайла и извлечение звуковой дорожки оригинала
+      let hasOrigTrack = false;
       const discoveredVideo = discoveredFiles.find((f) => f && f.type === 'video');
       if (discoveredVideo && discoveredVideo.fileObj) {
         setVideoFile(discoveredVideo.fileObj);
         setVideoSrc(URL.createObjectURL(discoveredVideo.fileObj));
-        setStatusMessage(`Обнаружено видео: ${discoveredVideo.name}`);
+        setStatusMessage(`Обнаружено видео: ${discoveredVideo.name}. Извлечение оригинального звука...`);
 
         // Кэшируем видеофайл в SQL/IndexedDB базу данных
         AssetDatabase.getInstance().saveAsset({
@@ -672,67 +672,86 @@ const MinimalStudioComponent: React.FC = () => {
           timestamp: Date.now(),
           blob: discoveredVideo.fileObj
         }).catch(console.error);
+
+        try {
+          await extractAndLoadVideoAudio(discoveredVideo.fileObj);
+          hasOrigTrack = true;
+        } catch (vidAudErr) {
+          console.warn('[MinimalStudio] Ошибка извлечения звука видео при открытии папки:', vidAudErr);
+        }
       }
 
-      // 2. Обнаружение аудиофайлов и динамическое расширение до 20-25+ дорожек
+      // 2. Обнаружение аудиофайлов и динамическое распределение по дорожкам
       const audioFiles = discoveredFiles.filter((f) => f && f.type === 'audio');
       if (audioFiles.length > 0) {
         setStatusMessage(`C++ ресемплинг ${audioFiles.length} аудиодорожек к 48 кГц...`);
 
-        // Динамически увеличиваем количество дорожек под все найденные файлы (до 32)
-        let workingTracks = [...toSafeArray<TrackState>(tracks)];
-        while (workingTracks.length < audioFiles.length && workingTracks.length < 32) {
-          const nextId = workingTracks.length + 1;
-          workingTracks.push(createNewTrack(nextId, `Dubber ${nextId}`));
-        }
+        // Смещение индекса начальной дорожки: если есть дорожка оригинала на Track 1, дублеры начинаются с Track 2
+        setTracks((prev) => {
+          const safePrev = toSafeArray<TrackState>(prev);
+          const baseIndex = hasOrigTrack ? 1 : 0;
+          let workingTracks = [...safePrev];
 
-        for (let i = 0; i < audioFiles.length && i < workingTracks.length; i++) {
-          const audioFile = audioFiles[i].fileObj;
-          if (audioFile) {
-            try {
-              const track = workingTracks[i];
-              const clipId = Date.now() + i;
-              const uploadRes = await uploadAudioFileToTrack(audioFile, track.id, clipId, 0);
-
-              // Сохраняем ассет дорожки в SQL базу данных
-              AssetDatabase.getInstance().saveAsset({
-                id: `asset_ch${track.id}_${Date.now()}`,
-                name: audioFile.name,
-                type: 'audio',
-                mimeType: audioFile.type || 'audio/wav',
-                sizeBytes: audioFile.size,
-                durationSec: uploadRes.durationSec,
-                sampleRate: 48000,
-                channels: 1,
-                timestamp: Date.now(),
-                blob: audioFile
-              }).catch(console.error);
-
-              workingTracks[i] = {
-                ...track,
-                name: audioFile.name.replace(/\.[^/.]+$/, ''),
-                clips: [
-                  {
-                    id: clipId,
-                    name: audioFile.name,
-                    offsetSamples: 0,
-                    lengthSamples: uploadRes.samplesCount,
-                    gain: 1.0,
-                    pan: 0,
-                    fadeInSamples: 0,
-                    fadeOutSamples: 0,
-                    buffer: uploadRes.pcmData,
-                    color: track.color
-                  }
-                ]
-              };
-            } catch (trackErr: any) {
-              console.error(`Ошибка загрузки аудиофайла ${audioFiles[i].name}:`, trackErr);
-            }
+          const neededTotal = baseIndex + audioFiles.length;
+          while (workingTracks.length < neededTotal && workingTracks.length < 32) {
+            const nextId = workingTracks.length + 1;
+            workingTracks.push(createNewTrack(nextId, `Dubber ${nextId}`));
           }
-        }
-        setTracks(workingTracks);
-        AssetDatabase.getInstance().getStats().then(setDbStats).catch(console.error);
+
+          // Асинхронно загружаем каждый аудиофайл в соответствующую дорожку
+          (async () => {
+            for (let i = 0; i < audioFiles.length && (baseIndex + i) < workingTracks.length; i++) {
+              const audioFile = audioFiles[i].fileObj;
+              if (audioFile) {
+                try {
+                  const trackIdx = baseIndex + i;
+                  const track = workingTracks[trackIdx];
+                  const clipId = Date.now() + i;
+                  const uploadRes = await uploadAudioFileToTrack(audioFile, track.id, clipId, 0);
+
+                  AssetDatabase.getInstance().saveAsset({
+                    id: `asset_ch${track.id}_${Date.now()}`,
+                    name: audioFile.name,
+                    type: 'audio',
+                    mimeType: audioFile.type || 'audio/wav',
+                    sizeBytes: audioFile.size,
+                    durationSec: uploadRes.durationSec,
+                    sampleRate: 48000,
+                    channels: 1,
+                    timestamp: Date.now(),
+                    blob: audioFile
+                  }).catch(console.error);
+
+                  workingTracks[trackIdx] = {
+                    ...track,
+                    name: audioFile.name.replace(/\.[^/.]+$/, ''),
+                    clips: [
+                      {
+                        id: clipId,
+                        name: audioFile.name,
+                        offsetSamples: 0,
+                        lengthSamples: uploadRes.samplesCount,
+                        gain: 1.0,
+                        pan: 0,
+                        fadeInSamples: 0,
+                        fadeOutSamples: 0,
+                        buffer: uploadRes.pcmData,
+                        color: track.color
+                      }
+                    ]
+                  };
+                } catch (trackErr: any) {
+                  console.error(`Ошибка загрузки аудиофайла ${audioFiles[i].name}:`, trackErr);
+                }
+              }
+            }
+            setTracks([...workingTracks]);
+            syncAllTracks(workingTracks);
+            AssetDatabase.getInstance().getStats().then(setDbStats).catch(console.error);
+          })();
+
+          return workingTracks;
+        });
       }
 
       // 3. Автоматическое обнаружение и загрузка субтитров (.srt, .vtt, .ass, .json)
@@ -916,13 +935,15 @@ const MinimalStudioComponent: React.FC = () => {
       const calcDur = totalFrames / 48000;
       setVideoDuration((prev) => (prev > 0 ? prev : calcDur));
 
-      const safeTracks = toSafeArray<TrackState>(tracks);
-      const targetTrackId = safeTracks.length > 0 ? safeTracks[0].id : 1;
       const clipId = Date.now();
+      let assignedTrackId = 1;
 
       setTracks((prev) => {
         const safePrev = toSafeArray<TrackState>(prev);
-        const tid = safePrev.length > 0 ? safePrev[0].id : 1;
+        const existingOrig = safePrev.find((t) => t.isOriginalAudio || /оригинал|original|видео|video/i.test(t.name));
+        const tid = existingOrig ? existingOrig.id : 1;
+        assignedTrackId = tid;
+
         const videoClip = {
           id: clipId,
           name: `Оригинал: ${file.name}`,
@@ -937,27 +958,30 @@ const MinimalStudioComponent: React.FC = () => {
         };
 
         const exists = safePrev.some((t) => t.id === tid);
+        let updated: TrackState[];
         if (exists) {
-          return safePrev.map((t) =>
+          updated = safePrev.map((t) =>
             t.id === tid
               ? {
                   ...t,
                   name: `Оригинал [${file.name}]`,
                   isOriginalAudio: true,
+                  color: '#06b6d4',
                   clips: [videoClip]
                 }
               : t
           );
         } else {
-          const newTr = createNewTrack(tid, `Оригинал [${file.name}]`, '#06b6d4');
-          newTr.isOriginalAudio = true;
+          const newTr = createNewTrack(tid, `Оригинал [${file.name}]`, '#06b6d4', true);
           newTr.clips = [videoClip];
-          return [...safePrev, newTr];
+          updated = [newTr, ...safePrev];
         }
+        syncAllTracks(updated);
+        return updated;
       });
 
-      uploadRawPCMToTrack(pcmFloat32, targetTrackId, clipId, 0, 1.0, 0.0, true);
-      setStatusMessage(`Оригинальный звук видео [${file.name}] загружен на Дорожку 1!`);
+      uploadRawPCMToTrack(pcmFloat32, assignedTrackId, clipId, 0, 1.0, 0.0, true);
+      setStatusMessage(`Оригинальный звук видео [${file.name}] загружен на Дорожку #${assignedTrackId}!`);
       triggerAutoSave();
     } catch (err: any) {
       console.warn('Ошибка извлечения звука видео:', err);

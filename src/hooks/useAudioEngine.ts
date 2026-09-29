@@ -715,6 +715,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     lastReportedTimeSecRef.current = currentTimeSec;
     currentTimeSecRef.current = currentTimeSec;
     if (globalWorkletNode) {
+      globalWorkletNode.port.postMessage({ type: 'SEEK', timeSec: currentTimeSec });
       globalWorkletNode.port.postMessage({ type: 'PLAY' });
     }
     globalIsPlaying = true;

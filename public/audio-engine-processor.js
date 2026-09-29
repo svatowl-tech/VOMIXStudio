@@ -1556,6 +1556,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       // ======================================================================
       case 'SET_ALL_TRACKS': {
         const tracks = Array.isArray(msg.tracks) ? msg.tracks : [];
+        const previousTracks = new Map(this.jsTracks);
         this.jsTracks.clear();
 
         if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
@@ -1567,6 +1568,7 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
         for (const t of tracks) {
           const trackId = Number(t.id) || 0;
           const isOriginal = !!t.isOriginalAudio;
+          const prevTrack = previousTracks.get(trackId);
 
           const track = this.ensureTrackExists(
             trackId,
@@ -1578,11 +1580,15 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
             !!t.mute
           );
 
-          if (Array.isArray(t.clips)) {
+          // Если в сообщении переданы клипы — обрабатываем их
+          if (Array.isArray(t.clips) && t.clips.length > 0) {
             for (const c of t.clips) {
               let pcmBuffer = (c.buffer && c.buffer.length > 0) ? c.buffer : null;
               if (!pcmBuffer) {
                 pcmBuffer = this.clipBufferCache.get(c.id);
+              }
+              if (!pcmBuffer && prevTrack && prevTrack.clips && prevTrack.clips.has(c.id)) {
+                pcmBuffer = prevTrack.clips.get(c.id).pcm;
               }
               if (!pcmBuffer && c.originalClipId) {
                 pcmBuffer = this.clipBufferCache.get(c.originalClipId);
@@ -1667,6 +1673,11 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
                   }
                 }
               }
+            }
+          } else if (prevTrack && prevTrack.clips && prevTrack.clips.size > 0) {
+            // Если t.clips не передан, сохраняем ранее загруженные клипы
+            for (const [cId, cData] of prevTrack.clips.entries()) {
+              track.clips.set(cId, cData);
             }
           }
 
