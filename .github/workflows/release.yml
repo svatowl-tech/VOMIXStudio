@@ -86,13 +86,13 @@ jobs:
         run: npm ci --legacy-peer-deps || npm install --legacy-peer-deps
 
       # =========================================================================
-      # 3. СИСТЕМНЫЕ ЗАВИСИМОСТИ LINUX
+      # 3. СИСТЕМНЫЕ ЗАВИСИМОСТИ LINUX (WebKit2GTK, Ayatana AppIndicator, AppImage)
       # =========================================================================
       - name: 🐧 Install Linux Dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf build-essential curl wget file libssl-dev libasound2-dev
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf build-essential curl wget file libssl-dev libasound2-dev libxdo-dev squashfs-tools
 
       # =========================================================================
       # 4. ЗАГРУЗКА СКОМПИЛИРОВАННОГО C++ WEBASSEMBLY ЯДРА
@@ -102,6 +102,12 @@ jobs:
         with:
           name: wasm-assets
           path: public/wasm
+
+      # =========================================================================
+      # 5. УСТАНОВКА STABLE RUST ДЛЯ TAURI V2
+      # =========================================================================
+      - name: 🦀 Setup Rust Stable Toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       # =========================================================================
       # 6. ВАЛИДАЦИЯ ВЕРСИЙ, ЛИНТИНГ И ИКОНКИ

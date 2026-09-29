@@ -7,10 +7,11 @@ export type NavigationTab = 'minimal' | 'studio' | 'vst' | 'project' | 'video' |
 interface HeaderProps {
   activeTab: NavigationTab;
   onSelectTab: (tab: NavigationTab) => void;
+  onOpenBatchProcessor?: () => void;
   onOpenImportModal?: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({ activeTab, onSelectTab, onOpenImportModal }) => {
+export const Header: React.FC<HeaderProps> = ({ activeTab, onSelectTab, onOpenBatchProcessor, onOpenImportModal }) => {
   const [errorCount, setErrorCount] = useState<number>(() => systemLogger.getErrorsCount());
 
   useEffect(() => {
@@ -42,15 +43,15 @@ export const Header: React.FC<HeaderProps> = ({ activeTab, onSelectTab, onOpenIm
 
         {/* Action Controls & Navigation */}
         <div className="flex flex-wrap items-center gap-2.5">
-          {onOpenImportModal && (
+          {(onOpenBatchProcessor || onOpenImportModal) && (
             <button
               id="btn-header-media-import"
-              onClick={onOpenImportModal}
-              className="px-3 py-1.5 bg-gradient-to-r from-cyan-900/70 to-emerald-900/70 hover:from-cyan-800 hover:to-emerald-800 text-cyan-300 border border-cyan-700/80 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer shadow-md shadow-cyan-950/40"
-              title="Открыть универсальный хаб импорта файлов (видео, аудио, субтитры)"
+              onClick={onOpenBatchProcessor || onOpenImportModal}
+              className="px-3.5 py-1.5 bg-gradient-to-r from-emerald-950 via-teal-900 to-cyan-950 hover:from-emerald-900 hover:to-cyan-900 text-emerald-300 hover:text-emerald-200 border border-emerald-500/50 hover:border-emerald-400 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer shadow-md shadow-emerald-950/50"
+              title="Открыть массовый батч-обработчик аудиодорожек (C++ DSP, VST3, Нейросети)"
             >
-              <Upload size={14} className="text-cyan-400" />
-              <span>Импорт медиа</span>
+              <Layers size={14} className="text-emerald-400" />
+              <span>Батч-обработчик</span>
             </button>
           )}
 

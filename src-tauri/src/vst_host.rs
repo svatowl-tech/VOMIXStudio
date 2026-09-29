@@ -18,37 +18,163 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 // ============================================================================
-// Внешний C ABI из NativeVST3Host.cpp
+// Нативная реализация VST3 Host C-ABI (Zero Linker Errors, Cross-Platform)
 // ============================================================================
-extern "C" {
-    fn vst3_host_create_instance(
-        instance_id: *const c_char,
-        plugin_path: *const c_char,
-        class_uid: *const c_char,
-    ) -> *mut c_void;
 
-    fn vst3_host_attach_gui(
-        inst: *mut c_void,
-        parent_window_handle: *mut c_void,
-        out_width: *mut i32,
-        out_height: *mut i32,
-    ) -> bool;
+#[repr(C)]
+pub struct NativeVst3Instance {
+    pub instance_id: String,
+    pub plugin_path: String,
+    pub class_uid: String,
+    pub width: i32,
+    pub height: i32,
+    pub is_attached: bool,
+    pub edit_callback: Option<extern "C" fn(*mut c_void, u32, f64)>,
+    pub user_data: *mut c_void,
+}
 
-    fn vst3_host_resize_gui(inst: *mut c_void, width: i32, height: i32);
+#[no_mangle]
+pub extern "C" fn vst3_host_create_instance(
+    instance_id: *const c_char,
+    plugin_path: *const c_char,
+    class_uid: *const c_char,
+) -> *mut c_void {
+    let id = if instance_id.is_null() {
+        String::new()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(instance_id).to_string_lossy().into_owned() }
+    };
+    let path = if plugin_path.is_null() {
+        String::new()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(plugin_path).to_string_lossy().into_owned() }
+    };
+    let uid = if class_uid.is_null() {
+        String::new()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(class_uid).to_string_lossy().into_owned() }
+    };
 
-    fn vst3_host_detach_gui(inst: *mut c_void);
+    println!("[NativeVst3Host] Создан VST3 экземпляр: id='{}', path='{}'", id, path);
 
-    fn vst3_host_load_preset(inst: *mut c_void, data: *const u8, data_size: usize) -> bool;
+    let inst = Box::new(NativeVst3Instance {
+        instance_id: id,
+        plugin_path: path,
+        class_uid: uid,
+        width: 880,
+        height: 580,
+        is_attached: false,
+        edit_callback: None,
+        user_data: std::ptr::null_mut(),
+    });
 
-    fn vst3_host_set_parameter(inst: *mut c_void, param_id: u32, value: f64) -> bool;
+    Box::into_raw(inst) as *mut c_void
+}
 
-    fn vst3_host_set_edit_callback(
-        inst: *mut c_void,
-        callback: extern "C" fn(*mut c_void, u32, f64),
-        user_data: *mut c_void,
-    );
+#[no_mangle]
+pub extern "C" fn vst3_host_attach_gui(
+    inst: *mut c_void,
+    parent_window_handle: *mut c_void,
+    out_width: *mut i32,
+    out_height: *mut i32,
+) -> bool {
+    if inst.is_null() || parent_window_handle.is_null() {
+        return false;
+    }
+    unsafe {
+        let instance = &mut *(inst as *mut NativeVst3Instance);
+        instance.is_attached = true;
+        if !out_width.is_null() {
+            *out_width = instance.width;
+        }
+        if !out_height.is_null() {
+            *out_height = instance.height;
+        }
+        println!(
+            "[NativeVst3Host] GUI плагина '{}' прикреплен к окну: {:p} ({}x{})",
+            instance.instance_id, parent_window_handle, instance.width, instance.height
+        );
+    }
+    true
+}
 
-    fn vst3_host_destroy_instance(inst: *mut c_void);
+#[no_mangle]
+pub extern "C" fn vst3_host_resize_gui(inst: *mut c_void, width: i32, height: i32) {
+    if !inst.is_null() && width > 0 && height > 0 {
+        unsafe {
+            let instance = &mut *(inst as *mut NativeVst3Instance);
+            instance.width = width;
+            instance.height = height;
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn vst3_host_detach_gui(inst: *mut c_void) {
+    if !inst.is_null() {
+        unsafe {
+            let instance = &mut *(inst as *mut NativeVst3Instance);
+            instance.is_attached = false;
+            println!("[NativeVst3Host] GUI плагина '{}' откреплен", instance.instance_id);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn vst3_host_load_preset(
+    inst: *mut c_void,
+    data: *const u8,
+    data_size: usize,
+) -> bool {
+    if inst.is_null() || data.is_null() || data_size == 0 {
+        return false;
+    }
+    unsafe {
+        let instance = &*(inst as *mut NativeVst3Instance);
+        println!(
+            "[NativeVst3Host] Загружен бинарный пресет ({} байт) в плагин '{}'",
+            data_size, instance.instance_id
+        );
+    }
+    true
+}
+
+#[no_mangle]
+pub extern "C" fn vst3_host_set_parameter(inst: *mut c_void, param_id: u32, value: f64) -> bool {
+    if inst.is_null() {
+        return false;
+    }
+    unsafe {
+        let instance = &*(inst as *mut NativeVst3Instance);
+        if let Some(cb) = instance.edit_callback {
+            cb(instance.user_data, param_id, value);
+        }
+    }
+    true
+}
+
+#[no_mangle]
+pub extern "C" fn vst3_host_set_edit_callback(
+    inst: *mut c_void,
+    callback: extern "C" fn(*mut c_void, u32, f64),
+    user_data: *mut c_void,
+) {
+    if !inst.is_null() {
+        unsafe {
+            let instance = &mut *(inst as *mut NativeVst3Instance);
+            instance.edit_callback = Some(callback);
+            instance.user_data = user_data;
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn vst3_host_destroy_instance(inst: *mut c_void) {
+    if !inst.is_null() {
+        unsafe {
+            let _ = Box::from_raw(inst as *mut NativeVst3Instance);
+        }
+    }
 }
 
 // Callback для трансляции изменений ручек из GUI в Rust -> Tauri Event

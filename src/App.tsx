@@ -14,6 +14,7 @@ import { VSTPluginManager } from './components/VSTPluginManager';
 import { LogConsole } from './components/LogConsole';
 import { ConsoleStatusBar } from './components/ConsoleStatusBar';
 import { MediaImportModal } from './components/MediaImportModal';
+import { BatchProcessorModal } from './components/BatchProcessorModal';
 import { useAudioEngine } from './hooks/useAudioEngine';
 import { TrackState, MasterState, LiveDAWEngine, createNewTrack, VocalBusState, createDefaultVocalBus } from './audio/dawEngine';
 import { VSTPluginInstance } from './audio/vstTypes';
@@ -28,6 +29,7 @@ import { toSafeArray, toSafeMap } from './utils/safeIterables';
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavigationTab>('minimal');
   const [showGlobalImportModal, setShowGlobalImportModal] = useState<boolean>(false);
+  const [showBatchProcessorModal, setShowBatchProcessorModal] = useState<boolean>(false);
 
   const {
     isInitialized,
@@ -687,7 +689,8 @@ export default function App() {
       <Header
         activeTab={activeTab}
         onSelectTab={setActiveTab}
-        onOpenImportModal={() => setShowGlobalImportModal(true)}
+        onOpenBatchProcessor={() => setShowBatchProcessorModal(true)}
+        onOpenImportModal={() => setShowBatchProcessorModal(true)}
       />
 
       {/* Ошибка инициализации C++ ядра */}
@@ -821,6 +824,14 @@ export default function App() {
           existingTracks={tracks}
           onImportVideo={handleModalImportVideo}
           onImportAudioTrack={handleModalImportAudioTrack}
+        />
+      )}
+
+      {/* Массовый батч-обработчик дорожек (C++ DSP, VST3, AI) */}
+      {showBatchProcessorModal && (
+        <BatchProcessorModal
+          isOpen={showBatchProcessorModal}
+          onClose={() => setShowBatchProcessorModal(false)}
         />
       )}
     </div>
