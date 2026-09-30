@@ -490,6 +490,18 @@ pub mod commands {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn show_windows_error_box(title: &str, message: &str) {
+    let title_wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    let message_wide: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        extern "system" {
+            fn MessageBoxW(hwnd: *mut std::ffi::c_void, text: *const u16, caption: *const u16, utype: u32) -> i32;
+        }
+        MessageBoxW(std::ptr::null_mut(), message_wide.as_ptr(), title_wide.as_ptr(), 0x10);
+    }
+}
+
 fn main() {
     // 1. Глобальный перехватчик паники с записью в файл и системным уведомлением
     std::panic::set_hook(Box::new(|info| {
@@ -497,18 +509,10 @@ fn main() {
         eprintln!("{}", err_msg);
         let _ = std::fs::write("vomix_panic.log", &err_msg);
         #[cfg(target_os = "windows")]
-        unsafe {
-            use std::ffi::CString;
-            if let (Ok(title), Ok(body)) = (
-                CString::new("VOMIXStudio - Ошибка запуска"),
-                CString::new(format!("Не удалось запустить приложение:\n{}\n\nПодробности сохранены в vomix_panic.log", info))
-            ) {
-                extern "system" {
-                    fn MessageBoxA(hwnd: *mut std::ffi::c_void, text: *const i8, caption: *const i8, utype: u32) -> i32;
-                }
-                MessageBoxA(std::ptr::null_mut(), body.as_ptr(), title.as_ptr(), 0x10);
-            }
-        }
+        show_windows_error_box(
+            "VOMIXStudio - Критическая ошибка",
+            &format!("Не удалось запустить приложение:\n{}\n\nПодробности сохранены в vomix_panic.log", info),
+        );
     }));
 
     let app = tauri::Builder::default()
@@ -548,18 +552,7 @@ fn main() {
         eprintln!("{}", err_msg);
         let _ = std::fs::write("vomix_startup_error.log", &err_msg);
         #[cfg(target_os = "windows")]
-        unsafe {
-            use std::ffi::CString;
-            if let (Ok(title), Ok(body)) = (
-                CString::new("VOMIXStudio - Ошибка запуска"),
-                CString::new(err_msg.clone())
-            ) {
-                extern "system" {
-                    fn MessageBoxA(hwnd: *mut std::ffi::c_void, text: *const i8, caption: *const i8, utype: u32) -> i32;
-                }
-                MessageBoxA(std::ptr::null_mut(), body.as_ptr(), title.as_ptr(), 0x10);
-            }
-        }
-        panic!("{}", err_msg);
+        show_windows_error_box("VOMIXStudio - Ошибка запуска", &err_msg);
+        std::process::exit(1);
     }
 }
