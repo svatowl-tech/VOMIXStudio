@@ -2316,7 +2316,11 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
 
               {resultVideoUrl && (
                 <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl space-y-3 max-w-lg mx-auto">
-                  <video src={resultVideoUrl} controls className="w-full rounded-xl bg-black max-h-48" />
+                  {resultFileName?.endsWith('.wav') || resultFileName?.endsWith('.mp3') ? (
+                    <audio src={resultVideoUrl} controls className="w-full" />
+                  ) : (
+                    <video src={resultVideoUrl} controls className="w-full rounded-xl bg-black max-h-48" />
+                  )}
                   <div className="flex items-center justify-between text-xs text-slate-300 pt-1">
                     <span className="truncate max-w-[200px] font-mono">{resultFileName}</span>
                     {resultBlob && (
@@ -2329,7 +2333,7 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
                     className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-emerald-950/50"
                   >
                     <Download size={15} />
-                    Скачать готовое видео MP4
+                    Скачать {resultFileName?.endsWith('.wav') ? 'мастер-аудио WAV' : `готовое видео ${resultFileName?.split('.').pop()?.toUpperCase() || ''}`}
                   </a>
                 </div>
               )}

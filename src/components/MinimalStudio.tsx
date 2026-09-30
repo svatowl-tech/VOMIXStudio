@@ -2279,7 +2279,9 @@ const MinimalStudioComponent: React.FC = () => {
       (n) => n.type === 'output_video' || n.type === 'ffmpeg_mux' || n.type === 'ffmpeg_dual_mux' || n.type === 'ffmpeg_single_mux'
     );
     const exportParams = outputVideoNode?.parameters;
-    const containerExt = exportParams?.container || 'mp4';
+    const sourceExt = (videoFile.name.split('.').pop() || 'mp4').toLowerCase();
+    const defaultContainer = sourceExt === 'mkv' ? 'mkv' : (sourceExt === 'webm' ? 'webm' : 'mp4');
+    const containerExt = exportParams?.container || defaultContainer;
     const outputFileName = `mixed_${videoFile.name.replace(/\.[^/.]+$/, '')}.${containerExt}`;
 
     let finalVideoBlob: Blob | null = null;

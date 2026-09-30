@@ -344,14 +344,17 @@ export class RenderManager {
       throw new Error('Не удалось инициализировать WebAssembly FFmpeg.');
     }
 
+    const inputExt = (sourceVideoFile.name.split('.').pop() || 'mp4').toLowerCase();
+    const inputFileName = `input_video.${inputExt}`;
+
     try {
       this.notifyProgress('muxing_video', 20, 'Запись видео и аудио в виртуальную файловую систему MEMFS...');
 
-      // Запись исходного видео
-      this.addLog(`Запись входного видео [${sourceVideoFile.name}] в виртуальную ФС...`);
+      // Запись исходного видео с правильным расширением контейнера
+      this.addLog(`Запись входного видео [${sourceVideoFile.name}] в виртуальную ФС как ${inputFileName}...`);
       try {
         const videoBuffer = await fetchFile(sourceVideoFile);
-        await this.ffmpeg.writeFile('input_video.mp4', videoBuffer);
+        await this.ffmpeg.writeFile(inputFileName, videoBuffer);
       } catch (allocErr: any) {
         const isMem = allocErr?.name === 'RangeError' || String(allocErr).includes('allocation failed') || String(allocErr).includes('out of memory');
         if (isMem) {
@@ -402,7 +405,8 @@ export class RenderManager {
 
       const hasTimelineOriginal = options?.timelineHasOriginalAudio ?? true;
       const isLossless = params.preset === 'lossless_original' || params.videoCodec === 'copy';
-      const ext = params.container || 'mp4';
+      const defaultExt = inputExt === 'mkv' ? 'mkv' : inputExt === 'webm' ? 'webm' : 'mp4';
+      const ext = (params.container || defaultExt).toLowerCase();
       const tempOutputFile = `output.${ext}`;
 
       // Построение видео-флагов
@@ -460,7 +464,6 @@ export class RenderManager {
       }
 
       const track1Title = params.track1Title || 'Дубляж / Dubbed Mix';
-      const track2Title = params.track2Title || 'Оригинал / Original Audio';
 
       // Двухпроходный рендеринг (2-Pass VBR) при включенном режиме и перекодировании
       if (params.encodingPasses === 2 && !isLossless) {
@@ -468,7 +471,7 @@ export class RenderManager {
         this.addLog('Старт Прохода 1/2 (2-Pass анализ движения и битрейта)...');
         try {
           await this.ffmpeg.exec([
-            '-i', 'input_video.mp4',
+            '-i', inputFileName,
             ...videoArgs,
             '-pass', '1',
             '-an',
@@ -490,7 +493,7 @@ export class RenderManager {
       let ffmpegArgs: string[];
       if (hasTimelineOriginal) {
         ffmpegArgs = [
-          '-i', 'input_video.mp4',
+          '-i', inputFileName,
           '-i', 'audio_mix.wav',
           '-map', '0:v:0',
           '-map', '1:a:0',
@@ -502,7 +505,7 @@ export class RenderManager {
       } else {
         this.addLog('Звук оригинала видео подмешивается напрямую через FFmpeg amix к дорожкам дубляжа...');
         ffmpegArgs = [
-          '-i', 'input_video.mp4',
+          '-i', inputFileName,
           '-i', 'audio_mix.wav',
           '-filter_complex', '[0:a:0]volume=1.0[a0];[1:a:0]volume=1.0[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[aout]',
           '-map', '0:v:0',
@@ -514,7 +517,7 @@ export class RenderManager {
         ];
       }
 
-      if (params.fastStart) {
+      if (params.fastStart && (ext === 'mp4' || ext === 'mov' || ext === 'm4v')) {
         ffmpegArgs.push('-movflags', '+faststart');
       }
       ffmpegArgs.push(tempOutputFile);
@@ -538,7 +541,7 @@ export class RenderManager {
       // Очистка виртуальной файловой системы для освобождения WASM памяти
       this.addLog('Очистка временных файлов виртуальной ФС...');
       try {
-        await this.ffmpeg.deleteFile('input_video.mp4');
+        await this.ffmpeg.deleteFile(inputFileName);
         await this.ffmpeg.deleteFile('audio_mix.wav');
         await this.ffmpeg.deleteFile(tempOutputFile);
       } catch (cleanupErr) {
@@ -554,7 +557,7 @@ export class RenderManager {
       this.addLog(`Критическая ошибка муксинга: ${errMessage}`);
       systemLogger.error('FFmpeg', `Критическая ошибка FFmpeg видеомуксинга: ${errMessage}`, err, err instanceof Error ? err.stack : undefined);
       this.notifyProgress('error', 0, `Ошибка FFmpeg: ${errMessage}`);
-      return null;
+      throw err;
     }
   }
 }

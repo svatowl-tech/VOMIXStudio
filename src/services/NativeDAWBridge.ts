@@ -1707,11 +1707,8 @@ export class NativeDAWBridge {
     // Для больших файлов (>100 МБ) не дублируем память в ArrayBuffer впустую во избежание RangeError
     const wavArrayBuffer = wavBlob.size <= 100 * 1024 * 1024 ? await wavBlob.arrayBuffer() : new ArrayBuffer(0);
 
-    const interleavedBuffer = new Float32Array(maxFrames * 2);
-    for (let i = 0; i < maxFrames; i++) {
-      interleavedBuffer[i * 2] = leftChannel[i];
-      interleavedBuffer[i * 2 + 1] = rightChannel[i];
-    }
+    // Не аллоцируем гигантский interleavedBuffer для экономии памяти в браузерном JS
+    const interleavedBuffer = new Float32Array(0);
 
     if (onProgress) onProgress(100, 'Мастер-микс успешно готов!');
 
