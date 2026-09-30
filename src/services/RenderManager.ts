@@ -354,14 +354,40 @@ export class RenderManager {
 
           let actualVideoPath = videoFilePath;
 
-          // Если путь файла недоступен напрямую из объекта File, сохраняем его во временную папку
+          // Если путь файла недоступен напрямую из объекта File, проверяем локальный каталог проекта
           if (!actualVideoPath || typeof actualVideoPath !== 'string') {
             const cwd = (await TauriNativeBridge.getCurrentWorkingDir()) || '.';
             const dirSeparator = cwd.includes('\\') ? '\\' : '/';
-            const tempVideoPath = `${cwd}${dirSeparator}temp_source_video_${Date.now()}.${inputExt}`;
-            const videoBytes = await readBinaryMediaFile(sourceVideoFile);
-            await TauriNativeBridge.saveFileDirect(tempVideoPath, videoBytes);
-            actualVideoPath = tempVideoPath;
+            const candidatePaths = [
+              `${cwd}${dirSeparator}${sourceVideoFile.name}`,
+              `${cwd}${dirSeparator}project${dirSeparator}${sourceVideoFile.name}`,
+              `${cwd}${dirSeparator}assets${dirSeparator}${sourceVideoFile.name}`
+            ];
+
+            for (const cand of candidatePaths) {
+              try {
+                const u8 = await TauriNativeBridge.readFileBinary(cand);
+                if (u8 && u8.length > 0) {
+                  actualVideoPath = cand;
+                  this.addLog(`Найден исходный видеофайл на диске: ${cand} (${Math.round(u8.length / (1024 * 1024))} МБ)`);
+                  break;
+                }
+              } catch (_) {}
+            }
+          }
+
+          // Если путь все еще не найден, пытаемся записать временный файл
+          if (!actualVideoPath || typeof actualVideoPath !== 'string') {
+            try {
+              const cwd = (await TauriNativeBridge.getCurrentWorkingDir()) || '.';
+              const dirSeparator = cwd.includes('\\') ? '\\' : '/';
+              const tempVideoPath = `${cwd}${dirSeparator}temp_source_video_${Date.now()}.${inputExt}`;
+              const videoBytes = await readBinaryMediaFile(sourceVideoFile);
+              await TauriNativeBridge.saveFileDirect(tempVideoPath, videoBytes);
+              actualVideoPath = tempVideoPath;
+            } catch (readErr) {
+              console.warn('[RenderManager] Не удалось прочесть File для временной записи, пробуем интерактивный поиск:', readErr);
+            }
           }
 
           const dirSeparator = actualVideoPath.includes('\\') ? '\\' : '/';

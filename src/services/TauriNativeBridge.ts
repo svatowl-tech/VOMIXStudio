@@ -558,6 +558,67 @@ export class TauriNativeBridge {
   }
 
   /**
+   * Нативный системный диалог выбора медиафайлов (видео, аудио, субтитры) с сохранением реального пути на диске
+   */
+  public static async pickMediaFilesNative(options?: {
+    multiple?: boolean;
+    title?: string;
+    filters?: { name: string; extensions: string[] }[];
+  }): Promise<{ file: File; path: string; name: string }[]> {
+    if (!this.isTauriEnvironment()) return [];
+    try {
+      const { open: openDialog } = await import('@tauri-apps/plugin-dialog');
+      const selected = await openDialog({
+        multiple: options?.multiple ?? true,
+        directory: false,
+        title: options?.title || 'Выберите медиафайлы проекта (видео / аудио / субтитры)',
+        filters: options?.filters || [
+          {
+            name: 'Медиафайлы (*.mp4, *.mkv, *.wav, *.mp3, *.srt, *.ass)',
+            extensions: ['mp4', 'mkv', 'mov', 'webm', 'avi', 'wav', 'mp3', 'flac', 'ogg', 'aac', 'm4a', 'srt', 'ass', 'vtt']
+          },
+          {
+            name: 'Видеофайлы (*.mp4, *.mkv, *.mov, *.webm, *.avi)',
+            extensions: ['mp4', 'mkv', 'mov', 'webm', 'avi', 'm4v', 'ts']
+          },
+          {
+            name: 'Аудиофайлы (*.wav, *.mp3, *.flac, *.ogg, *.aac)',
+            extensions: ['wav', 'mp3', 'flac', 'ogg', 'aac', 'm4a', 'aiff']
+          }
+        ]
+      });
+
+      if (!selected) return [];
+      const paths = Array.isArray(selected) ? selected : [selected];
+      const results: { file: File; path: string; name: string }[] = [];
+
+      for (const p of paths) {
+        if (typeof p !== 'string') continue;
+        const dirSeparator = p.includes('\\') ? '\\' : '/';
+        const name = p.split(dirSeparator).pop() || 'file';
+        const ext = name.split('.').pop()?.toLowerCase() || '';
+        const mime = ext === 'mp4' ? 'video/mp4' : ext === 'mkv' ? 'video/x-matroska' : ext === 'wav' ? 'audio/wav' : ext === 'mp3' ? 'audio/mpeg' : 'application/octet-stream';
+        
+        try {
+          const bytes = await this.readFileBinary(p);
+          const file = new File([bytes as unknown as BlobPart], name, { type: mime });
+          (file as any).path = p;
+          results.push({ file, path: p, name });
+        } catch {
+          const file = new File([], name, { type: mime });
+          (file as any).path = p;
+          results.push({ file, path: p, name });
+        }
+      }
+
+      return results;
+    } catch (e) {
+      console.warn('[TauriNativeBridge] Ошибка диалога pickMediaFilesNative:', e);
+      return [];
+    }
+  }
+
+  /**
    * Нативный системный диалог выбора файла плагина (.vst3 / .dll / .clap) через Tauri dialog plugin
    */
   public static async pickPluginFileNative(): Promise<string | null> {
