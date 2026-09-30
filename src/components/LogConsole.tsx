@@ -152,6 +152,11 @@ export const LogConsole: React.FC<LogConsoleProps> = ({ isDrawer = false, onClos
     'all',
     'AudioWorklet',
     'C++ WASM',
+    'DSP',
+    'EffectsChain',
+    'PhaseAudition',
+    'AutoDucker',
+    'Mastering',
     'VSTPlugins',
     'VSTHost',
     'AudioAI',
@@ -276,9 +281,9 @@ export const LogConsole: React.FC<LogConsoleProps> = ({ isDrawer = false, onClos
         </div>
       </div>
 
-      {/* 2. Панель фильтров и поиска */}
+        {/* 2. Панель фильтров и поиска */}
       <div className="bg-[#0e1320] px-4 py-2.5 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
-        <div className="flex items-center gap-2 flex-1 min-w-[240px]">
+        <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[240px]">
           <div className="relative flex-1 max-w-sm">
             <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
             <input
@@ -296,6 +301,79 @@ export const LogConsole: React.FC<LogConsoleProps> = ({ isDrawer = false, onClos
                 <X size={12} />
               </button>
             )}
+          </div>
+
+          {/* Быстрые фильтры по категориям */}
+          <div className="flex items-center gap-1 bg-slate-950/80 p-0.5 rounded-lg border border-slate-800 font-mono text-[11px]">
+            <button
+              onClick={() => {
+                setFilterSource('all');
+                setFilterLevel('all');
+              }}
+              className={`px-2 py-0.5 rounded transition ${
+                filterSource === 'all' && filterLevel === 'all'
+                  ? 'bg-slate-700 text-white font-bold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Все
+            </button>
+            <button
+              onClick={() => {
+                setFilterSource('DSP');
+                setFilterLevel('all');
+              }}
+              className={`px-2 py-0.5 rounded transition flex items-center gap-1 ${
+                filterSource === 'DSP' || filterSource === 'EffectsChain'
+                  ? 'bg-emerald-700 text-white font-bold'
+                  : 'text-emerald-400 hover:text-emerald-200'
+              }`}
+              title="Фильтр: DSP инструменты, EQ, компрессор, гейт, деэссер"
+            >
+              🎛️ DSP
+            </button>
+            <button
+              onClick={() => {
+                setFilterSource('PhaseAudition');
+                setFilterLevel('all');
+              }}
+              className={`px-2 py-0.5 rounded transition flex items-center gap-1 ${
+                filterSource === 'PhaseAudition'
+                  ? 'bg-cyan-700 text-white font-bold'
+                  : 'text-cyan-400 hover:text-cyan-200'
+              }`}
+              title="Фильтр: Воспроизведение на различных этапах сведения"
+            >
+              🎧 Этапы
+            </button>
+            <button
+              onClick={() => {
+                setFilterSource('MVPPipeline');
+                setFilterLevel('all');
+              }}
+              className={`px-2 py-0.5 rounded transition flex items-center gap-1 ${
+                filterSource === 'MVPPipeline' || filterSource === 'Mastering'
+                  ? 'bg-amber-700 text-white font-bold'
+                  : 'text-amber-400 hover:text-amber-200'
+              }`}
+              title="Фильтр: Фазы сведения и мастеринг конвейера"
+            >
+              🚀 Фазы
+            </button>
+            <button
+              onClick={() => {
+                setFilterSource('AutoDucker');
+                setFilterLevel('all');
+              }}
+              className={`px-2 py-0.5 rounded transition flex items-center gap-1 ${
+                filterSource === 'AutoDucker'
+                  ? 'bg-rose-700 text-white font-bold'
+                  : 'text-rose-400 hover:text-rose-200'
+              }`}
+              title="Фильтр: Сайдчейн приглушение музыки"
+            >
+              📉 Сайдчейн
+            </button>
           </div>
 
           {/* Фильтр уровней */}
@@ -500,12 +578,20 @@ export const LogConsole: React.FC<LogConsoleProps> = ({ isDrawer = false, onClos
                           ? 'bg-fuchsia-950/70 text-fuchsia-300 border-fuchsia-700/60'
                           : log.source === 'AudioAI' || log.source === 'DubbingAI'
                           ? 'bg-sky-950/70 text-sky-300 border-sky-700/60'
-                          : log.source === 'C++ WASM'
+                          : log.source === 'C++ WASM' || log.source === 'DSP'
                           ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/60'
+                          : log.source === 'EffectsChain'
+                          ? 'bg-purple-950/70 text-purple-300 border-purple-700/60'
+                          : log.source === 'PhaseAudition'
+                          ? 'bg-cyan-950/70 text-cyan-300 border-cyan-700/60'
+                          : log.source === 'AutoDucker'
+                          ? 'bg-rose-950/70 text-rose-300 border-rose-700/60'
                           : log.source === 'AudioWorklet'
                           ? 'bg-teal-950/70 text-teal-300 border-teal-700/60'
                           : log.source === 'MVPPipeline' || log.source === 'MVPPreset'
                           ? 'bg-amber-950/70 text-amber-300 border-amber-700/60'
+                          : log.source === 'Mastering'
+                          ? 'bg-orange-950/70 text-orange-300 border-orange-600/70'
                           : log.source === 'VideoSync' || log.source === 'FFmpeg' || log.source === 'RenderManager'
                           ? 'bg-indigo-950/70 text-indigo-300 border-indigo-700/60'
                           : 'bg-slate-800 text-slate-300 border-slate-700/60'
@@ -514,10 +600,48 @@ export const LogConsole: React.FC<LogConsoleProps> = ({ isDrawer = false, onClos
                       [{log.source}]
                     </span>
 
-                    {/* Сообщение */}
-                    <span className="break-words flex-1 text-slate-200">
-                      {log.message}
-                    </span>
+                    {/* Сообщение с инлайн-бейджами метрик */}
+                    <div className="flex-1 space-y-1">
+                      <div className="break-words text-slate-200">
+                        {log.message}
+                      </div>
+
+                      {/* Инлайн-бейджи телеметрии параметров DSP и фаз */}
+                      {log.details && typeof log.details === 'object' && (
+                        <div className="flex flex-wrap items-center gap-1.5 pt-0.5 font-mono text-[10px]">
+                          {log.details.stageKey && (
+                            <span className="px-1.5 py-0.5 rounded bg-cyan-950/80 text-cyan-300 border border-cyan-800/80">
+                              Этап: <b>{log.details.stageName || log.details.stageKey}</b>
+                            </span>
+                          )}
+                          {log.details.gainReductionDb !== undefined && (
+                            <span className="px-1.5 py-0.5 rounded bg-rose-950/80 text-rose-300 border border-rose-800/80">
+                              GR: <b>-{Math.abs(log.details.gainReductionDb).toFixed(1)} dB</b>
+                            </span>
+                          )}
+                          {log.details.sidechainDepthDb !== undefined && (
+                            <span className="px-1.5 py-0.5 rounded bg-amber-950/80 text-amber-300 border border-amber-800/80">
+                              Ducker: <b>{log.details.sidechainDepthDb} dB</b>
+                            </span>
+                          )}
+                          {log.details.thresholdDb !== undefined && (
+                            <span className="px-1.5 py-0.5 rounded bg-purple-950/80 text-purple-300 border border-purple-800/80">
+                              Порог: <b>{log.details.thresholdDb} dB</b>
+                            </span>
+                          )}
+                          {log.details.ratio !== undefined && (
+                            <span className="px-1.5 py-0.5 rounded bg-indigo-950/80 text-indigo-300 border border-indigo-800/80">
+                              Ratio: <b>{log.details.ratio}:1</b>
+                            </span>
+                          )}
+                          {log.details.freqHz !== undefined && (
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-950/80 text-emerald-300 border border-emerald-800/80">
+                              Freq: <b>{log.details.freqHz} Hz</b>
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   {/* Быстрое копирование конкретной строки */}

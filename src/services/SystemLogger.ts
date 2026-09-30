@@ -31,6 +31,11 @@ export type LogSource =
   | 'VSTHost'
   | 'MVPPipeline'
   | 'MVPPreset'
+  | 'DSP'
+  | 'EffectsChain'
+  | 'PhaseAudition'
+  | 'AutoDucker'
+  | 'Mastering'
   | 'System'
   | 'GlobalError';
 
@@ -154,6 +159,10 @@ class SystemLoggerService {
         else if (msg.includes('StemSeparation') || msg.includes('AudioAI') || msg.includes('Denoise') || msg.includes('Dereverb') || msg.includes('VoiceFixer') || msg.includes('Spectral') || msg.includes('ONNX') || msg.includes('ort.')) source = 'AudioAI';
         else if (msg.includes('Dubbing') || msg.includes('Gemini') || msg.includes('TTS')) source = 'DubbingAI';
         else if (msg.includes('Wizard') || msg.includes('MVPPipeline') || msg.includes('сведения') || msg.includes('конвейер')) source = 'MVPPipeline';
+        else if (msg.includes('Audition') || msg.includes('Прослушивание') || msg.includes('PhaseAudition')) source = 'PhaseAudition';
+        else if (msg.includes('AutoDucker') || msg.includes('Ducker') || msg.includes('приглуш')) source = 'AutoDucker';
+        else if (msg.includes('EffectsChain') || msg.includes('цепочк') || msg.includes('инсерт')) source = 'EffectsChain';
+        else if (msg.includes('DSP') || msg.includes('EQ') || msg.includes('Compressor') || msg.includes('Limiter')) source = 'DSP';
         else if (msg.includes('Video') || msg.includes('video') || msg.includes('Jitter-free') || msg.includes('drift')) source = 'VideoSync';
         else if (msg.includes('FFmpeg') || msg.includes('ffmpeg')) source = 'FFmpeg';
         else if (msg.includes('RenderManager')) source = 'RenderManager';
@@ -180,6 +189,10 @@ class SystemLoggerService {
         else if (msg.includes('StemSeparation') || msg.includes('AudioAI') || msg.includes('Denoise') || msg.includes('Dereverb') || msg.includes('VoiceFixer') || msg.includes('Spectral') || msg.includes('ONNX') || msg.includes('ort.')) source = 'AudioAI';
         else if (msg.includes('Dubbing') || msg.includes('Gemini') || msg.includes('TTS')) source = 'DubbingAI';
         else if (msg.includes('Wizard') || msg.includes('MVPPipeline') || msg.includes('сведения') || msg.includes('конвейер')) source = 'MVPPipeline';
+        else if (msg.includes('Audition') || msg.includes('Прослушивание') || msg.includes('PhaseAudition')) source = 'PhaseAudition';
+        else if (msg.includes('AutoDucker') || msg.includes('Ducker') || msg.includes('приглуш')) source = 'AutoDucker';
+        else if (msg.includes('EffectsChain') || msg.includes('цепочк') || msg.includes('инсерт')) source = 'EffectsChain';
+        else if (msg.includes('DSP') || msg.includes('EQ') || msg.includes('Compressor') || msg.includes('Limiter')) source = 'DSP';
         else if (msg.includes('Video') || msg.includes('video') || msg.includes('Jitter-free') || msg.includes('drift')) source = 'VideoSync';
         else if (msg.includes('FFmpeg') || msg.includes('ffmpeg')) source = 'FFmpeg';
         else if (msg.includes('RenderManager')) source = 'RenderManager';
@@ -261,6 +274,110 @@ class SystemLoggerService {
 
   public error(source: LogSource, message: string, details?: any, stack?: string) {
     return this.logInternal('error', source, message, details, stack);
+  }
+
+  /**
+   * Подробная телеметрия срабатывания и настройки DSP инструмента / эффекта
+   */
+  public logDSPToolEvent(
+    toolName: string,
+    trackName: string,
+    action: string,
+    metrics?: {
+      inputRmsDb?: number;
+      outputRmsDb?: number;
+      gainReductionDb?: number;
+      thresholdDb?: number;
+      ratio?: number;
+      attackMs?: number;
+      releaseMs?: number;
+      freqHz?: number;
+      q?: number;
+      makeupGainDb?: number;
+      sidechainDepthDb?: number;
+      [key: string]: any;
+    }
+  ) {
+    let metricSummary = '';
+    if (metrics) {
+      const parts: string[] = [];
+      if (metrics.gainReductionDb !== undefined) parts.push(`GR: -${Math.abs(metrics.gainReductionDb).toFixed(1)} dB`);
+      if (metrics.thresholdDb !== undefined) parts.push(`Порог: ${metrics.thresholdDb.toFixed(1)} dB`);
+      if (metrics.ratio !== undefined) parts.push(`Ratio: ${metrics.ratio.toFixed(1)}:1`);
+      if (metrics.freqHz !== undefined) parts.push(`Freq: ${metrics.freqHz} Hz`);
+      if (metrics.sidechainDepthDb !== undefined) parts.push(`Duck: ${metrics.sidechainDepthDb} dB`);
+      if (metrics.inputRmsDb !== undefined && metrics.outputRmsDb !== undefined) {
+        parts.push(`RMS: ${metrics.inputRmsDb.toFixed(1)} ➔ ${metrics.outputRmsDb.toFixed(1)} dBFS`);
+      }
+      if (parts.length > 0) metricSummary = ` | [${parts.join(', ')}]`;
+    }
+
+    const message = `🎛️ [DSP Инструмент: ${toolName}] ${trackName} — ${action}${metricSummary}`;
+    return this.info('DSP', message, { toolName, trackName, action, ...metrics });
+  }
+
+  /**
+   * Логирование смены фазы сведения в конвейере
+   */
+  public logMixingPhase(
+    phaseIndex: number,
+    phaseName: string,
+    status: 'started' | 'processing' | 'auditioning' | 'completed' | 'bypassed' | 'error',
+    details?: Record<string, any>
+  ) {
+    const statusIcons: Record<string, string> = {
+      started: '🚀',
+      processing: '⚙️',
+      auditioning: '🎧',
+      completed: '✅',
+      bypassed: '⏩',
+      error: '❌'
+    };
+    const icon = statusIcons[status] || '📊';
+    const message = `${icon} [Фаза ${phaseIndex}: ${phaseName}] Статус: ${status.toUpperCase()}`;
+    return this.info('MVPPipeline', message, { phaseIndex, phaseName, status, ...details });
+  }
+
+  /**
+   * Логирование точки предпрослушивания (Stage Auditioning)
+   */
+  public logAuditionStage(
+    stageKey: string,
+    stageName: string,
+    activeTracksCount: number,
+    dspBypassState: Record<string, boolean>,
+    targetMetrics?: Record<string, any>
+  ) {
+    const bypassed = Object.entries(dspBypassState)
+      .filter(([, isBypassed]) => isBypassed)
+      .map(([name]) => name);
+    const active = Object.entries(dspBypassState)
+      .filter(([, isBypassed]) => !isBypassed)
+      .map(([name]) => name);
+
+    const message = `🎧 [Прослушивание Этапа: ${stageName}] (Ключ: ${stageKey}). Активные блоки: [${active.join(', ') || 'нет'}], Байпас: [${bypassed.join(', ') || 'нет'}], дорожек: ${activeTracksCount}`;
+    return this.info('PhaseAudition', message, {
+      stageKey,
+      stageName,
+      activeTracksCount,
+      dspBypassState,
+      ...targetMetrics
+    });
+  }
+
+  /**
+   * Логирование изменения параметров эффектов
+   */
+  public logEffectChange(
+    trackId: number,
+    trackName: string,
+    effectName: string,
+    paramName: string,
+    oldValue: any,
+    newValue: any
+  ) {
+    const message = `⚡ [${trackName}] Параметр эффекта ${effectName}.${paramName}: ${oldValue} ➔ ${newValue}`;
+    return this.info('EffectsChain', message, { trackId, trackName, effectName, paramName, oldValue, newValue });
   }
 
   public clear() {

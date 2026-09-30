@@ -576,6 +576,10 @@ export class AutoTimingService {
             buffer: new Float32Array(slicedBuf),
             untrimmedBuffer: buffer,
             trimStartSamples: startFrame,
+            parentClipId: firstClip.id,
+            originalClipId: firstClip.id,
+            sourceClipId: firstClip.id,
+            bufferOffsetSamples: startFrame,
             color: track.color
           };
         });
@@ -654,6 +658,10 @@ export class AutoTimingService {
         buffer: new Float32Array(slicedBuf),
         untrimmedBuffer: buffer,
         trimStartSamples: startFrame,
+        parentClipId: sourceClip.id,
+        originalClipId: sourceClip.id,
+        sourceClipId: sourceClip.id,
+        bufferOffsetSamples: startFrame,
         color: track.color
       };
     });

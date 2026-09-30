@@ -53,7 +53,14 @@ import {
   Rewind,
   Clock,
   Compass,
-  Scissors
+  Scissors,
+  Headphones,
+  Settings2,
+  BarChart2,
+  FileText,
+  Filter,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 
 export type WizardStage =
@@ -139,11 +146,460 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
   // Локальное реактивное состояние Шины Вокала для плавной регулировки ползунка
   const [currentVocalBus, setCurrentVocalBus] = useState<VocalBusState>(() => vocalBus || createDefaultVocalBus());
 
+  // Режим прослушивания фаз сведения:
+  // 'mix' - полный микс (оригинал + дубляж + сайдчейн ducking)
+  // 'original' - соло оригинального звука (видео)
+  // 'dubbing' - соло закадрового озвучания через Шину Вокала
+  // 'dry' - Этап 1: Исходный голос без DSP цепочек (байпас EQ/Comp/Gate/DeEsser)
+  // 'surgical' - Этап 2: После AI очистки, денойза и VAD нарезки
+  // 'tonal' - Этап 3: После параметрического EQ и De-Esser
+  // 'ducked' - Этап 4: Компрессор + активный сайдчейн-дакер музыки
+  // 'master' - Этап 5: Финальный EBU R128 мастер с лимитером
+  const [auditionMode, setAuditionMode] = useState<
+    'mix' | 'original' | 'dubbing' | 'dry' | 'surgical' | 'tonal' | 'ducked' | 'master'
+  >('mix');
+  const [previousAuditionMode, setPreviousAuditionMode] = useState<
+    'mix' | 'original' | 'dubbing' | 'dry' | 'surgical' | 'tonal' | 'ducked' | 'master'
+  >('dry');
+  const [isLoopingCue, setIsLoopingCue] = useState<boolean>(false);
+  const [showDspInspector, setShowDspInspector] = useState<boolean>(false);
+  const [showLiveLogs, setShowLiveLogs] = useState<boolean>(false);
+  const [activePreset, setActivePreset] = useState<string>('balanced');
+  const [logCategoryFilter, setLogCategoryFilter] = useState<'all' | 'dsp' | 'phases' | 'audition' | 'errors'>('all');
+
+  // Параметры отдельных DSP инструментов (для оперативного контроля)
+  const [toolParams, setToolParams] = useState({
+    eqEnabled: true,
+    eqLowGain: 0,
+    eqMidGain: 0,
+    eqHighGain: 0,
+    compEnabled: true,
+    compThreshold: -18,
+    compRatio: 3.0,
+    compAttackMs: 15,
+    compReleaseMs: 120,
+    deEsserEnabled: true,
+    deEsserThreshold: -20,
+    deEsserFreq: 6500,
+    duckerEnabled: true,
+    duckerDepth: -8.0,
+    limiterCeiling: -0.1
+  });
+
   useEffect(() => {
     if (vocalBus) {
       setCurrentVocalBus(vocalBus);
     }
   }, [vocalBus]);
+
+  // Переключение режима прослушивания с детальным контролем DSP и логированием
+  const handleSetAuditionMode = async (
+    mode: 'mix' | 'original' | 'dubbing' | 'dry' | 'surgical' | 'tonal' | 'ducked' | 'master'
+  ) => {
+    if (auditionMode !== mode) {
+      setPreviousAuditionMode(auditionMode);
+    }
+    setAuditionMode(mode);
+    const safeTracks = toSafeArray<TrackState>(tracks);
+
+    if (mode === 'original') {
+      systemLogger.logAuditionStage('original', 'Оригинал соло (Видео)', 1, {
+        voicesMuted: true,
+        bgSolo: true
+      });
+      addLog('🎧 Режим прослушивания: [Оригинал соло]');
+      const updated = safeTracks.map((t) => {
+        const isOrig =
+          t.isOriginalAudio ||
+          t.name.toLowerCase().includes('оригинал') ||
+          t.name.toLowerCase().includes('original') ||
+          t.name.toLowerCase().includes('video');
+        return {
+          ...t,
+          solo: isOrig,
+          mute: !isOrig
+        };
+      });
+      setTracks(updated);
+      if (onUpdateAllTracks) await onUpdateAllTracks(updated);
+    } else if (mode === 'dubbing') {
+      systemLogger.logAuditionStage('dubbing', 'Дубляж соло (Vocal Bus)', safeTracks.length - 1, {
+        voicesSolo: true,
+        bgMuted: true
+      });
+      addLog('🎧 Режим прослушивания: [Дубляж соло (Vocal Bus)]');
+      const updated = safeTracks.map((t) => {
+        const isOrig =
+          t.isOriginalAudio ||
+          t.name.toLowerCase().includes('оригинал') ||
+          t.name.toLowerCase().includes('original') ||
+          t.name.toLowerCase().includes('video');
+        return {
+          ...t,
+          solo: !isOrig,
+          mute: isOrig
+        };
+      });
+      setTracks(updated);
+      if (onUpdateAllTracks) await onUpdateAllTracks(updated);
+    } else if (mode === 'dry') {
+      systemLogger.logAuditionStage('dry', 'Этап 1: Dry (Исходный голос без эффектов)', safeTracks.length, {
+        eq: false,
+        compressor: false,
+        noiseGate: false,
+        deEsser: false,
+        autoDucker: false
+      });
+      addLog('🎧 Режим прослушивания: [Этап 1: Dry (Байпас всех DSP)]');
+      const updated = safeTracks.map((t) => ({
+        ...t,
+        solo: false,
+        mute: false,
+        dsp: {
+          ...t.dsp,
+          eq: t.dsp?.eq ? { ...t.dsp.eq, enabled: false } : undefined,
+          compressor: t.dsp?.compressor ? { ...t.dsp.compressor, enabled: false } : undefined,
+          noiseGate: t.dsp?.noiseGate ? { ...t.dsp.noiseGate, enabled: false } : undefined,
+          deEsser: t.dsp?.deEsser ? { ...t.dsp.deEsser, enabled: false } : undefined
+        }
+      }));
+      setTracks(updated);
+      if (onUpdateAllTracks) await onUpdateAllTracks(updated);
+    } else if (mode === 'surgical') {
+      systemLogger.logAuditionStage('surgical', 'Этап 2: После AI-чистки и VAD', safeTracks.length, {
+        noiseGate: true,
+        eq: false,
+        compressor: false,
+        deEsser: false,
+        autoDucker: false
+      });
+      addLog('🎧 Режим прослушивания: [Этап 2: Surgical (Только денойз и гейт, без тональной обработки)]');
+      const updated = safeTracks.map((t) => ({
+        ...t,
+        solo: false,
+        mute: false,
+        dsp: {
+          ...t.dsp,
+          noiseGate: t.dsp?.noiseGate ? { ...t.dsp.noiseGate, enabled: true } : undefined,
+          eq: t.dsp?.eq ? { ...t.dsp.eq, enabled: false } : undefined,
+          compressor: t.dsp?.compressor ? { ...t.dsp.compressor, enabled: false } : undefined,
+          deEsser: t.dsp?.deEsser ? { ...t.dsp.deEsser, enabled: false } : undefined
+        }
+      }));
+      setTracks(updated);
+      if (onUpdateAllTracks) await onUpdateAllTracks(updated);
+    } else if (mode === 'tonal') {
+      systemLogger.logAuditionStage('tonal', 'Этап 3: Тональный баланс (EQ + De-Esser)', safeTracks.length, {
+        eq: true,
+        deEsser: true,
+        compressor: false,
+        autoDucker: false
+      });
+      addLog('🎧 Режим прослушивания: [Этап 3: Tonal (EQ + De-Esser, без тяжелой компрессии)]');
+      const updated = safeTracks.map((t) => ({
+        ...t,
+        solo: false,
+        mute: false,
+        dsp: {
+          ...t.dsp,
+          noiseGate: t.dsp?.noiseGate ? { ...t.dsp.noiseGate, enabled: true } : undefined,
+          eq: t.dsp?.eq ? { ...t.dsp.eq, enabled: true } : undefined,
+          deEsser: t.dsp?.deEsser ? { ...t.dsp.deEsser, enabled: true } : undefined,
+          compressor: t.dsp?.compressor ? { ...t.dsp.compressor, enabled: false } : undefined
+        }
+      }));
+      setTracks(updated);
+      if (onUpdateAllTracks) await onUpdateAllTracks(updated);
+    } else if (mode === 'ducked') {
+      systemLogger.logAuditionStage('ducked', 'Этап 4: Компрессия и Сайдчейн-дакинг', safeTracks.length, {
+        eq: true,
+        deEsser: true,
+        compressor: true,
+        autoDucker: true
+      });
+      addLog('🎧 Режим прослушивания: [Этап 4: Ducked Mix (Компрессор + активный сайдчейн фонограммы)]');
+      const updated = safeTracks.map((t) => ({
+        ...t,
+        solo: false,
+        mute: false,
+        dsp: {
+          ...t.dsp,
+          noiseGate: t.dsp?.noiseGate ? { ...t.dsp.noiseGate, enabled: true } : undefined,
+          eq: t.dsp?.eq ? { ...t.dsp.eq, enabled: true } : undefined,
+          deEsser: t.dsp?.deEsser ? { ...t.dsp.deEsser, enabled: true } : undefined,
+          compressor: t.dsp?.compressor ? { ...t.dsp.compressor, enabled: true } : undefined
+        }
+      }));
+      setTracks(updated);
+      if (onUpdateAllTracks) await onUpdateAllTracks(updated);
+    } else if (mode === 'master') {
+      systemLogger.logAuditionStage('master', 'Этап 5: Финальный EBU R128 Мастер', safeTracks.length, {
+        eq: true,
+        deEsser: true,
+        compressor: true,
+        autoDucker: true,
+        limiter: true
+      });
+      addLog('🎧 Режим прослушивания: [Этап 5: Master EBU R128 (Сведение 1-в-1 с мастер-лимитером)]');
+      const updated = safeTracks.map((t) => ({
+        ...t,
+        solo: false,
+        mute: false,
+        dsp: {
+          ...t.dsp,
+          noiseGate: t.dsp?.noiseGate ? { ...t.dsp.noiseGate, enabled: true } : undefined,
+          eq: t.dsp?.eq ? { ...t.dsp.eq, enabled: true } : undefined,
+          deEsser: t.dsp?.deEsser ? { ...t.dsp.deEsser, enabled: true } : undefined,
+          compressor: t.dsp?.compressor ? { ...t.dsp.compressor, enabled: true } : undefined
+        }
+      }));
+      setTracks(updated);
+      if (onUpdateAllTracks) await onUpdateAllTracks(updated);
+    } else {
+      systemLogger.logAuditionStage('mix', 'Полный сбалансированный микс', safeTracks.length, {
+        allActive: true
+      });
+      addLog('🎧 Режим прослушивания: [Полный микс (Оригинал + Дубляж + Сайдчейн)]');
+      const updated = safeTracks.map((t) => ({
+        ...t,
+        solo: false,
+        mute: false,
+        dsp: {
+          ...t.dsp,
+          noiseGate: t.dsp?.noiseGate ? { ...t.dsp.noiseGate, enabled: true } : undefined,
+          eq: t.dsp?.eq ? { ...t.dsp.eq, enabled: true } : undefined,
+          deEsser: t.dsp?.deEsser ? { ...t.dsp.deEsser, enabled: true } : undefined,
+          compressor: t.dsp?.compressor ? { ...t.dsp.compressor, enabled: true } : undefined
+        }
+      }));
+      setTracks(updated);
+      if (onUpdateAllTracks) await onUpdateAllTracks(updated);
+    }
+  };
+
+  // Мгновенное A/B переключение между текущим этапом и Dry / Оригиналом
+  const handleToggleAB = () => {
+    if (auditionMode === 'dry') {
+      const returnTarget = previousAuditionMode === 'dry' ? 'mix' : previousAuditionMode;
+      handleSetAuditionMode(returnTarget);
+    } else {
+      setPreviousAuditionMode(auditionMode);
+      handleSetAuditionMode('dry');
+    }
+  };
+
+  // Изменение параметров конкретного DSP инструмента
+  const handleUpdateDSPParam = async (param: string, value: any) => {
+    const updatedParams = { ...toolParams, [param]: value };
+    setToolParams(updatedParams);
+
+    const safeTracks = toSafeArray<TrackState>(tracks);
+    const updatedTracks = safeTracks.map((t) => {
+      const isOrig =
+        t.isOriginalAudio ||
+        t.name.toLowerCase().includes('оригинал') ||
+        t.name.toLowerCase().includes('video');
+      if (isOrig) return t;
+      return {
+        ...t,
+        dsp: {
+          ...t.dsp,
+          eq: {
+            enabled: updatedParams.eqEnabled,
+            lowGainDb: updatedParams.eqLowGain,
+            midGainDb: updatedParams.eqMidGain,
+            highGainDb: updatedParams.eqHighGain,
+            lowFreqHz: 100,
+            midFreqHz: 2500,
+            highFreqHz: 10000
+          },
+          compressor: {
+            enabled: updatedParams.compEnabled,
+            thresholdDb: updatedParams.compThreshold,
+            ratio: updatedParams.compRatio,
+            attackMs: updatedParams.compAttackMs,
+            releaseMs: updatedParams.compReleaseMs
+          },
+          deEsser: {
+            enabled: updatedParams.deEsserEnabled,
+            frequencyHz: updatedParams.deEsserFreq,
+            thresholdDb: updatedParams.deEsserThreshold
+          }
+        }
+      };
+    });
+
+    setTracks(updatedTracks);
+    if (onUpdateAllTracks) await onUpdateAllTracks(updatedTracks);
+
+    if (param === 'duckerDepth' || param === 'duckerEnabled') {
+      const updatedBus: VocalBusState = {
+        ...currentVocalBus,
+        autoDucker: {
+          ...(currentVocalBus.autoDucker || { attackMs: 20, releaseMs: 250, thresholdDb: -30 }),
+          enabled: updatedParams.duckerEnabled,
+          duckDepthDb: updatedParams.duckerDepth
+        }
+      };
+      setCurrentVocalBus(updatedBus);
+      if (onVocalBusChange) onVocalBusChange(updatedBus);
+    }
+
+    const toolName = param.startsWith('eq')
+      ? 'ParametricEQ'
+      : param.startsWith('comp')
+      ? 'StudioCompressor'
+      : param.startsWith('deEsser')
+      ? 'DeEsserPro'
+      : 'AutoDucker';
+
+    systemLogger.logDSPToolEvent(toolName, 'Шина Вокала / Дорожки', `Параметр ${param} установлен в ${value}`, {
+      [param]: value
+    });
+    addLog(`🎛️ [DSP] ${toolName}.${param} = ${value}`);
+  };
+
+  // Применение звукового характера и пресета инструментов
+  const handleApplyCharacterPreset = async (presetKey: string) => {
+    setActivePreset(presetKey);
+    const safeTracks = toSafeArray<TrackState>(tracks);
+    let duckDepth = -8.0;
+    let presetName = 'Сбалансированный';
+
+    let eqParams = { lowGainDb: 0, midGainDb: 0, highGainDb: 0 };
+    let compParams = { thresholdDb: -18, ratio: 3.0, attackMs: 15, releaseMs: 120 };
+    let deEsserParams = { thresholdDb: -20, freqHz: 6500 };
+
+    if (presetKey === 'cinema') {
+      presetName = 'Кинотеатр / Теплый вокал';
+      duckDepth = -10.0;
+      eqParams = { lowGainDb: 1.5, midGainDb: -1.0, highGainDb: 1.0 };
+      compParams = { thresholdDb: -19, ratio: 2.5, attackMs: 25, releaseMs: 160 };
+      deEsserParams = { thresholdDb: -22, freqHz: 6000 };
+    } else if (presetKey === 'anime') {
+      presetName = 'Аниме / Яркий войсовер';
+      duckDepth = -11.0;
+      eqParams = { lowGainDb: -1.0, midGainDb: 2.0, highGainDb: 3.0 };
+      compParams = { thresholdDb: -17, ratio: 3.5, attackMs: 10, releaseMs: 100 };
+      deEsserParams = { thresholdDb: -19, freqHz: 7000 };
+    } else if (presetKey === 'podcast') {
+      presetName = 'Подкаст / Плотный компрессор';
+      duckDepth = -13.0;
+      eqParams = { lowGainDb: 0.5, midGainDb: 1.5, highGainDb: 2.0 };
+      compParams = { thresholdDb: -16, ratio: 4.0, attackMs: 8, releaseMs: 80 };
+      deEsserParams = { thresholdDb: -24, freqHz: 6200 };
+    } else if (presetKey === 'hifi') {
+      presetName = 'Чистая речь / Hi-Fi Broadcast';
+      duckDepth = -7.0;
+      eqParams = { lowGainDb: -0.5, midGainDb: 0.5, highGainDb: 1.5 };
+      compParams = { thresholdDb: -20, ratio: 2.2, attackMs: 20, releaseMs: 180 };
+      deEsserParams = { thresholdDb: -21, freqHz: 6800 };
+    } else {
+      presetName = 'Нейтральный / TV';
+      duckDepth = -8.0;
+      eqParams = { lowGainDb: 0, midGainDb: 0, highGainDb: 0 };
+      compParams = { thresholdDb: -18, ratio: 3.0, attackMs: 15, releaseMs: 120 };
+      deEsserParams = { thresholdDb: -20, freqHz: 6500 };
+    }
+
+    setToolParams({
+      ...toolParams,
+      eqLowGain: eqParams.lowGainDb,
+      eqMidGain: eqParams.midGainDb,
+      eqHighGain: eqParams.highGainDb,
+      compThreshold: compParams.thresholdDb,
+      compRatio: compParams.ratio,
+      compAttackMs: compParams.attackMs,
+      compReleaseMs: compParams.releaseMs,
+      deEsserThreshold: deEsserParams.thresholdDb,
+      deEsserFreq: deEsserParams.freqHz,
+      duckerDepth: duckDepth
+    });
+
+    const updatedBus: VocalBusState = {
+      ...currentVocalBus,
+      autoDucker: {
+        ...(currentVocalBus.autoDucker || { enabled: true, attackMs: 20, releaseMs: 250, thresholdDb: -30 }),
+        duckDepthDb: duckDepth,
+        enabled: true
+      }
+    };
+    setCurrentVocalBus(updatedBus);
+    if (onVocalBusChange) onVocalBusChange(updatedBus);
+
+    const updatedTracks = safeTracks.map((t) => {
+      const isOrig =
+        t.isOriginalAudio ||
+        t.name.toLowerCase().includes('оригинал') ||
+        t.name.toLowerCase().includes('video');
+      if (isOrig) return t;
+      return {
+        ...t,
+        dsp: {
+          ...t.dsp,
+          eq: {
+            enabled: true,
+            lowGainDb: eqParams.lowGainDb,
+            midGainDb: eqParams.midGainDb,
+            highGainDb: eqParams.highGainDb,
+            lowFreqHz: 100,
+            midFreqHz: 2500,
+            highFreqHz: 10000
+          },
+          compressor: {
+            enabled: true,
+            thresholdDb: compParams.thresholdDb,
+            ratio: compParams.ratio,
+            attackMs: compParams.attackMs,
+            releaseMs: compParams.releaseMs
+          },
+          deEsser: {
+            enabled: true,
+            frequencyHz: deEsserParams.freqHz,
+            thresholdDb: deEsserParams.thresholdDb
+          }
+        }
+      };
+    });
+
+    setTracks(updatedTracks);
+    if (onUpdateAllTracks) await onUpdateAllTracks(updatedTracks);
+
+    systemLogger.logDSPToolEvent(
+      'PresetManager',
+      'Все дорожки',
+      `Применен пресет сведения: [${presetName}]`,
+      {
+        presetKey,
+        presetName,
+        eqLow: eqParams.lowGainDb,
+        eqMid: eqParams.midGainDb,
+        eqHigh: eqParams.highGainDb,
+        compThreshold: compParams.thresholdDb,
+        compRatio: compParams.ratio,
+        duckDepth
+      }
+    );
+    addLog(
+      `✨ Пресет [${presetName}]: Auto-Ducker ${duckDepth} dB, настроены EQ (${eqParams.lowGainDb}/${eqParams.midGainDb}/${eqParams.highGainDb} dB) и компрессор.`
+    );
+  };
+
+  // Регулировка глубины приглушения фонограммы (Auto-Ducker)
+  const handleUpdateDuckerDepth = async (depthDb: number) => {
+    const updatedBus: VocalBusState = {
+      ...currentVocalBus,
+      autoDucker: {
+        ...(currentVocalBus.autoDucker || { enabled: true, attackMs: 20, releaseMs: 250, thresholdDb: -30 }),
+        duckDepthDb: depthDb,
+        enabled: true
+      }
+    };
+    setCurrentVocalBus(updatedBus);
+    if (onVocalBusChange) onVocalBusChange(updatedBus);
+
+    systemLogger.info('AutoDucker', `Изменена глубина сайдчейн-приглушения: ${depthDb} dB (Атака: ${updatedBus.autoDucker?.attackMs}мс, Спад: ${updatedBus.autoDucker?.releaseMs}мс)`);
+  };
 
   // Полная длительность проекта для мини-таймлайна конвейера
   const wizardTotalDurationSec = useMemo(() => {
@@ -166,6 +622,15 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
       (c) => currentTimeSec >= c.startSec - 0.1 && currentTimeSec <= c.endSec + 0.1
     );
   }, [subtitles, currentTimeSec]);
+
+  // Зацикливание активной тестовой фразы для прецизионного A/B сравнения этапов сведения
+  useEffect(() => {
+    if (isLoopingCue && isPlaying && activeCurrentCue) {
+      if (currentTimeSec >= activeCurrentCue.endSec - 0.05) {
+        onSeek(activeCurrentCue.startSec);
+      }
+    }
+  }, [isLoopingCue, isPlaying, currentTimeSec, activeCurrentCue, onSeek]);
 
   const handleSeekRelative = (deltaSec: number) => {
     const target = Math.max(0, Math.min(wizardTotalDurationSec, currentTimeSec + deltaSec));
@@ -262,7 +727,7 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
     setProgressPercent(10);
     setStatusMessage('Шаг 1/4: AI-обработка, очистка шумов и EBU R128 нормализация громкости (-18 dBFS)...');
     addLog('Запуск конвейера сведения заказадрового озвучания...');
-    systemLogger.info('MVPPipeline', 'Запуск сквозного конвейера сведения закадрового озвучания (Шаг 1: AI и нормализация)');
+    systemLogger.logMixingPhase(1, 'AI & EBU R128 Нормализация', 'started', { targetLufsDb: -18.0 });
 
     try {
       // 1. Применение AI и нормализация
@@ -272,7 +737,7 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
         addLog(msg);
       });
       addLog('AI обработка и EBU R128 нормализация всех дорожек успешно завершена.');
-      systemLogger.info('MVPPipeline', 'AI обработка и EBU R128 нормализация всех дорожек успешно завершена.');
+      systemLogger.logMixingPhase(1, 'AI & EBU R128 Нормализация', 'completed', { tracksCount: processedTracks.length });
       setProgressPercent(35);
 
       // 1.5. Акустический анализ (фоновый шум, тихая речь) и адаптивное удаление тишины для каждой дорожки даббера ДО детекции коллизий
@@ -309,11 +774,17 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
       if (detectedCollisions.length > 0) {
         addLog(`⚠️ ВНИМАНИЕ: Обнаружено ${detectedCollisions.length} реальных коллизий / наездов фраз! Конвейер приостановлен.`);
         setStatusMessage(`Обнаружено коллизий: ${detectedCollisions.length} шт. Конвейер приостановлен для проверки.`);
-        systemLogger.warn('MVPPipeline', `Обнаружено ${detectedCollisions.length} коллизий / наездов фраз. Конвейер переведен в режим паузы для правки на таймлайне.`);
+        systemLogger.logMixingPhase(2, 'Детекция коллизий и VAD нарезка', 'auditioning', {
+          collisionsCount: detectedCollisions.length,
+          totalPhrases
+        });
       } else {
         addLog('✅ Коллизий и наездов фраз не обнаружено.');
         setStatusMessage('Коллизий не обнаружено. Переходим к калибровке громкости.');
-        systemLogger.info('MVPPipeline', 'Коллизий и наездов фраз не обнаружено. Переход к калибровке громкости.');
+        systemLogger.logMixingPhase(2, 'Детекция коллизий и VAD нарезка', 'completed', {
+          collisionsCount: 0,
+          totalPhrases
+        });
       }
     } catch (err: any) {
       addLog(`❌ Ошибка на Шаге 1: ${err?.message || err}`);
@@ -399,7 +870,21 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
     setProgressPercent(70);
     setStatusMessage('Шаг 3/4: Калибровка общего баланса громкости с начала проекта и Шина Вокала.');
     addLog('Приостановка конвейера: Ожидание калибровки громкости пользователем.');
-    systemLogger.info('MVPPipeline', 'Шаг 3/4: Калибровка баланса громкости через Шину Вокала и дорожки.');
+    systemLogger.logMixingPhase(3, 'Калибровка баланса громкости и шина вокала', 'started', {
+      targetDeltaDb,
+      vocalBusVolumeDb: currentVocalBus.volumeDb
+    });
+
+    // Если плейхед в самом конце ролика или в нуле, прыгаем к первой фразе для быстрого прослушивания
+    const firstCueTime = subtitles && subtitles.length > 0 ? Math.max(0, subtitles[0].startSec - 0.2) : 0;
+    if (currentTimeSec >= wizardTotalDurationSec - 0.5 || currentTimeSec <= 0.05) {
+      onSeek(firstCueTime);
+    }
+
+    // Синхронизируем все дорожки и проверяем, чтобы звук был включен
+    if (onUpdateAllTracks) {
+      onUpdateAllTracks(tracks);
+    }
   };
 
   // Завершение и запуск мастеринга + FFmpeg муксинга
@@ -408,7 +893,11 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
     setProgressPercent(85);
     setStatusMessage('Шаг 4/4: Анализ громкостей, C++ мастеринг и вшивание аудио в видео...');
     addLog('Старт финального C++ мастеринга и FFmpeg видео-муксинга...');
-    systemLogger.info('MVPPipeline', 'Шаг 4/4: Старт финального C++ мастеринга и FFmpeg видео-муксинга.');
+    systemLogger.logMixingPhase(4, 'Финальный C++ мастеринг и муксинг', 'started', {
+      tracksCount: tracks.length,
+      vocalBusVolumeDb: currentVocalBus.volumeDb,
+      masterVolumeDb: master.volumeDb
+    });
 
     try {
       const targetVocalBus = currentVocalBus || vocalBus;
@@ -439,7 +928,9 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
         setStatusMessage(`Готово! Видео успешно сведено и зашито: ${res.outputFileName}`);
         addLog(`🎉 Сквозной конвейер успешно завершен! Файл ${res.outputFileName} сохранен в project/.`);
       }
-      systemLogger.info('MVPPipeline', `Конвейер успешно завершен! Создан сшитый файл: ${res.outputFileName}`);
+      systemLogger.logMixingPhase(4, 'Финальный C++ мастеринг и муксинг', 'completed', {
+        outputFileName: res.outputFileName
+      });
     } catch (err: any) {
       const isMemErr =
         err?.message?.includes('лимит памяти') ||
@@ -591,6 +1082,529 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
 
         {/* Основной интерактивный контент шага */}
         <div className="p-6 space-y-5 overflow-y-auto flex-1">
+          {/* ПУЛЬТ ПРОСЛУШИВАНИЯ НА ЭТАПАХ СВЕДЕНИЯ & ИНСТРУМЕНТЫ ЭФФЕКТОВ */}
+          <div className="p-4 bg-[#0a0f1d] border border-cyan-500/40 rounded-2xl space-y-3.5 shadow-xl">
+            <div className="flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2">
+                <div className="p-1.5 bg-gradient-to-br from-cyan-500/20 to-purple-500/20 border border-cyan-500/30 rounded-lg text-cyan-400">
+                  <Headphones size={16} />
+                </div>
+                <div>
+                  <h4 className="text-xs font-bold text-slate-100 flex items-center gap-2">
+                    Воспроизведение на Этапах Сведения & A/B Контроль
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-mono">
+                      Текущий этап: {auditionMode.toUpperCase()}
+                    </span>
+                  </h4>
+                  <p className="text-[11px] text-slate-400">
+                    Слушайте звук в любой фазе обработки для непрерывного контроля качества микса
+                  </p>
+                </div>
+              </div>
+
+              {/* Управление воспроизведением и таймкод */}
+              <div className="flex items-center gap-2">
+                <div className="bg-slate-950 px-2.5 py-1 rounded-lg border border-slate-800 font-mono text-xs text-cyan-300 font-bold flex items-center gap-1.5">
+                  <Clock size={12} className="text-cyan-400" />
+                  <span>{formatCompactTime(currentTimeSec)}</span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={onTogglePlay}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md ${
+                    isPlaying
+                      ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-amber-950/40'
+                      : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-950/40'
+                  }`}
+                  title="Воспроизвести / Пауза"
+                >
+                  {isPlaying ? <Pause size={13} /> : <Play size={13} />}
+                  <span>{isPlaying ? 'Пауза' : 'Плей'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleToggleAB}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer border ${
+                    auditionMode === 'dry'
+                      ? 'bg-amber-600 hover:bg-amber-500 text-white border-amber-400 shadow-md shadow-amber-950/40 animate-pulse'
+                      : 'bg-slate-800 hover:bg-slate-700 text-amber-300 border-amber-500/40'
+                  }`}
+                  title="Мгновенное A/B переключение между исходным звуком (Dry) и текущим этапом"
+                >
+                  <Zap size={12} className="text-amber-300" />
+                  <span>A/B: {auditionMode === 'dry' ? 'Возврат к миксу' : 'Сравнить с Dry'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setIsLoopingCue((prev) => !prev)}
+                  className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer border ${
+                    isLoopingCue
+                      ? 'bg-purple-600 text-white border-purple-400'
+                      : 'bg-slate-800 hover:bg-slate-700 text-purple-300 border-purple-500/30'
+                  }`}
+                  title="Зацикливать звучание текущей реплики для детальной подстройки тембра"
+                >
+                  <RotateCcw size={12} className={isLoopingCue ? 'animate-spin' : ''} />
+                  <span>Петля фразы</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Сетка кнопок этапов сведения */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-1.5 pt-1 text-[11px] font-medium">
+              {/* 1. Dry */}
+              <button
+                type="button"
+                onClick={() => handleSetAuditionMode('dry')}
+                className={`py-2 px-2 rounded-xl border flex flex-col items-center justify-center transition-all cursor-pointer ${
+                  auditionMode === 'dry'
+                    ? 'bg-amber-500 text-slate-950 font-bold border-amber-400 shadow-lg shadow-amber-950/50'
+                    : 'bg-slate-900/90 text-slate-300 hover:text-white hover:bg-slate-800 border-slate-800'
+                }`}
+                title="Этап 1: Исходный 'сырой' голос без DSP цепочек (байпас EQ/компрессора)"
+              >
+                <span className="text-[10px] uppercase font-bold opacity-80">Этап 1</span>
+                <span>Dry (Исходный)</span>
+              </button>
+
+              {/* 2. Surgical Clean */}
+              <button
+                type="button"
+                onClick={() => handleSetAuditionMode('surgical')}
+                className={`py-2 px-2 rounded-xl border flex flex-col items-center justify-center transition-all cursor-pointer ${
+                  auditionMode === 'surgical'
+                    ? 'bg-teal-500 text-slate-950 font-bold border-teal-400 shadow-lg shadow-teal-950/50'
+                    : 'bg-slate-900/90 text-slate-300 hover:text-white hover:bg-slate-800 border-slate-800'
+                }`}
+                title="Этап 2: Голос после AI-денойза, дереверба и удаления пауз/тишины"
+              >
+                <span className="text-[10px] uppercase font-bold opacity-80">Этап 2</span>
+                <span>Чистка (AI+VAD)</span>
+              </button>
+
+              {/* 3. Tonal Shaped */}
+              <button
+                type="button"
+                onClick={() => handleSetAuditionMode('tonal')}
+                className={`py-2 px-2 rounded-xl border flex flex-col items-center justify-center transition-all cursor-pointer ${
+                  auditionMode === 'tonal'
+                    ? 'bg-blue-500 text-slate-950 font-bold border-blue-400 shadow-lg shadow-blue-950/50'
+                    : 'bg-slate-900/90 text-slate-300 hover:text-white hover:bg-slate-800 border-slate-800'
+                }`}
+                title="Этап 3: Голос с тональным эквалайзером и подавлением сибилянтов De-Esser"
+              >
+                <span className="text-[10px] uppercase font-bold opacity-80">Этап 3</span>
+                <span>Tonal (EQ+DeEss)</span>
+              </button>
+
+              {/* 4. Ducked Mix */}
+              <button
+                type="button"
+                onClick={() => handleSetAuditionMode('ducked')}
+                className={`py-2 px-2 rounded-xl border flex flex-col items-center justify-center transition-all cursor-pointer ${
+                  auditionMode === 'ducked'
+                    ? 'bg-purple-500 text-white font-bold border-purple-400 shadow-lg shadow-purple-950/50'
+                    : 'bg-slate-900/90 text-slate-300 hover:text-white hover:bg-slate-800 border-slate-800'
+                }`}
+                title="Этап 4: Компрессия речи + сайдчейн-приглушение оригинальной музыки (Auto-Ducker)"
+              >
+                <span className="text-[10px] uppercase font-bold opacity-80">Этап 4</span>
+                <span>Сайдчейн + Comp</span>
+              </button>
+
+              {/* 5. Master Output */}
+              <button
+                type="button"
+                onClick={() => handleSetAuditionMode('master')}
+                className={`py-2 px-2 rounded-xl border flex flex-col items-center justify-center transition-all cursor-pointer ${
+                  auditionMode === 'master'
+                    ? 'bg-emerald-500 text-slate-950 font-bold border-emerald-400 shadow-lg shadow-emerald-950/50'
+                    : 'bg-slate-900/90 text-slate-300 hover:text-white hover:bg-slate-800 border-slate-800'
+                }`}
+                title="Этап 5: Финальный EBU R128 микс с калибровкой громкости и мастер-лимитером -0.1 dBFS"
+              >
+                <span className="text-[10px] uppercase font-bold opacity-80">Этап 5</span>
+                <span>Мастер EBU R128</span>
+              </button>
+
+              {/* 6. Original Solo */}
+              <button
+                type="button"
+                onClick={() => handleSetAuditionMode('original')}
+                className={`py-2 px-2 rounded-xl border flex flex-col items-center justify-center transition-all cursor-pointer ${
+                  auditionMode === 'original'
+                    ? 'bg-sky-500 text-slate-950 font-bold border-sky-400 shadow-lg shadow-sky-950/50'
+                    : 'bg-slate-900/90 text-slate-300 hover:text-white hover:bg-slate-800 border-slate-800'
+                }`}
+                title="Только оригинальное видео/фонограмма (дубляж заглушен)"
+              >
+                <span className="text-[10px] uppercase font-bold opacity-80">Видео</span>
+                <span>Оригинал соло</span>
+              </button>
+
+              {/* 7. Mix Full */}
+              <button
+                type="button"
+                onClick={() => handleSetAuditionMode('mix')}
+                className={`py-2 px-2 rounded-xl border flex flex-col items-center justify-center transition-all cursor-pointer ${
+                  auditionMode === 'mix'
+                    ? 'bg-cyan-500 text-slate-950 font-bold border-cyan-400 shadow-lg shadow-cyan-950/50'
+                    : 'bg-slate-900/90 text-slate-300 hover:text-white hover:bg-slate-800 border-slate-800'
+                }`}
+                title="Полный сбалансированный микс со всеми эффектами"
+              >
+                <span className="text-[10px] uppercase font-bold opacity-80">Итог</span>
+                <span>Полный микс</span>
+              </button>
+            </div>
+
+            {/* Дополнительные переключатели инструментов и панели телеметрии */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800/80">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowDspInspector((prev) => !prev)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer border ${
+                    showDspInspector
+                      ? 'bg-cyan-950/80 text-cyan-300 border-cyan-600'
+                      : 'bg-slate-900 text-slate-300 hover:text-white border-slate-800'
+                  }`}
+                >
+                  <SlidersHorizontal size={13} className="text-cyan-400" />
+                  <span>Инструменты эффектов & DSP пульт</span>
+                  {showDspInspector ? <ChevronRight size={13} className="rotate-90" /> : <ChevronRight size={13} />}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowLiveLogs((prev) => !prev)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer border ${
+                    showLiveLogs
+                      ? 'bg-purple-950/80 text-purple-300 border-purple-600'
+                      : 'bg-slate-900 text-slate-300 hover:text-white border-slate-800'
+                  }`}
+                >
+                  <FileText size={13} className="text-purple-400" />
+                  <span>Логи и телеметрия конвейера ({logs.length})</span>
+                </button>
+              </div>
+
+              {/* Отображение параметров текущего пресета */}
+              <div className="flex items-center gap-1.5 text-[11px] font-mono text-slate-400">
+                <span className="text-slate-500">Пресет:</span>
+                <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-cyan-300 font-bold">
+                  {activePreset === 'cinema'
+                    ? '🎬 Кинотеатр'
+                    : activePreset === 'anime'
+                    ? '⚡ Аниме'
+                    : activePreset === 'podcast'
+                    ? '🎙️ Подкаст'
+                    : activePreset === 'hifi'
+                    ? '💎 Hi-Fi'
+                    : '📺 Сбалансированный'}
+                </span>
+              </div>
+            </div>
+
+            {/* РАСКРЫВАЮЩАЯСЯ ПАНЕЛЬ ИНСТРУМЕНТОВ ЭФФЕКТОВ (DSP MATRIX) */}
+            {showDspInspector && (
+              <div className="pt-3 border-t border-slate-800/80 space-y-3.5 animate-fadeIn">
+                {/* Выбор пресетов */}
+                <div className="flex flex-wrap items-center justify-between gap-2 bg-[#060a14] p-2.5 rounded-xl border border-slate-800/80">
+                  <span className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                    <Sparkles size={14} className="text-amber-300" />
+                    Быстрые студийные пресеты сведения:
+                  </span>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {[
+                      { key: 'balanced', label: '📺 Сбалансированный' },
+                      { key: 'cinema', label: '🎬 Кинотеатр / Теплый' },
+                      { key: 'anime', label: '⚡ Аниме / Яркий' },
+                      { key: 'podcast', label: '🎙️ Подкаст / Плотный' },
+                      { key: 'hifi', label: '💎 Hi-Fi Broadcast' }
+                    ].map((p) => (
+                      <button
+                        key={p.key}
+                        type="button"
+                        onClick={() => handleApplyCharacterPreset(p.key)}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                          activePreset === p.key
+                            ? 'bg-gradient-to-r from-cyan-600 to-purple-600 text-white shadow-md'
+                            : 'bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800'
+                        }`}
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Сетка регулировок отдельных инструментов */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                  {/* Инструмент 1: 4-Полосный Эквалайзер (Parametric EQ) */}
+                  <div className="p-3 bg-slate-950/80 border border-slate-800/90 rounded-xl space-y-2">
+                    <div className="flex items-center justify-between font-bold text-slate-200">
+                      <span className="flex items-center gap-1.5 text-blue-400">
+                        <Activity size={13} /> 4-Band EQ Pro
+                      </span>
+                      <label className="flex items-center gap-1 text-[10px] text-slate-400 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={toolParams.eqEnabled}
+                          onChange={(e) => handleUpdateDSPParam('eqEnabled', e.target.checked)}
+                          className="accent-blue-500 rounded"
+                        />
+                        <span>{toolParams.eqEnabled ? 'Активен' : 'Байпас'}</span>
+                      </label>
+                    </div>
+
+                    <div className="space-y-1.5 font-mono text-[10px]">
+                      <div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Низ (100Hz):</span>
+                          <span className="text-blue-300 font-bold">{toolParams.eqLowGain > 0 ? `+${toolParams.eqLowGain}` : toolParams.eqLowGain} dB</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="-10"
+                          max="10"
+                          step="0.5"
+                          value={toolParams.eqLowGain}
+                          onChange={(e) => handleUpdateDSPParam('eqLowGain', parseFloat(e.target.value))}
+                          className="w-full accent-blue-500 cursor-pointer"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Середина (2.5kHz):</span>
+                          <span className="text-blue-300 font-bold">{toolParams.eqMidGain > 0 ? `+${toolParams.eqMidGain}` : toolParams.eqMidGain} dB</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="-10"
+                          max="10"
+                          step="0.5"
+                          value={toolParams.eqMidGain}
+                          onChange={(e) => handleUpdateDSPParam('eqMidGain', parseFloat(e.target.value))}
+                          className="w-full accent-blue-500 cursor-pointer"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Воздух (10kHz):</span>
+                          <span className="text-blue-300 font-bold">{toolParams.eqHighGain > 0 ? `+${toolParams.eqHighGain}` : toolParams.eqHighGain} dB</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="-10"
+                          max="10"
+                          step="0.5"
+                          value={toolParams.eqHighGain}
+                          onChange={(e) => handleUpdateDSPParam('eqHighGain', parseFloat(e.target.value))}
+                          className="w-full accent-blue-500 cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Инструмент 2: Студийный компрессор (Studio Compressor) */}
+                  <div className="p-3 bg-slate-950/80 border border-slate-800/90 rounded-xl space-y-2">
+                    <div className="flex items-center justify-between font-bold text-slate-200">
+                      <span className="flex items-center gap-1.5 text-purple-400">
+                        <Gauge size={13} /> Studio Compressor
+                      </span>
+                      <label className="flex items-center gap-1 text-[10px] text-slate-400 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={toolParams.compEnabled}
+                          onChange={(e) => handleUpdateDSPParam('compEnabled', e.target.checked)}
+                          className="accent-purple-500 rounded"
+                        />
+                        <span>{toolParams.compEnabled ? 'Активен' : 'Байпас'}</span>
+                      </label>
+                    </div>
+
+                    <div className="space-y-1.5 font-mono text-[10px]">
+                      <div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Порог (Threshold):</span>
+                          <span className="text-purple-300 font-bold">{toolParams.compThreshold} dB</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="-36"
+                          max="-6"
+                          step="1"
+                          value={toolParams.compThreshold}
+                          onChange={(e) => handleUpdateDSPParam('compThreshold', parseFloat(e.target.value))}
+                          className="w-full accent-purple-500 cursor-pointer"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Ratio:</span>
+                          <span className="text-purple-300 font-bold">{toolParams.compRatio}:1</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="1.5"
+                          max="6.0"
+                          step="0.1"
+                          value={toolParams.compRatio}
+                          onChange={(e) => handleUpdateDSPParam('compRatio', parseFloat(e.target.value))}
+                          className="w-full accent-purple-500 cursor-pointer"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Атака / Спад:</span>
+                          <span className="text-purple-300 font-bold">{toolParams.compAttackMs}ms / {toolParams.compReleaseMs}ms</span>
+                        </div>
+                        <div className="h-2 rounded bg-slate-900 border border-slate-800 overflow-hidden mt-1">
+                          <div
+                            className="h-full bg-purple-500 transition-all duration-100"
+                            style={{ width: `${Math.min(100, Math.max(10, Math.abs(toolParams.compThreshold) * 2.5))}%` }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Инструмент 3: Деэссер и Сайдчейн Auto-Ducker */}
+                  <div className="p-3 bg-slate-950/80 border border-slate-800/90 rounded-xl space-y-2">
+                    <div className="flex items-center justify-between font-bold text-slate-200">
+                      <span className="flex items-center gap-1.5 text-cyan-400">
+                        <Zap size={13} /> De-Esser & Auto-Ducker
+                      </span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 font-mono">
+                        Sidechain: {toolParams.duckerDepth} dB
+                      </span>
+                    </div>
+
+                    <div className="space-y-1.5 font-mono text-[10px]">
+                      <div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Деэссер (Частота свистящих):</span>
+                          <span className="text-cyan-300 font-bold">{toolParams.deEsserFreq} Hz</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="4500"
+                          max="8500"
+                          step="100"
+                          value={toolParams.deEsserFreq}
+                          onChange={(e) => handleUpdateDSPParam('deEsserFreq', parseFloat(e.target.value))}
+                          className="w-full accent-cyan-500 cursor-pointer"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Глубина приглушения музыки:</span>
+                          <span className="text-rose-400 font-bold">{toolParams.duckerDepth} dB</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="-18"
+                          max="-3"
+                          step="0.5"
+                          value={toolParams.duckerDepth}
+                          onChange={(e) => handleUpdateDSPParam('duckerDepth', parseFloat(e.target.value))}
+                          className="w-full accent-rose-500 cursor-pointer"
+                        />
+                      </div>
+                      <div className="pt-1 flex items-center justify-between text-slate-400 text-[10px]">
+                        <span>Защита от клиппинга:</span>
+                        <span className="text-emerald-400 font-bold flex items-center gap-1">
+                          <ShieldCheck size={11} /> True Peak -0.1 dBFS
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* РАСКРЫВАЮЩАЯСЯ ПАНЕЛЬ ДЕТАЛЬНОГО ЛОГИРОВАНИЯ И ТЕЛЕМЕТРИИ */}
+            {showLiveLogs && (
+              <div className="pt-3 border-t border-slate-800/80 space-y-2.5 animate-fadeIn">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-1 text-[11px] font-mono">
+                    <span className="text-slate-400 mr-1">Фильтр логов:</span>
+                    {(['all', 'dsp', 'phases', 'audition', 'errors'] as const).map((cat) => (
+                      <button
+                        key={cat}
+                        type="button"
+                        onClick={() => setLogCategoryFilter(cat)}
+                        className={`px-2 py-0.5 rounded text-[10px] transition-all cursor-pointer ${
+                          logCategoryFilter === cat
+                            ? 'bg-purple-600 text-white font-bold'
+                            : 'bg-slate-900 hover:bg-slate-800 text-slate-400'
+                        }`}
+                      >
+                        {cat === 'all'
+                          ? 'Все'
+                          : cat === 'dsp'
+                          ? '🎛️ DSP'
+                          : cat === 'phases'
+                          ? '🚀 Фазы'
+                          : cat === 'audition'
+                          ? '🎧 Этапы'
+                          : '❌ Ошибки'}
+                      </button>
+                    ))}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(logs.join('\n'));
+                      alert('Логи конвейера скопированы в буфер обмена!');
+                    }}
+                    className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 rounded-lg text-[10px] font-mono flex items-center gap-1 cursor-pointer"
+                  >
+                    <Download size={11} /> Скопировать логи
+                  </button>
+                </div>
+
+                <div className="p-3 bg-[#040711] border border-slate-800/90 rounded-xl font-mono text-[10px] text-slate-300 space-y-1.5 max-h-48 overflow-y-auto select-text">
+                  {logs.length === 0 ? (
+                    <div className="text-slate-500 py-4 text-center">Логи конвейера формируются...</div>
+                  ) : (
+                    logs
+                      .filter((l) => {
+                        if (logCategoryFilter === 'dsp') return l.includes('DSP') || l.includes('EQ') || l.includes('компрессор') || l.includes('Auto-Ducker');
+                        if (logCategoryFilter === 'phases') return l.includes('Шаг') || l.includes('Фаза') || l.includes('конвейер') || l.includes('Мастеринг');
+                        if (logCategoryFilter === 'audition') return l.includes('Этап') || l.includes('прослушивания') || l.includes('A/B');
+                        if (logCategoryFilter === 'errors') return l.includes('❌') || l.includes('⚠️') || l.includes('Ошибка') || l.includes('коллизий');
+                        return true;
+                      })
+                      .map((logStr, i) => (
+                        <div
+                          key={`wiz-log-${i}`}
+                          className={`p-1 rounded ${
+                            logStr.includes('❌')
+                              ? 'bg-rose-950/40 text-rose-300'
+                              : logStr.includes('⚠️')
+                              ? 'bg-amber-950/40 text-amber-300'
+                              : logStr.includes('🎧')
+                              ? 'bg-cyan-950/30 text-cyan-300'
+                              : logStr.includes('🎛️')
+                              ? 'bg-purple-950/30 text-purple-300'
+                              : 'text-slate-300'
+                          }`}
+                        >
+                          {logStr}
+                        </div>
+                      ))
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Статус-сообщение */}
           <div className="p-3.5 bg-slate-900/80 border border-slate-800 rounded-2xl flex items-center gap-3">
             {stage === 'step1_ai_and_norm' || stage === 'step4_master_and_mux' ? (
@@ -1156,16 +2170,83 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
               </div>
 
               {/* Громкости отдельных дорожек */}
-              <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-                <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-                  Громкость индивидуальных дорожек:
-                </span>
+              <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                    Громкость и баланс индивидуальных дорожек:
+                  </span>
+                  {toSafeArray<TrackState>(tracks).some((t) => t.mute || t.solo) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const unmuted = toSafeArray<TrackState>(tracks).map((t) => ({ ...t, mute: false, solo: false }));
+                        setTracks(unmuted);
+                        if (onUpdateAllTracks) onUpdateAllTracks(unmuted);
+                      }}
+                      className="text-[10px] text-amber-300 hover:text-amber-200 underline cursor-pointer"
+                    >
+                      Сбросить Solo/Mute (Включить всё)
+                    </button>
+                  )}
+                </div>
+
                 {toSafeArray<TrackState>(tracks).map((track) => (
                   <div
                     key={track.id}
-                    className="p-3 bg-slate-900 border border-slate-800 rounded-xl flex items-center justify-between gap-3 text-xs"
+                    className={`p-3 bg-slate-900 border rounded-xl flex items-center justify-between gap-3 text-xs transition-colors ${
+                      track.mute
+                        ? 'opacity-60 border-slate-800'
+                        : track.solo
+                        ? 'border-amber-500/60 bg-amber-950/20'
+                        : 'border-slate-800'
+                    }`}
                   >
-                    <span className="font-medium text-slate-200 truncate w-36">{track.name}</span>
+                    <div className="flex items-center gap-1.5 w-36 shrink-0">
+                      {/* Кнопка Mute */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const updated = toSafeArray<TrackState>(tracks).map((t) =>
+                            t.id === track.id ? { ...t, mute: !t.mute } : t
+                          );
+                          setTracks(updated);
+                          if (onUpdateAllTracks) onUpdateAllTracks(updated);
+                        }}
+                        className={`w-5 h-5 rounded flex items-center justify-center font-bold text-[10px] transition-colors cursor-pointer ${
+                          track.mute
+                            ? 'bg-rose-600 text-white font-bold'
+                            : 'bg-slate-800 text-slate-400 hover:text-white'
+                        }`}
+                        title={track.mute ? 'Включить звук дорожки (Unmute)' : 'Заглушить дорожку (Mute)'}
+                      >
+                        M
+                      </button>
+
+                      {/* Кнопка Solo */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const updated = toSafeArray<TrackState>(tracks).map((t) =>
+                            t.id === track.id ? { ...t, solo: !t.solo } : t
+                          );
+                          setTracks(updated);
+                          if (onUpdateAllTracks) onUpdateAllTracks(updated);
+                        }}
+                        className={`w-5 h-5 rounded flex items-center justify-center font-bold text-[10px] transition-colors cursor-pointer ${
+                          track.solo
+                            ? 'bg-amber-500 text-slate-950 font-bold'
+                            : 'bg-slate-800 text-slate-400 hover:text-white'
+                        }`}
+                        title={track.solo ? 'Выключить Solo' : 'Соло дорожки (Solo)'}
+                      >
+                        S
+                      </button>
+
+                      <span className="font-medium text-slate-200 truncate" title={track.name}>
+                        {track.name}
+                      </span>
+                    </div>
+
                     <input
                       type="range"
                       min="-30"

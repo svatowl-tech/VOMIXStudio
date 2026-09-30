@@ -1993,9 +1993,9 @@ const MinimalStudioComponent: React.FC = () => {
               newBuf,
               track.id,
               clip.id,
-              clip.offsetSamples || 0,
+              (clip.offsetSamples || 0) / 48000,
               1.0, // Сбрасываем коэффициент усиления клипа в 1.0, так как гейн уже применен в буфер
-              clip.trimStartSamples || 0,
+              clip.pan || 0.0,
               true
             );
           }
@@ -2422,6 +2422,17 @@ const MinimalStudioComponent: React.FC = () => {
                 </>
               )}
             </div>
+
+            {/* Кнопка запуска интерактивного конвейера сведения и фаз */}
+            <button
+              id="btn-open-mixing-wizard"
+              onClick={handleExportAndMuxVideo}
+              className="px-4 py-2 bg-gradient-to-r from-purple-600 via-indigo-600 to-cyan-600 hover:from-purple-500 hover:to-cyan-500 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-2 shadow-lg shadow-purple-950/40 cursor-pointer"
+              title="Открыть пошаговый конвейер сведения, фазы обработки, инструменты эффектов и прослушивание этапов"
+            >
+              <Sparkles size={14} className="text-amber-300" />
+              <span>Конвейер & Фазы Сведения</span>
+            </button>
 
             {/* Кнопка универсального импорта медиа */}
             <button

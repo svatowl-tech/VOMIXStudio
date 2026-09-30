@@ -367,11 +367,6 @@ export class LoudnessAutoAligner {
   } {
     const comparison = this.compareProjectLoudness(tracks, vocalBus, targetDeltaDb);
 
-    systemLogger.info(
-      'LoudnessAutoAligner',
-      `Авто-калибровка громкости: Оригинал=${comparison.originalLoudness.speechRmsDb} dBFS, Дубляж=${comparison.dubbedLoudness.speechRmsDb} dBFS, Разница=${comparison.currentDeltaDb} dB $\\rightarrow$ Цель=+${comparison.targetDeltaDb} dB. Поправка=+${comparison.requiredGainAdjustmentDb} dB`
-    );
-
     // 1. Корректировка шины вокала
     const updatedVocalBus: VocalBusState = {
       ...vocalBus,
@@ -384,6 +379,21 @@ export class LoudnessAutoAligner {
       limiterEnabled: true,
       limiterCeilingDb: LoudnessAutoAligner.SAFETY_CEILING_DB
     };
+
+    systemLogger.info(
+      'LoudnessAutoAligner',
+      `Авто-калибровка громкости: Оригинал=${comparison.originalLoudness.speechRmsDb} dBFS, Дубляж=${comparison.dubbedLoudness.speechRmsDb} dBFS, Разница=${comparison.currentDeltaDb} dB $\\rightarrow$ Цель=+${comparison.targetDeltaDb} dB. Поправка=+${comparison.requiredGainAdjustmentDb} dB`
+    );
+
+    systemLogger.info(
+      'AutoDucker',
+      `Сайдчейн Auto-Ducker: Вокальная шина управляет приглушением фона. Глубина ducking: ${updatedVocalBus.dsp?.autoDucker?.duckDepthDb ?? -8} dB, атака: ${updatedVocalBus.dsp?.autoDucker?.attackMs ?? 20} мс, спад: ${updatedVocalBus.dsp?.autoDucker?.releaseMs ?? 250} мс`
+    );
+
+    systemLogger.info(
+      'DSP',
+      `Мастер-лимитер активирован: потолок ${updatedMaster.limiterCeilingDb} dBFS, lookahead 5мс. True Peak защита включена.`
+    );
 
     return {
       updatedTracks: [...tracks],

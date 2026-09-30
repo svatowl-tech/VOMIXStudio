@@ -1678,6 +1678,47 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
             // Если t.clips не передан, сохраняем ранее загруженные клипы
             for (const [cId, cData] of prevTrack.clips.entries()) {
               track.clips.set(cId, cData);
+
+              if (this.isWasmReady && this.wasmModule && this.mixerPtr) {
+                const getTrackFn = this.wasmModule._getTrack || this.wasmModule.getTrack;
+                const addTrackFn = this.wasmModule._addTrack || this.wasmModule.addTrack;
+                if (getTrackFn && addTrackFn) {
+                  try {
+                    if (!getTrackFn(this.mixerPtr, trackId)) {
+                      addTrackFn(this.mixerPtr, trackId, 0, isOriginal);
+                    }
+                  } catch (_) {}
+                }
+
+                let bufferPtr = this.clipWasmPtrs.get(cId);
+                const pcmBuffer = cData.pcm || this.clipBufferCache.get(cId);
+                if (!bufferPtr && pcmBuffer && pcmBuffer.length > 0) {
+                  bufferPtr = this.allocateWasmBuffer(pcmBuffer);
+                  if (bufferPtr) {
+                    this.clipWasmPtrs.set(cId, bufferPtr);
+                  }
+                }
+
+                if (bufferPtr && pcmBuffer) {
+                  const addClipFn = this.wasmModule._addClipToTrack || this.wasmModule.addClipToTrack;
+                  if (addClipFn) {
+                    addClipFn(
+                      this.mixerPtr,
+                      trackId,
+                      cId,
+                      bufferPtr,
+                      pcmBuffer.length,
+                      cData.offsetSamples || 0,
+                      cData.lengthSamples || 0,
+                      typeof cData.gain === 'number' ? cData.gain : 1.0,
+                      typeof cData.pan === 'number' ? cData.pan : 0.0,
+                      cData.fadeInSamples || 0,
+                      cData.fadeOutSamples || 0,
+                      cData.isStereo !== false
+                    );
+                  }
+                }
+              }
             }
           }
 

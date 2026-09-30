@@ -155,6 +155,7 @@ export interface TrackState {
   dePlosive: DePlosiveParams;
   noiseGate: NoiseGateParams;
   deEsser: DeEsserParams;
+  dsp?: TrackDSP | any;
   vstPlugins?: VSTPluginInstance[];
   insertEffects?: TrackInsertEffect[];
   peakL: number;
@@ -192,6 +193,7 @@ export interface VocalBusState {
   peakL: number;
   peakR: number;
   dsp: VocalBusDSP;
+  autoDucker?: any;
   vstPlugins?: VSTPluginInstance[];
   insertEffects?: TrackInsertEffect[];
 }

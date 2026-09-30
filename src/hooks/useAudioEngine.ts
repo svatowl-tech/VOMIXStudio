@@ -710,12 +710,13 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
     if (globalAudioCtx && globalAudioCtx.state === 'suspended') {
       await globalAudioCtx.resume();
     }
+    const startTime = typeof globalCurrentTimeSec === 'number' ? globalCurrentTimeSec : currentTimeSec;
     playheadStartPerfRef.current = performance.now();
-    playheadStartTimeSecRef.current = currentTimeSec;
-    lastReportedTimeSecRef.current = currentTimeSec;
-    currentTimeSecRef.current = currentTimeSec;
+    playheadStartTimeSecRef.current = startTime;
+    lastReportedTimeSecRef.current = startTime;
+    currentTimeSecRef.current = startTime;
     if (globalWorkletNode) {
-      globalWorkletNode.port.postMessage({ type: 'SEEK', timeSec: currentTimeSec });
+      globalWorkletNode.port.postMessage({ type: 'SEEK', timeSec: startTime });
       globalWorkletNode.port.postMessage({ type: 'PLAY' });
     }
     globalIsPlaying = true;
@@ -902,7 +903,10 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
         workletNodeRef.current.port.addEventListener('message', handleAck);
         workletNodeRef.current.port.start();
 
-        const offsetSamples = typeof offsetSec === 'number' ? Math.round(offsetSec * 48000) : 0;
+        // Если offsetSec передан ошибочно в сэмплах (> 7200 сэмплов, целое число), конвертируем корректно
+        const offsetSamples = typeof offsetSec === 'number'
+          ? (offsetSec > 7200 && offsetSec % 1 === 0 ? Math.round(offsetSec) : Math.round(offsetSec * 48000))
+          : 0;
         const lengthSamples = isStereo ? Math.floor(pcmFloat32.length / 2) : pcmFloat32.length;
 
         try {
@@ -911,7 +915,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
             trackId,
             clipId,
             audioData: pcmFloat32,
-            offsetSec,
+            offsetSec: offsetSamples / 48000,
             offsetSamples,
             lengthSamples,
             gain,
@@ -975,6 +979,10 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
 
       const batchPayload = safeClips.map((c) => {
         const isStereo = c.buffer ? c.buffer.length >= (c.lengthSamples || 0) * 2 : true;
+        let bufToSend = c.buffer;
+        if ((!bufToSend || bufToSend.byteLength === 0) && c.untrimmedBuffer && c.untrimmedBuffer.byteLength > 0) {
+          bufToSend = c.untrimmedBuffer;
+        }
         return {
           clipId: c.id,
           id: c.id,
@@ -986,8 +994,9 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
           fadeInSamples: c.fadeInSamples || 0,
           fadeOutSamples: c.fadeOutSamples || 0,
           isStereo,
+          buffer: bufToSend,
           parentClipId: c.parentClipId || (c as any).originalClipId || (c as any).sourceClipId,
-          bufferOffsetSamples: c.bufferOffsetSamples || (c as any).segOffsetInClip || 0
+          bufferOffsetSamples: c.bufferOffsetSamples || (c as any).segOffsetInClip || c.trimStartSamples || 0
         };
       });
 
@@ -1079,7 +1088,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
               fadeOutSamples: c.fadeOutSamples || 0,
               isStereo: c.buffer ? c.buffer.length >= (c.lengthSamples || 0) * 2 : (c as any).isStereo !== undefined ? !!(c as any).isStereo : true,
               parentClipId: c.parentClipId || (c as any).originalClipId || (c as any).sourceClipId,
-              bufferOffsetSamples: c.bufferOffsetSamples || (c as any).segOffsetInClip || 0
+              bufferOffsetSamples: c.bufferOffsetSamples || (c as any).segOffsetInClip || c.trimStartSamples || 0
             }))
           }))
         });
