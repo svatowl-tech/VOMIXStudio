@@ -128,7 +128,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          STATIC_VCRUNTIME: ""
+          STATIC_VCRUNTIME: "false"
 
       # =========================================================================
       # 8. ПУБЛИКАЦИЯ В GITHUB RELEASES
