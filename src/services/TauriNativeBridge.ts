@@ -152,15 +152,35 @@ export class TauriNativeBridge {
   }
 
   /**
-   * Прямое сохранение бинарных данных (WAV, MP4, JSON) в файловую систему
+   * Прямое сохранение бинарных данных (WAV, MP4, JSON) в файловую систему без лимитов памяти
    */
   public static async saveFileDirect(filePath: string, data: ArrayBuffer | Uint8Array): Promise<string> {
     if (!this.isTauriEnvironment()) {
       throw new Error('Tauri API недоступно в веб-браузере.');
     }
 
-    const bytes = data instanceof Uint8Array ? Array.from(data) : Array.from(new Uint8Array(data));
-    return await invoke<string>('save_file_direct', { filePath, bytes });
+    const u8 = data instanceof Uint8Array ? data : new Uint8Array(data);
+
+    // 1. Попытка через @tauri-apps/plugin-fs writeFile (нативный бинарный IPC без лимитов памяти)
+    try {
+      if (tauriFs && typeof (tauriFs as any).writeFile === 'function') {
+        await (tauriFs as any).writeFile(filePath, u8);
+        return filePath;
+      }
+    } catch (fsErr) {
+      console.warn('[TauriNativeBridge] tauriFs.writeFile fallback to invoke:', fsErr);
+    }
+
+    // 2. Попытка через invoke с прямым TypedArray
+    try {
+      return await invoke<string>('save_file_direct', { filePath, bytes: u8 });
+    } catch {
+      // 3. Чанковая запись через invoke только при крайней необходимости
+      if (u8.length <= 15 * 1024 * 1024) {
+        return await invoke<string>('save_file_direct', { filePath, bytes: Array.from(u8) });
+      }
+      throw new Error(`Не удалось записать файл ${filePath}: размер ${Math.round(u8.length / (1024 * 1024))} МБ`);
+    }
   }
 
   /**
@@ -171,8 +191,19 @@ export class TauriNativeBridge {
       throw new Error('Tauri API недоступно в веб-браузере.');
     }
 
-    const bytes = await invoke<number[]>('read_file_binary', { filePath });
-    return new Uint8Array(bytes);
+    // 1. Попытка через @tauri-apps/plugin-fs readFile
+    try {
+      if (tauriFs && typeof (tauriFs as any).readFile === 'function') {
+        const data = await (tauriFs as any).readFile(filePath);
+        return data instanceof Uint8Array ? data : new Uint8Array(data);
+      }
+    } catch (fsErr) {
+      console.warn('[TauriNativeBridge] tauriFs.readFile fallback to invoke:', fsErr);
+    }
+
+    // 2. Fallback через invoke
+    const bytes = await invoke<number[] | Uint8Array>('read_file_binary', { filePath });
+    return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   }
 
   /**
