@@ -7,13 +7,17 @@
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:3000",
     "beforeBuildCommand": "npm run build",
-    "frontendDist": "../dist"
+    "frontendDist": "../dist",
+    "windows": {
+      "staticVCRuntime": true
+    }
   },
   "app": {
     "windows": [
       {
         "label": "main",
         "title": "VOMIXStudio - C++ Audio Dubbing Workstation",
+        "url": "index.html",
         "width": 1280,
         "height": 800,
         "minWidth": 960,
@@ -22,6 +26,7 @@
         "fullscreen": false,
         "center": true,
         "focus": true,
+        "visible": true,
         "decorations": true,
         "transparent": false
       }
@@ -50,6 +55,11 @@
     "longDescription": "High-performance Desktop Audio Workstation powered by C++ WASM SIMD, React 19, and Native Windows WebView2.",
     "resources": [],
     "windows": {
+      "bundleVCRuntime": true,
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": false
+      },
       "certificateThumbprint": null,
       "digestAlgorithm": "sha256",
       "timestampUrl": "",

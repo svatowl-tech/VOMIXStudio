@@ -1077,6 +1077,7 @@ export const useAudioEngine = (): UseAudioEngineReturn => {
               pan: typeof c.pan === 'number' ? c.pan : 0.0,
               fadeInSamples: c.fadeInSamples || 0,
               fadeOutSamples: c.fadeOutSamples || 0,
+              buffer: c.buffer instanceof Float32Array && c.buffer.length > 0 ? c.buffer : undefined,
               isStereo: c.buffer ? c.buffer.length >= (c.lengthSamples || 0) * 2 : true,
               parentClipId: c.parentClipId || (c as any).originalClipId || (c as any).sourceClipId,
               bufferOffsetSamples: c.bufferOffsetSamples || (c as any).segOffsetInClip || 0

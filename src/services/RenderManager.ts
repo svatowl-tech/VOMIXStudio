@@ -418,19 +418,34 @@ export class RenderManager {
       this.addLog(`Запуск FFmpeg: замена аудиопотока на сведенный мастер-микс C++ DSP (1-в-1 с превью) в [${tempOutputFile}]...`);
 
       // СТРОГОЕ СООТВЕТСТВИЕ 1-В-1:
-      // Все дорожки (оригинал с точным фейдером volumeDb/pan/mute, голоса дублеров, VocalBus и Auto-Ducking)
-      // уже сведены нативно внутри C++ DSP ядра в файл audio_mix.wav.
-      // Фильтр amix полностью исключен, аттенюация устранена.
-      const ffmpegArgs: string[] = [
-        '-i', 'input_video.mp4',
-        '-i', 'audio_mix.wav',
-        '-map', '0:v:0',
-        '-map', '1:a:0',
-        ...videoArgs,
-        ...audioArgs,
-        '-metadata:s:a:0', `title=${track1Title}`,
-        '-shortest'
-      ];
+      // Если дорожка оригинала была на таймлайне, она уже сведена с нужным фейдером в audio_mix.wav.
+      // Если же оригинал не был извлечен на таймлайн, адаптивно подмешиваем исходный аудиопоток видео 0:a:0.
+      let ffmpegArgs: string[];
+      if (hasTimelineOriginal) {
+        ffmpegArgs = [
+          '-i', 'input_video.mp4',
+          '-i', 'audio_mix.wav',
+          '-map', '0:v:0',
+          '-map', '1:a:0',
+          ...videoArgs,
+          ...audioArgs,
+          '-metadata:s:a:0', `title=${track1Title}`,
+          '-shortest'
+        ];
+      } else {
+        this.addLog('Звук оригинала видео подмешивается напрямую через FFmpeg amix к дорожкам дубляжа...');
+        ffmpegArgs = [
+          '-i', 'input_video.mp4',
+          '-i', 'audio_mix.wav',
+          '-filter_complex', '[0:a:0]volume=1.0[a0];[1:a:0]volume=1.0[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[aout]',
+          '-map', '0:v:0',
+          '-map', '[aout]',
+          ...videoArgs,
+          ...audioArgs,
+          '-metadata:s:a:0', `title=${track1Title}`,
+          '-shortest'
+        ];
+      }
 
       if (params.fastStart) {
         ffmpegArgs.push('-movflags', '+faststart');

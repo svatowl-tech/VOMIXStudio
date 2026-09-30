@@ -1,5 +1,6 @@
 // Prevents additional console window on Windows in release builds
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![allow(dead_code)]
 
 mod vst_host;
 
@@ -7,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use tauri::AppHandle;
 use vst_host::{VstGuiOpenResult, VstHostController, VstPresetResult};
 
@@ -42,8 +42,8 @@ pub struct WaveShellSubPlugin {
     pub is_stereo: bool,
 }
 
-// Глобальное хранилище открытых нативных окон VST (IPlugView HWND / NSWindow)
-static OPEN_PLUGIN_WINDOWS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+// Инициализация нативного окружения VOMIXStudio
+use tauri::Manager;
 
 /// Известные системные пути для VST3 / VST2 / CLAP на Windows и macOS
 fn get_system_vst_directories() -> Vec<PathBuf> {
@@ -491,9 +491,39 @@ pub mod commands {
 }
 
 fn main() {
-    tauri::Builder::default()
+    // 1. Глобальный перехватчик паники с записью в файл и системным уведомлением
+    std::panic::set_hook(Box::new(|info| {
+        let err_msg = format!("VOMIXStudio Critical Startup Error:\n{}", info);
+        eprintln!("{}", err_msg);
+        let _ = std::fs::write("vomix_panic.log", &err_msg);
+        #[cfg(target_os = "windows")]
+        unsafe {
+            use std::ffi::CString;
+            if let (Ok(title), Ok(body)) = (
+                CString::new("VOMIXStudio - Ошибка запуска"),
+                CString::new(format!("Не удалось запустить приложение:\n{}\n\nПодробности сохранены в vomix_panic.log", info))
+            ) {
+                extern "system" {
+                    fn MessageBoxA(hwnd: *mut std::ffi::c_void, text: *const i8, caption: *const i8, utype: u32) -> i32;
+                }
+                MessageBoxA(std::ptr::null_mut(), body.as_ptr(), title.as_ptr(), 0x10);
+            }
+        }
+    }));
+
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .setup(|app| {
+            if let Some(main_win) = app.get_webview_window("main") {
+                let _ = main_win.show();
+                let _ = main_win.unminimize();
+                let _ = main_win.set_focus();
+            } else {
+                eprintln!("[VOMIXStudio] Предупреждение: Главное окно 'main' не найдено при запуске");
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::scan_vst_plugins,
             commands::scan_vst_directory_native,
@@ -511,7 +541,25 @@ fn main() {
             commands::read_file_binary,
             commands::list_project_files_native,
             commands::get_current_working_dir
-        ])
-        .run(tauri::generate_context!())
-        .expect("Ошибка запуска нативного приложения Tauri v2");
+        ]);
+
+    if let Err(e) = app.run(tauri::generate_context!()) {
+        let err_msg = format!("Ошибка запуска нативного приложения Tauri v2:\n{}\n\nПодробности сохранены в vomix_startup_error.log", e);
+        eprintln!("{}", err_msg);
+        let _ = std::fs::write("vomix_startup_error.log", &err_msg);
+        #[cfg(target_os = "windows")]
+        unsafe {
+            use std::ffi::CString;
+            if let (Ok(title), Ok(body)) = (
+                CString::new("VOMIXStudio - Ошибка запуска"),
+                CString::new(err_msg.clone())
+            ) {
+                extern "system" {
+                    fn MessageBoxA(hwnd: *mut std::ffi::c_void, text: *const i8, caption: *const i8, utype: u32) -> i32;
+                }
+                MessageBoxA(std::ptr::null_mut(), body.as_ptr(), title.as_ptr(), 0x10);
+            }
+        }
+        panic!("{}", err_msg);
+    }
 }

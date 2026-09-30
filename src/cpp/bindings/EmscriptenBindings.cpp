@@ -1556,19 +1556,19 @@ void processMixer(uintptr_t mixerPtr, uintptr_t outputPtr, int numSamples) {
 }
 
 EMSCRIPTEN_KEEPALIVE
-void pushTrackAudioChunk(void* mixerPtr, int trackId, float* chunkPtr, int numFrames, int64_t startTimelineSample) {
+void pushTrackAudioChunk(void* mixerPtr, int trackId, float* chunkPtr, int numFrames, double startTimelineSample) {
     auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
     if (!mixer || !chunkPtr || numFrames <= 0) return;
     DAWCore::Track* track = mixer->getTrack(static_cast<uint32_t>(trackId));
     if (!track) return;
-    track->pushAudioChunk(chunkPtr, numFrames, startTimelineSample);
+    track->pushAudioChunk(chunkPtr, numFrames, static_cast<int64_t>(startTimelineSample));
 }
 
 EMSCRIPTEN_KEEPALIVE
-void setTimelinePosition(uintptr_t mixerPtr, int64_t samplePosition) {
+void setTimelinePosition(uintptr_t mixerPtr, double samplePosition) {
     auto* mixer = reinterpret_cast<DAWCore::Mixer*>(mixerPtr);
     if (mixer) {
-        mixer->setTimelinePosition(static_cast<size_t>(samplePosition));
+        mixer->setTimelinePosition(static_cast<size_t>(std::max(0.0, samplePosition)));
     }
 }
 

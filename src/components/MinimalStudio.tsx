@@ -50,7 +50,8 @@ import {
   X,
   Terminal,
   BrainCircuit,
-  Scissors
+  Scissors,
+  Mic
 } from 'lucide-react';
 import { systemLogger } from '../services/SystemLogger';
 import { useAudioEngine, TrackMeterData } from '../hooks/useAudioEngine';
@@ -475,7 +476,7 @@ const MinimalStudioComponent: React.FC = () => {
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [videoDuration, setVideoDuration] = useState<number>(0);
   const [fps] = useState<number>(30);
-  const [audioMonitoringMode, setAudioMonitoringMode] = useState<'mixed' | 'original'>('mixed');
+  const [audioMonitoringMode, setAudioMonitoringMode] = useState<'mixed' | 'original' | 'dubbing'>('mixed');
   const [isExtractingAudio, setIsExtractingAudio] = useState<boolean>(false);
 
   // --- 5. Состояние экспорта и FFmpeg WASM ---
@@ -557,20 +558,65 @@ const MinimalStudioComponent: React.FC = () => {
     }
   }, [currentTimeSec, isPlaying, videoSrc]);
 
-  // Управление переключением мониторинга: «Оригинальный звук видео / Сведенный микс»
+  // Управление переключением мониторинга: «Сведенный баланс / Только оригинал / Только дубляж»
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
+    const safeTracksList = toSafeArray<TrackState>(tracks);
+    const origTrack = safeTracksList.find(
+      (t) => t.isOriginalAudio || /оригинал|original|видео|video/i.test(t.name)
+    );
+    const hasTimelineOrigAudio = !!(
+      origTrack &&
+      toSafeArray(origTrack.clips).some((c) => c && c.buffer && c.buffer.length > 0)
+    );
+
     if (audioMonitoringMode === 'original') {
-      video.muted = false;
-      video.volume = 1.0;
-    } else {
+      // Режим «Только оригинал»: глушим все треки дубляжа
+      if (hasTimelineOrigAudio) {
+        video.muted = true;
+        video.volume = 0;
+        setMasterVolume(master.volumeDb);
+        safeTracksList.forEach((t) => {
+          const isOrig = t.isOriginalAudio || /оригинал|original|видео|video/i.test(t.name);
+          setTrackMute(t.id, !isOrig);
+        });
+      } else {
+        video.muted = false;
+        video.volume = 1.0;
+        setMasterVolume(-100); // Глушим мастер DAW
+      }
+    } else if (audioMonitoringMode === 'dubbing') {
+      // Режим «Только дубляж»: глушим звук видео и трек оригинала
       video.muted = true;
       video.volume = 0;
-      setMasterVolume(master.volumeDb); // Включаем мастер DAW
+      setMasterVolume(master.volumeDb);
+      safeTracksList.forEach((t) => {
+        const isOrig = t.isOriginalAudio || /оригинал|original|видео|video/i.test(t.name);
+        setTrackMute(t.id, isOrig ? true : !!t.mute);
+      });
+    } else {
+      // Режим «Сведенный баланс микса»: пользователь слышит конечный баланс дорожек оригинала и дубляжа!
+      setMasterVolume(master.volumeDb);
+      if (hasTimelineOrigAudio) {
+        // Звук оригинала идет через аудиодвижок на дорожке с ее громкостью, панорамой и даккингом
+        video.muted = true;
+        video.volume = 0;
+        safeTracksList.forEach((t) => {
+          setTrackMute(t.id, !!t.mute);
+        });
+      } else {
+        // Звук оригинала еще извлекается: воспроизводим из <video> на уровне фейдера дорожки оригинала
+        const origVolLin = origTrack ? Math.pow(10, (origTrack.volumeDb || 0) / 20) : 1.0;
+        video.muted = false;
+        video.volume = Math.max(0, Math.min(1, origVolLin));
+        safeTracksList.forEach((t) => {
+          setTrackMute(t.id, !!t.mute);
+        });
+      }
     }
-  }, [audioMonitoringMode, videoSrc, master.volumeDb, setMasterVolume]);
+  }, [audioMonitoringMode, videoSrc, master.volumeDb, tracks, setMasterVolume, setTrackMute]);
 
   // --- 7. Автосохранение project/project.json при изменении микшера ---
   const triggerAutoSave = useCallback(() => {
@@ -941,7 +987,17 @@ const MinimalStudioComponent: React.FC = () => {
       setTracks((prev) => {
         const safePrev = toSafeArray<TrackState>(prev);
         const existingOrig = safePrev.find((t) => t.isOriginalAudio || /оригинал|original|видео|video/i.test(t.name));
-        const tid = existingOrig ? existingOrig.id : 1;
+        let tid: number;
+        if (existingOrig) {
+          tid = existingOrig.id;
+        } else {
+          const track1 = safePrev.find((t) => t.id === 1);
+          if (track1 && toSafeArray(track1.clips).length > 0 && !track1.isOriginalAudio) {
+            tid = safePrev.reduce((m, t) => Math.max(m, t.id), 0) + 1;
+          } else {
+            tid = 1;
+          }
+        }
         assignedTrackId = tid;
 
         const videoClip = {
@@ -973,6 +1029,7 @@ const MinimalStudioComponent: React.FC = () => {
           );
         } else {
           const newTr = createNewTrack(tid, `Оригинал [${file.name}]`, '#06b6d4', true);
+          newTr.isOriginalAudio = true;
           newTr.clips = [videoClip];
           updated = [newTr, ...safePrev];
         }
@@ -1269,11 +1326,22 @@ const MinimalStudioComponent: React.FC = () => {
       setVideoDuration((prev) => (prev > 0 ? prev : calcDur));
       const clipId = Date.now();
       const safeTracks = toSafeArray<TrackState>(tracks);
-      const targetId = safeTracks.length > 0 ? safeTracks[0].id : 1;
+      const existingOrig = safeTracks.find((t) => t.isOriginalAudio || /оригинал|original|видео|video/i.test(t.name));
+      let targetId: number;
+      if (existingOrig) {
+        targetId = existingOrig.id;
+      } else {
+        const track1 = safeTracks.find((t) => t.id === 1);
+        if (track1 && toSafeArray(track1.clips).length > 0 && !track1.isOriginalAudio) {
+          targetId = safeTracks.reduce((m, t) => Math.max(m, t.id), 0) + 1;
+        } else {
+          targetId = 1;
+        }
+      }
 
       setTracks((prev) => {
         const safePrev = toSafeArray<TrackState>(prev);
-        const tid = safePrev.length > 0 ? safePrev[0].id : 1;
+        const tid = targetId;
         const videoClip = {
           id: clipId,
           name: `Audio_${file.name}`,
@@ -1288,8 +1356,9 @@ const MinimalStudioComponent: React.FC = () => {
         };
 
         const exists = safePrev.some((t) => t.id === tid);
+        let updated: TrackState[];
         if (exists) {
-          return safePrev.map((t) =>
+          updated = safePrev.map((t) =>
             t.id === tid
               ? {
                   ...t,
@@ -1300,11 +1369,13 @@ const MinimalStudioComponent: React.FC = () => {
               : t
           );
         } else {
-          const newTr = createNewTrack(tid, `Оригинал [${file.name}]`, '#06b6d4');
+          const newTr = createNewTrack(tid, `Оригинал [${file.name}]`, '#06b6d4', true);
           newTr.isOriginalAudio = true;
           newTr.clips = [videoClip];
-          return [...safePrev, newTr];
+          updated = [newTr, ...safePrev];
         }
+        syncAllTracks(updated);
+        return updated;
       });
 
       uploadRawPCMToTrack(audioPcm, targetId, clipId, 0, 1.0, 0.0, true);
@@ -2500,11 +2571,12 @@ const MinimalStudioComponent: React.FC = () => {
               {formatSMPTE(currentTimeSec, fps)}
             </div>
 
-            {/* Переключатель источника звука */}
+            {/* Переключатель источника звука (Баланс / Только оригинал / Только дубляж) */}
             <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800">
               <button
                 id="btn-mode-mixed"
                 onClick={() => setAudioMonitoringMode('mixed')}
+                title="Слышен конечный баланс: оригинальный звук видео (с даккингом) + все дорожки дубляжа"
                 className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 cursor-pointer ${
                   audioMonitoringMode === 'mixed'
                     ? 'bg-emerald-600 text-white shadow-sm'
@@ -2512,12 +2584,13 @@ const MinimalStudioComponent: React.FC = () => {
                 }`}
               >
                 <Headphones size={12} />
-                Новый сведенный микс
+                Баланс микса (Все дорожки)
               </button>
 
               <button
                 id="btn-mode-original"
                 onClick={() => setAudioMonitoringMode('original')}
+                title="Слышен только оригинальный звук видео"
                 className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 cursor-pointer ${
                   audioMonitoringMode === 'original'
                     ? 'bg-cyan-600 text-white shadow-sm'
@@ -2525,7 +2598,21 @@ const MinimalStudioComponent: React.FC = () => {
                 }`}
               >
                 <Volume2 size={12} />
-                Только оригинальный звук видео
+                Только оригинал
+              </button>
+
+              <button
+                id="btn-mode-dubbing"
+                onClick={() => setAudioMonitoringMode('dubbing')}
+                title="Слышны только дорожки дубляжа (оригинал заглушен)"
+                className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 cursor-pointer ${
+                  audioMonitoringMode === 'dubbing'
+                    ? 'bg-purple-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Mic size={12} />
+                Только дубляж
               </button>
             </div>
           </div>

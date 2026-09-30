@@ -9,6 +9,9 @@
 //! 5. Загрузку бинарных пресетов .vstpreset / .fxp через IComponent::setState
 //! ============================================================================
 
+#![allow(dead_code)]
+#![allow(unused_unsafe)]
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CString};
@@ -230,6 +233,7 @@ pub struct VstPresetResult {
     pub message: String,
 }
 
+#[allow(dead_code)]
 pub struct VstGuiSession {
     pub instance_id: String,
     pub track_id: u32,
@@ -317,9 +321,7 @@ impl VstHostController {
         let c_path = CString::new(effective_path.clone()).map_err(|e| e.to_string())?;
         let c_uid = CString::new(effective_uid).map_err(|e| e.to_string())?;
 
-        let c_instance = unsafe {
-            vst3_host_create_instance(c_inst_id.as_ptr(), c_path.as_ptr(), c_uid.as_ptr())
-        };
+        let c_instance = vst3_host_create_instance(c_inst_id.as_ptr(), c_path.as_ptr(), c_uid.as_ptr());
 
         // 3. Создаем окно Tauri с отдельным специализированным контейнером GUI VST
         let window_title = format!("VST3 GUI — {} (Трек #{})", plugin_name, track_id);
@@ -353,18 +355,16 @@ impl VstHostController {
                 let raw_hwnd = hwnd.0 as *mut c_void;
                 println!("[VstHost] Получен Win32 HWND: {:p}", raw_hwnd);
                 if !c_instance.is_null() {
-                    unsafe {
-                        let attached = vst3_host_attach_gui(
-                            c_instance,
-                            raw_hwnd,
-                            &mut width,
-                            &mut height,
-                        );
-                        println!(
-                            "[VstHost] Привязка Win32 HWND IPlugView::attached: success={}, size={}x{}",
-                            attached, width, height
-                        );
-                    }
+                    let attached = vst3_host_attach_gui(
+                        c_instance,
+                        raw_hwnd,
+                        &mut width,
+                        &mut height,
+                    );
+                    println!(
+                        "[VstHost] Привязка Win32 HWND IPlugView::attached: success={}, size={}x{}",
+                        attached, width, height
+                    );
                 }
             }
         }
@@ -403,13 +403,11 @@ impl VstHostController {
             with_sessions(|sessions| {
                 if let Some(sess) = sessions.get_mut(&instance_id) {
                     let user_ptr = sess as *mut VstGuiSession as *mut c_void;
-                    unsafe {
-                        vst3_host_set_edit_callback(
-                            c_instance,
-                            on_vst_param_edit_trampoline,
-                            user_ptr,
-                        );
-                    }
+                    vst3_host_set_edit_callback(
+                        c_instance,
+                        on_vst_param_edit_trampoline,
+                        user_ptr,
+                    );
                 }
             });
         }

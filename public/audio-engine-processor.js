@@ -268,8 +268,8 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
     if (!this.wasmModule || !this.wasmModule._malloc || !pcmData || pcmData.length === 0) {
       return 0;
     }
-    // OOM Guard: предотвращение переполнения 32-битной кучи WASM при воспроизведении длинных дорожек (24+ мин)
-    const MAX_STATIC_WASM_BUFFER_SAMPLES = 480000; // 10 секунд @ 48 кГц
+    // OOM Guard: поддержка длинных аудиофайлов и дорожек до ~3.5 мин в WASM куче
+    const MAX_STATIC_WASM_BUFFER_SAMPLES = 10000000; // ~3.5 минуты стерео @ 48 кГц
     if (pcmData.length > MAX_STATIC_WASM_BUFFER_SAMPLES) {
       return 0;
     }
@@ -2418,11 +2418,12 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
             // Если есть потоковые сэмплы для дорожки, копируем в scratch-буфер WASM и пушим в C++ кольцевой буфер
             if (hasAudio) {
               heapF32.set(scratchF32.subarray(0, numFrames * 2), scratchOffset);
-              const timelineSample = typeof BigInt !== 'undefined' ? BigInt(Math.floor(currentPos)) : Math.floor(currentPos);
               try {
-                pushChunkFn(this.mixerPtr, trackId, this.scratchBufferPtr, numFrames, timelineSample);
+                pushChunkFn(this.mixerPtr, trackId, this.scratchBufferPtr, numFrames, Number(currentPos));
               } catch (_) {
-                pushChunkFn(this.mixerPtr, trackId, this.scratchBufferPtr, numFrames, Math.floor(currentPos));
+                try {
+                  pushChunkFn(this.mixerPtr, trackId, this.scratchBufferPtr, numFrames, Math.floor(currentPos));
+                } catch (_) {}
               }
             }
           }
@@ -2451,15 +2452,82 @@ class DAWAudioEngineProcessor extends AudioWorkletProcessor {
       const heapF32 = this.wasmModule.HEAPF32;
       const floatOffset = this.outBufferPtr >> 2;
 
+      let hasCppOutput = false;
       if (rightOut !== leftOut) {
         for (let i = 0; i < numFrames; i++) {
           const idx = floatOffset + (i << 1);
           leftOut[i] = heapF32[idx];
           rightOut[i] = heapF32[idx + 1];
+          if (!hasCppOutput && (Math.abs(leftOut[i]) > 1e-6 || Math.abs(rightOut[i]) > 1e-6)) {
+            hasCppOutput = true;
+          }
         }
       } else {
         for (let i = 0; i < numFrames; i++) {
           leftOut[i] = heapF32[floatOffset + (i << 1)];
+          if (!hasCppOutput && Math.abs(leftOut[i]) > 1e-6) {
+            hasCppOutput = true;
+          }
+        }
+      }
+
+      // Резервный микшер: если C++ вернул тишину, воспроизводим клипы из JS кэша
+      if (!hasCppOutput && this.jsTracks.size > 0) {
+        const anySolo = Array.from(this.jsTracks.values()).some((t) => t && t.solo);
+        for (const [, tr] of this.jsTracks.entries()) {
+          if (!tr || tr.mute) continue;
+          if (anySolo && !tr.solo) continue;
+
+          const trGain = Math.pow(10, (tr.volumeDb || 0) / 20);
+          const pan = tr.pan || 0;
+          const angle = (pan + 1.0) * (Math.PI / 4.0);
+          const trPanL = Math.cos(angle);
+          const trPanR = Math.sin(angle);
+
+          for (const [, cl] of tr.clips.entries()) {
+            let pcm = cl.pcm;
+            if (!pcm || pcm.length === 0) {
+              pcm = this.clipBufferCache.get(cl.id);
+            }
+            if (!pcm && cl.parentClipId) {
+              pcm = this.clipBufferCache.get(cl.parentClipId);
+            }
+            if (!pcm || pcm.length === 0) continue;
+
+            const isStereo = cl.isStereo !== undefined ? !!cl.isStereo : (pcm.length >= (cl.lengthSamples || 0) * 2);
+            const clipStart = cl.offsetSamples || 0;
+            const clipLen = cl.lengthSamples || (isStereo ? Math.floor(pcm.length / 2) : pcm.length);
+            const clipEnd = clipStart + clipLen;
+
+            if (currentPos + numFrames <= clipStart || currentPos >= clipEnd) continue;
+
+            const overlapStart = Math.max(currentPos, clipStart);
+            const overlapEnd = Math.min(currentPos + numFrames, clipEnd);
+            const overlapFrames = overlapEnd - overlapStart;
+            const destOffset = overlapStart - currentPos;
+            const srcStart = (overlapStart - clipStart) + (cl.bufferOffsetSamples || 0);
+            const clipGain = (typeof cl.gain === 'number' ? cl.gain : 1.0) * trGain;
+
+            for (let f = 0; f < overlapFrames; f++) {
+              const srcIdx = srcStart + f;
+              let sL = 0, sR = 0;
+              if (isStereo) {
+                if (srcIdx * 2 + 1 < pcm.length) {
+                  sL = pcm[srcIdx * 2];
+                  sR = pcm[srcIdx * 2 + 1];
+                }
+              } else {
+                if (srcIdx < pcm.length) {
+                  sL = pcm[srcIdx];
+                  sR = sL;
+                }
+              }
+              leftOut[destOffset + f] += sL * clipGain * trPanL;
+              if (rightOut !== leftOut) {
+                rightOut[destOffset + f] += sR * clipGain * trPanR;
+              }
+            }
+          }
         }
       }
 
