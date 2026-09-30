@@ -2282,15 +2282,38 @@ const MinimalStudioComponent: React.FC = () => {
     const containerExt = exportParams?.container || 'mp4';
     const outputFileName = `mixed_${videoFile.name.replace(/\.[^/.]+$/, '')}.${containerExt}`;
 
-    const finalVideoBlob = await globalRenderManager.muxAudioIntoVideo(
-      videoFile,
-      renderResult.wavBlob,
-      outputFileName,
-      {
-        timelineHasOriginalAudio,
-        exportParams
+    let finalVideoBlob: Blob | null = null;
+    try {
+      finalVideoBlob = await globalRenderManager.muxAudioIntoVideo(
+        videoFile,
+        renderResult.wavBlob,
+        outputFileName,
+        {
+          timelineHasOriginalAudio,
+          exportParams
+        }
+      );
+    } catch (muxErr: any) {
+      console.warn('[MinimalStudio] Ошибка муксинга видео:', muxErr);
+      const isMemErr =
+        muxErr?.message?.includes('лимит памяти') ||
+        muxErr?.message?.includes('WebAssembly') ||
+        muxErr?.message?.includes('allocation failed') ||
+        muxErr?.name === 'RangeError';
+
+      if (isMemErr) {
+        const masterWavName = `master_mix_${videoFile.name.replace(/\.[^/.]+$/, '')}.wav`;
+        await globalProjectManager.saveRenderedAsset(masterWavName, renderResult.wavBlob, true);
+        const audioUrl = URL.createObjectURL(renderResult.wavBlob);
+        setIsExporting(false);
+        return {
+          videoBlob: renderResult.wavBlob,
+          videoUrl: audioUrl,
+          outputFileName: masterWavName
+        };
       }
-    );
+      throw muxErr;
+    }
 
     if (!finalVideoBlob) {
       throw new Error('FFmpeg WebAssembly не смог сформировать выходной видеофайл.');

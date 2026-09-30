@@ -575,4 +575,36 @@ export class TauriNativeBridge {
     }
     return null;
   }
+
+  /**
+   * Проверка: доступен ли нативный 64-битный FFmpeg в системе (PATH)
+   */
+  public static async isFFmpegAvailable(): Promise<boolean> {
+    if (!this.isTauriEnvironment()) return false;
+    try {
+      return await invoke<boolean>('is_ffmpeg_available');
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Нативный видео-муксинг через системный FFmpeg без ограничений памяти WebAssembly
+   */
+  public static async runNativeFFmpegMux(
+    videoPath: string,
+    audioWavPath: string,
+    outputPath: string,
+    isLossless: boolean = true
+  ): Promise<string> {
+    if (!this.isTauriEnvironment()) {
+      throw new Error('Нативный FFmpeg доступен только в настольном приложении Tauri.');
+    }
+    return await invoke<string>('run_native_ffmpeg_mux', {
+      videoPath,
+      audioWavPath,
+      outputPath,
+      isLossless
+    });
+  }
 }

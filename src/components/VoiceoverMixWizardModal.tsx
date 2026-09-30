@@ -431,14 +431,33 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
 
       setProgressPercent(100);
       setStage('completed');
-      setStatusMessage(`Готово! Видео успешно сведено и зашито: ${res.outputFileName}`);
-      addLog(`🎉 Сквозной конвейер успешно завершен! Файл ${res.outputFileName} сохранен в project/.`);
+      const isAudioOnly = res.outputFileName.endsWith('.wav');
+      if (isAudioOnly) {
+        setStatusMessage(`Мастер-микс аудио успешно готов и сохранен: ${res.outputFileName}`);
+        addLog(`🎉 Мастеринг завершен! Аудиофайл ${res.outputFileName} сохранен в project/.`);
+      } else {
+        setStatusMessage(`Готово! Видео успешно сведено и зашито: ${res.outputFileName}`);
+        addLog(`🎉 Сквозной конвейер успешно завершен! Файл ${res.outputFileName} сохранен в project/.`);
+      }
       systemLogger.info('MVPPipeline', `Конвейер успешно завершен! Создан сшитый файл: ${res.outputFileName}`);
     } catch (err: any) {
-      addLog(`❌ Ошибка мастеринга/муксинга: ${err?.message || err}`);
-      setErrorMessage(err?.message || 'Ошибка финального рендеринга');
-      systemLogger.error('MVPPipeline', `Ошибка на Шаге 4 (Мастеринг / FFmpeg муксинг): ${err?.message || err}`);
-      setStage('error');
+      const isMemErr =
+        err?.message?.includes('лимит памяти') ||
+        err?.message?.includes('WebAssembly') ||
+        err?.message?.includes('allocation failed') ||
+        err?.name === 'RangeError';
+
+      if (isMemErr) {
+        addLog(`⚠️ ${err?.message || err}`);
+        setStatusMessage('Мастер-микс аудио (WAV) успешно скомпонован! Видеомуксинг пропущен из-за превышения памяти WASM.');
+        setErrorMessage(err?.message || 'Ограничение памяти WebAssembly');
+        setStage('completed');
+      } else {
+        addLog(`❌ Ошибка мастеринга/муксинга: ${err?.message || err}`);
+        setErrorMessage(err?.message || 'Ошибка финального рендеринга');
+        systemLogger.error('MVPPipeline', `Ошибка на Шаге 4 (Мастеринг / FFmpeg муксинг): ${err?.message || err}`);
+        setStage('error');
+      }
     }
   };
 

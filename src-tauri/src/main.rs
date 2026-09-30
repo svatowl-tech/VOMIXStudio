@@ -488,6 +488,68 @@ pub mod commands {
             .map(|p| p.to_string_lossy().to_string())
             .map_err(|e| e.to_string())
     }
+
+    /// IPC Команда: Проверка наличия нативного FFmpeg в системе (PATH)
+    #[tauri::command]
+    pub fn is_ffmpeg_available() -> bool {
+        std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// IPC Команда: Нативный видео-муксинг через системный 64-битный FFmpeg без лимитов памяти WebAssembly
+    #[tauri::command]
+    pub async fn run_native_ffmpeg_mux(
+        video_path: String,
+        audio_wav_path: String,
+        output_path: String,
+        is_lossless: bool,
+    ) -> Result<String, String> {
+        if !Path::new(&video_path).exists() {
+            return Err(format!("Исходный видеофайл не найден: {}", video_path));
+        }
+        if !Path::new(&audio_wav_path).exists() {
+            return Err(format!("Мастер-аудио не найдено: {}", audio_wav_path));
+        }
+
+        if let Some(parent) = Path::new(&output_path).parent() {
+            if !parent.exists() {
+                let _ = fs::create_dir_all(parent);
+            }
+        }
+
+        let mut cmd = std::process::Command::new("ffmpeg");
+        cmd.arg("-y")
+            .arg("-i").arg(&video_path)
+            .arg("-i").arg(&audio_wav_path);
+
+        if is_lossless {
+            cmd.arg("-c:v").arg("copy")
+                .arg("-c:a").arg("aac")
+                .arg("-b:a").arg("320k")
+                .arg("-map").arg("0:v:0")
+                .arg("-map").arg("1:a:0");
+        } else {
+            cmd.arg("-c:v").arg("libx264")
+                .arg("-pix_fmt").arg("yuv420p")
+                .arg("-c:a").arg("aac")
+                .arg("-b:a").arg("320k")
+                .arg("-map").arg("0:v:0")
+                .arg("-map").arg("1:a:0");
+        }
+
+        cmd.arg(&output_path);
+
+        let output = cmd.output().map_err(|e| format!("Не удалось запустить системный ffmpeg: {}", e))?;
+        if output.status.success() {
+            Ok(output_path)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!("Ошибка нативного FFmpeg: {}", stderr))
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -544,7 +606,9 @@ fn main() {
             commands::save_file_direct,
             commands::read_file_binary,
             commands::list_project_files_native,
-            commands::get_current_working_dir
+            commands::get_current_working_dir,
+            commands::is_ffmpeg_available,
+            commands::run_native_ffmpeg_mux
         ]);
 
     if let Err(e) = app.run(tauri::generate_context!()) {

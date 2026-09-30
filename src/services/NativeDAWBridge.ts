@@ -992,7 +992,7 @@ export class NativeDAWBridge {
 
     let heapF32 = mod.HEAPF32;
     if (!heapF32 || heapF32.buffer.byteLength === 0) {
-      const buffer = mod.memory?.buffer || mod.buffer || mod.wasmMemory?.buffer;
+      const buffer = mod.memory?.buffer || mod.HEAPF32?.buffer || mod.HEAPU8?.buffer || mod.buffer || mod.wasmMemory?.buffer;
       if (buffer) {
         heapF32 = new Float32Array(buffer);
         mod.HEAPF32 = heapF32;
@@ -1024,7 +1024,7 @@ export class NativeDAWBridge {
     this.refreshMemoryViews();
 
     const mod = this.getModule();
-    const memBuffer = mod.memory?.buffer || mod.buffer || mod.wasmMemory?.buffer;
+    const memBuffer = mod.memory?.buffer || mod.HEAPF32?.buffer || mod.HEAPU8?.buffer || mod.buffer || mod.wasmMemory?.buffer;
     if (!memBuffer) {
       console.warn('[NativeDAWBridge] HEAPF32 / memory buffer не найден при чтении Float32.');
       return new Float32Array(0);
@@ -1055,7 +1055,7 @@ export class NativeDAWBridge {
     this.refreshMemoryViews();
 
     const mod = this.getModule();
-    const memBuffer = mod.memory?.buffer || mod.buffer || mod.wasmMemory?.buffer;
+    const memBuffer = mod.memory?.buffer || mod.HEAPU8?.buffer || mod.HEAPF32?.buffer || mod.buffer || mod.wasmMemory?.buffer;
     if (!memBuffer) {
       console.warn('[NativeDAWBridge] HEAPU8 / memory buffer не найден при чтении Uint8.');
       return new Uint8Array(0);

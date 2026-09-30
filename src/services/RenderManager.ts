@@ -27,6 +27,7 @@ import { systemLogger } from './SystemLogger';
 import { VideoExportParameters, DEFAULT_VIDEO_EXPORT_PARAMS } from './RenderPipelineGraphManager';
 import { BlobUrlRegistry } from '../utils/BlobUrlRegistry';
 import { toSafeArray } from '../utils/safeIterables';
+import { TauriNativeBridge } from './TauriNativeBridge';
 
 export { BlobUrlRegistry };
 
@@ -295,6 +296,44 @@ export class RenderManager {
     const totalSizeMb = (sourceVideoFile.size + audioByteLength) / (1024 * 1024);
     this.addLog(`Общий объем исходных медиафайлов: ${totalSizeMb.toFixed(1)} МБ`);
 
+    const isLossless = params.preset === 'lossless_original' || params.videoCodec === 'copy';
+    const videoFilePath = (sourceVideoFile as any).path;
+
+    // 1. Попытка нативного муксинга через системный 64-битный FFmpeg (Tauri Desktop)
+    if (TauriNativeBridge.isTauriEnvironment() && videoFilePath && typeof videoFilePath === 'string') {
+      try {
+        const hasNativeFFmpeg = await TauriNativeBridge.isFFmpegAvailable();
+        if (hasNativeFFmpeg) {
+          this.addLog(`⚡ Обнаружен нативный 64-битный FFmpeg в системе. Выполняем прямой аппаратный муксинг без лимитов памяти WASM...`);
+          this.notifyProgress('muxing_video', 30, 'Нативный FFmpeg муксинг без ограничений памяти...');
+
+          const audioBytes = masterWavBlob instanceof Uint8Array
+            ? masterWavBlob
+            : new Uint8Array(await (masterWavBlob as Blob).arrayBuffer());
+
+          const dirSeparator = videoFilePath.includes('\\') ? '\\' : '/';
+          const lastIdx = videoFilePath.lastIndexOf(dirSeparator);
+          const dirPath = lastIdx > 0 ? videoFilePath.substring(0, lastIdx) : '.';
+          const tempWavPath = `${dirPath}${dirSeparator}temp_master_${Date.now()}.wav`;
+          const finalOutputPath = `${dirPath}${dirSeparator}${outputFileName}`;
+
+          await TauriNativeBridge.saveFileDirect(tempWavPath, audioBytes);
+          this.addLog(`Мастер-аудио записан на диск: ${tempWavPath}`);
+
+          await TauriNativeBridge.runNativeFFmpegMux(videoFilePath, tempWavPath, finalOutputPath, isLossless);
+          this.addLog(`🎉 Нативный FFmpeg успешно собрал видеофайл: ${finalOutputPath}`);
+
+          // Читаем готовый файл в Blob
+          const fileBytes = await TauriNativeBridge.readFileBinary(finalOutputPath);
+          const resultBlob = new Blob([fileBytes as unknown as BlobPart], { type: 'video/mp4' });
+          this.notifyProgress('completed', 100, 'Видео успешно сведено и экспортировано!');
+          return resultBlob;
+        }
+      } catch (nativeErr: any) {
+        this.addLog(`Нативный FFmpeg вернул ошибку (${nativeErr?.message || nativeErr}), переключаемся на WebAssembly...`);
+      }
+    }
+
     if (totalSizeMb > 1500) {
       const warnMsg = `Внимание: размер исходных файлов (${totalSizeMb.toFixed(1)} МБ) близок к 32-битному лимиту памяти WASM. Рекомендуется использовать видеофайл меньшего размера.`;
       this.addLog(warnMsg);
@@ -310,12 +349,40 @@ export class RenderManager {
 
       // Запись исходного видео
       this.addLog(`Запись входного видео [${sourceVideoFile.name}] в виртуальную ФС...`);
-      await this.ffmpeg.writeFile('input_video.mp4', await fetchFile(sourceVideoFile));
+      try {
+        const videoBuffer = await fetchFile(sourceVideoFile);
+        await this.ffmpeg.writeFile('input_video.mp4', videoBuffer);
+      } catch (allocErr: any) {
+        const isMem = allocErr?.name === 'RangeError' || String(allocErr).includes('allocation failed') || String(allocErr).includes('out of memory');
+        if (isMem) {
+          const videoMb = (sourceVideoFile.size / (1024 * 1024)).toFixed(0);
+          this.addLog(`⚠️ Память WebAssembly исчерпана: браузерный движок не может выделить ${videoMb} МБ памяти под видео.`);
+          this.addLog(`✅ Сведенный мастер-аудио WAV (${(audioByteLength / (1024 * 1024)).toFixed(0)} МБ) сохранен!`);
+
+          const audioBlob = masterWavBlob instanceof Blob ? masterWavBlob : new Blob([masterWavBlob as unknown as BlobPart], { type: 'audio/wav' });
+          this.downloadBlob(audioBlob, `master_mix_${sourceVideoFile.name.replace(/\.[^/.]+$/, '')}.wav`);
+
+          throw new Error(
+            `Размер видео (${videoMb} МБ) превысил лимит памяти браузерного WebAssembly. ` +
+            `Сведенный мастер-микс WAV сохранен и скачан!\n\n` +
+            `Для мгновенного объединения без пересжатия используйте команду:\n` +
+            `ffmpeg -i "${sourceVideoFile.name}" -i "master_mix.wav" -c:v copy -map 0:v:0 -map 1:a:0 "${outputFileName}"`
+          );
+        }
+        throw allocErr;
+      }
 
       // Запись сведенного WAV
       this.addLog('Запись сведенного мастер-аудио [audio_mix.wav] в виртуальную ФС...');
       const audioBlob = masterWavBlob instanceof Blob ? masterWavBlob : new Blob([masterWavBlob as unknown as BlobPart], { type: 'audio/wav' });
-      await this.ffmpeg.writeFile('audio_mix.wav', await fetchFile(audioBlob));
+      try {
+        await this.ffmpeg.writeFile('audio_mix.wav', await fetchFile(audioBlob));
+      } catch (audioAllocErr: any) {
+        this.downloadBlob(audioBlob, `master_mix_${sourceVideoFile.name.replace(/\.[^/.]+$/, '')}.wav`);
+        throw new Error(
+          `Недостаточно памяти для записи аудио в виртуальную ФС FFmpeg. Мастер-WAV сохранен на диск.`
+        );
+      }
 
       // Сразу после записи audio_mix.wav во внутреннюю ФС FFmpeg освобождаем промежуточный указатель в C++ куче через _free(wavPtr)
       const wavPtr = options?.wavPtr ?? (masterWavBlob as any)?.wavPtr;
