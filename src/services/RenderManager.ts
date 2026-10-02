@@ -341,10 +341,6 @@ export class RenderManager {
           this.addLog(`⚡ Обнаружен нативный 64-битный FFmpeg в системе. Выполняем прямой аппаратный муксинг без лимитов памяти WASM...`);
           this.notifyProgress('muxing_video', 30, 'Нативный FFmpeg муксинг без ограничений памяти...');
 
-          const audioBytes = masterWavBlob instanceof Uint8Array
-            ? masterWavBlob
-            : new Uint8Array(await (masterWavBlob as Blob).arrayBuffer());
-
           let actualVideoPath = videoFilePath;
 
           // Если путь файла недоступен напрямую из объекта File, интерактивно запрашиваем его у пользователя через нативный диалог
@@ -374,9 +370,13 @@ export class RenderManager {
             const tempWavPath = `${dirPath}${dirSeparator}temp_master_${Date.now()}.wav`;
             const finalOutputPath = `${dirPath}${dirSeparator}${outputFileName}`;
 
-            await TauriNativeBridge.saveFileDirect(tempWavPath, audioBytes);
+            this.notifyProgress('muxing_video', 40, 'Запись мастер-аудио на диск...');
+            await TauriNativeBridge.saveFileDirect(tempWavPath, masterWavBlob, (pct) => {
+              this.notifyProgress('muxing_video', 40 + Math.round(pct * 0.2), `Запись мастер-аудио на диск: ${pct}%`);
+            });
             this.addLog(`Мастер-аудио записан на диск: ${tempWavPath}`);
 
+            this.notifyProgress('muxing_video', 65, 'Нативный FFmpeg муксинг аудио в видео...');
             await TauriNativeBridge.runNativeFFmpegMux(actualVideoPath, tempWavPath, finalOutputPath, isLossless);
             this.addLog(`🎉 Нативный FFmpeg успешно собрал видеофайл: ${finalOutputPath}`);
 
@@ -387,7 +387,7 @@ export class RenderManager {
             (resultBlob as any).path = finalOutputPath;
             (resultBlob as any).name = outputFileName;
             (resultBlob as any).assetUrl = assetUrl;
-            (resultBlob as any).sizeBytes = (sourceVideoFile.size || 0) + audioBytes.byteLength;
+            (resultBlob as any).sizeBytes = (sourceVideoFile.size || 0) + audioByteLength;
 
             this.notifyProgress('completed', 100, 'Видео успешно сведено и экспортировано!');
             return resultBlob;

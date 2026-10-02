@@ -453,6 +453,26 @@ pub mod commands {
         Ok(format!("Файл сохранен: {}", file_path))
     }
 
+    /// IPC Команда: Потоковая запись бинарных чанков (для файлов любого размера без лимитов памяти)
+    #[tauri::command]
+    pub async fn write_file_chunk(file_path: String, bytes: Vec<u8>, is_first_chunk: bool) -> Result<usize, String> {
+        use std::io::Write;
+        if let Some(parent) = Path::new(&file_path).parent() {
+            if !parent.exists() {
+                let _ = fs::create_dir_all(parent);
+            }
+        }
+        let len = bytes.len();
+        if is_first_chunk {
+            let mut file = fs::File::create(&file_path).map_err(|e| format!("Ошибка создания файла: {}", e))?;
+            file.write_all(&bytes).map_err(|e| format!("Ошибка записи файла: {}", e))?;
+        } else {
+            let mut file = fs::OpenOptions::new().create(true).append(true).open(&file_path).map_err(|e| format!("Ошибка открытия файла для добавления: {}", e))?;
+            file.write_all(&bytes).map_err(|e| format!("Ошибка добавления в файл: {}", e))?;
+        }
+        Ok(len)
+    }
+
     /// IPC Команда: Чтение бинарного файла с диска
     #[tauri::command]
     pub async fn read_file_binary(file_path: String) -> Result<Vec<u8>, String> {
@@ -604,6 +624,7 @@ fn main() {
             commands::set_vst_parameter_native,
             commands::is_plugin_gui_supported,
             commands::save_file_direct,
+            commands::write_file_chunk,
             commands::read_file_binary,
             commands::list_project_files_native,
             commands::get_current_working_dir,

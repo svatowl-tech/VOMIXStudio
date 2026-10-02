@@ -699,25 +699,8 @@ export class ProjectManager {
     const cues: SubtitleCue[] = [];
     const fmt = format.toLowerCase().replace(/^\./, '');
 
-    // 1. JSON формат
-    if (fmt === 'json' || content.trim().startsWith('[') || (content.trim().startsWith('{') && content.includes('"subtitles"'))) {
-      try {
-        const parsed = JSON.parse(content);
-        const list = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.subtitles) ? parsed.subtitles : (Array.isArray(parsed.cues) ? parsed.cues : []));
-        return list.map((item: any, idx: number) => ({
-          index: typeof item.index === 'number' ? item.index : idx + 1,
-          startSec: typeof item.startSec === 'number' ? item.startSec : (typeof item.start === 'number' ? item.start : 0),
-          endSec: typeof item.endSec === 'number' ? item.endSec : (typeof item.end === 'number' ? item.end : 0),
-          speaker: item.speaker ? String(item.speaker) : undefined,
-          text: String(item.text || item.content || '')
-        }));
-      } catch (err) {
-        console.warn('[ProjectManager] Ошибка парсинга JSON субтитров:', err);
-      }
-    }
-
-    // 2. ASS / SSA формат
-    if (fmt === 'ass' || fmt === 'ssa' || content.includes('[Events]') || content.includes('Dialogue:')) {
+    // 1. ASS / SSA формат
+    if (fmt === 'ass' || fmt === 'ssa' || content.includes('[Script Info]') || content.includes('[Events]') || content.includes('Dialogue:')) {
       const lines = content.split(/\r?\n/);
       let cueIndex = 1;
 
@@ -759,6 +742,23 @@ export class ProjectManager {
       }
 
       if (cues.length > 0) return cues;
+    }
+
+    // 2. JSON формат
+    if (fmt === 'json' || (content.trim().startsWith('[') && !content.includes('[Script Info]') && !content.includes('[Events]')) || (content.trim().startsWith('{') && content.includes('"subtitles"'))) {
+      try {
+        const parsed = JSON.parse(content);
+        const list = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.subtitles) ? parsed.subtitles : (Array.isArray(parsed.cues) ? parsed.cues : []));
+        return list.map((item: any, idx: number) => ({
+          index: typeof item.index === 'number' ? item.index : idx + 1,
+          startSec: typeof item.startSec === 'number' ? item.startSec : (typeof item.start === 'number' ? item.start : 0),
+          endSec: typeof item.endSec === 'number' ? item.endSec : (typeof item.end === 'number' ? item.end : 0),
+          speaker: item.speaker ? String(item.speaker) : undefined,
+          text: String(item.text || item.content || '')
+        }));
+      } catch (err) {
+        console.warn('[ProjectManager] Ошибка парсинга JSON субтитров:', err);
+      }
     }
 
     // 3. SRT & WebVTT форматы

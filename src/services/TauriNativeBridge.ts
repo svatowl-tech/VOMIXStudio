@@ -152,35 +152,63 @@ export class TauriNativeBridge {
   }
 
   /**
-   * Прямое сохранение бинарных данных (WAV, MP4, JSON) в файловую систему без лимитов памяти
+   * Прямое сохранение бинарных данных (WAV, MP4, JSON) в файловую систему без лимитов памяти через потоковые чанки
    */
-  public static async saveFileDirect(filePath: string, data: ArrayBuffer | Uint8Array): Promise<string> {
+  public static async saveFileDirect(
+    filePath: string,
+    data: Blob | ArrayBuffer | Uint8Array,
+    onProgress?: (percent: number) => void
+  ): Promise<string> {
     if (!this.isTauriEnvironment()) {
       throw new Error('Tauri API недоступно в веб-браузере.');
     }
 
-    const u8 = data instanceof Uint8Array ? data : new Uint8Array(data);
+    const totalBytes = data instanceof Blob ? data.size : data.byteLength;
+    const CHUNK_SIZE = 4 * 1024 * 1024; // 4 МБ на чанк
 
-    // 1. Попытка через @tauri-apps/plugin-fs writeFile (нативный бинарный IPC без лимитов памяти)
-    try {
-      if (tauriFs && typeof (tauriFs as any).writeFile === 'function') {
-        await (tauriFs as any).writeFile(filePath, u8);
-        return filePath;
+    // Потоковая запись чанками через Rust IPC (гарантирует отсутствие Out Of Memory и строковых переполнений V8)
+    if (data instanceof Blob) {
+      const numChunks = Math.ceil(totalBytes / CHUNK_SIZE);
+      for (let i = 0; i < numChunks; i++) {
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, totalBytes);
+        const chunkBlob = data.slice(start, end);
+        const chunkBuf = await chunkBlob.arrayBuffer();
+        const chunkU8 = new Uint8Array(chunkBuf);
+
+        await invoke<number>('write_file_chunk', {
+          filePath,
+          bytes: chunkU8,
+          isFirstChunk: i === 0
+        });
+
+        if (onProgress) {
+          onProgress(Math.round(((i + 1) / numChunks) * 100));
+        }
       }
-    } catch (fsErr) {
-      console.warn('[TauriNativeBridge] tauriFs.writeFile fallback to invoke:', fsErr);
+      return filePath;
     }
 
-    // 2. Попытка через invoke с прямым TypedArray
-    try {
-      return await invoke<string>('save_file_direct', { filePath, bytes: u8 });
-    } catch {
-      // 3. Чанковая запись через invoke только при крайней необходимости
-      if (u8.length <= 15 * 1024 * 1024) {
-        return await invoke<string>('save_file_direct', { filePath, bytes: Array.from(u8) });
+    const fullU8 = data instanceof Uint8Array ? data : new Uint8Array(data);
+    const numChunks = Math.ceil(fullU8.length / CHUNK_SIZE);
+
+    for (let i = 0; i < numChunks; i++) {
+      const start = i * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, fullU8.length);
+      const chunkU8 = fullU8.subarray(start, end);
+
+      await invoke<number>('write_file_chunk', {
+        filePath,
+        bytes: chunkU8,
+        isFirstChunk: i === 0
+      });
+
+      if (onProgress) {
+        onProgress(Math.round(((i + 1) / numChunks) * 100));
       }
-      throw new Error(`Не удалось записать файл ${filePath}: размер ${Math.round(u8.length / (1024 * 1024))} МБ`);
     }
+
+    return filePath;
   }
 
   /**
