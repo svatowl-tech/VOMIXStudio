@@ -32,10 +32,15 @@ import { TauriNativeBridge } from './TauriNativeBridge';
 export { BlobUrlRegistry };
 
 /**
- * Безопасное чтение бинарных данных медиафайла без ограничений FileReader
+ * Безопасное чтение бинарных данных медиафайла без ограничений FileReader и риска OOM
  */
 async function readBinaryMediaFile(file: File | Blob): Promise<Uint8Array> {
-  // 1. Стандартный метод File.prototype.arrayBuffer() (не подвержен сбоям FileReader.onerror)
+  // Для файлов больше 200 МБ в WebAssembly памяти выдаем понятную ошибку
+  if (file.size > 200 * 1024 * 1024) {
+    throw new Error(`Размер файла (${Math.round(file.size / (1024 * 1024))} МБ) превышает лимит браузерного буфера`);
+  }
+
+  // 1. Стандартный метод File.prototype.arrayBuffer()
   if (typeof file.arrayBuffer === 'function') {
     try {
       const buf = await file.arrayBuffer();
@@ -51,22 +56,10 @@ async function readBinaryMediaFile(file: File | Blob): Promise<Uint8Array> {
     const buf = await res.arrayBuffer();
     return new Uint8Array(buf);
   } catch (e) {
-    console.warn('[readBinaryMediaFile] Response(file).arrayBuffer() failed, fallback to chunked slice:', e);
+    console.warn('[readBinaryMediaFile] Response(file).arrayBuffer() failed:', e);
   }
 
-  // 3. Чанковое чтение слайсами по 64 МБ для защиты от переполнения буфера
-  const CHUNK_SIZE = 64 * 1024 * 1024;
-  const totalSize = file.size;
-  const result = new Uint8Array(totalSize);
-  let offset = 0;
-  while (offset < totalSize) {
-    const end = Math.min(offset + CHUNK_SIZE, totalSize);
-    const chunkBlob = file.slice(offset, end);
-    const chunkBuf = await chunkBlob.arrayBuffer();
-    result.set(new Uint8Array(chunkBuf), offset);
-    offset = end;
-  }
-  return result;
+  throw new Error('Не удалось прочесть медиафайл в память');
 }
 
 export interface RenderProgressInfo {
@@ -354,59 +347,51 @@ export class RenderManager {
 
           let actualVideoPath = videoFilePath;
 
-          // Если путь файла недоступен напрямую из объекта File, проверяем локальный каталог проекта
+          // Если путь файла недоступен напрямую из объекта File, интерактивно запрашиваем его у пользователя через нативный диалог
           if (!actualVideoPath || typeof actualVideoPath !== 'string') {
-            const cwd = (await TauriNativeBridge.getCurrentWorkingDir()) || '.';
-            const dirSeparator = cwd.includes('\\') ? '\\' : '/';
-            const candidatePaths = [
-              `${cwd}${dirSeparator}${sourceVideoFile.name}`,
-              `${cwd}${dirSeparator}project${dirSeparator}${sourceVideoFile.name}`,
-              `${cwd}${dirSeparator}assets${dirSeparator}${sourceVideoFile.name}`
-            ];
-
-            for (const cand of candidatePaths) {
-              try {
-                const u8 = await TauriNativeBridge.readFileBinary(cand);
-                if (u8 && u8.length > 0) {
-                  actualVideoPath = cand;
-                  this.addLog(`Найден исходный видеофайл на диске: ${cand} (${Math.round(u8.length / (1024 * 1024))} МБ)`);
-                  break;
+            this.addLog(`Запрос расположения исходного видеофайла [${sourceVideoFile.name}] для нативного FFmpeg...`);
+            const picked = await TauriNativeBridge.pickMediaFilesNative({
+              multiple: false,
+              title: `Укажите исходный видеофайл для нативного сведения (${sourceVideoFile.name})`,
+              filters: [
+                {
+                  name: `Видео (${sourceVideoFile.name})`,
+                  extensions: [inputExt, 'mkv', 'mp4', 'mov', 'webm', 'avi', 'm4v']
                 }
-              } catch (_) {}
+              ]
+            });
+            if (picked && picked.length > 0) {
+              actualVideoPath = picked[0].path;
+              (sourceVideoFile as any).path = actualVideoPath;
+              this.addLog(`Выбран исходный видеофайл: ${actualVideoPath}`);
             }
           }
 
-          // Если путь все еще не найден, пытаемся записать временный файл
-          if (!actualVideoPath || typeof actualVideoPath !== 'string') {
-            try {
-              const cwd = (await TauriNativeBridge.getCurrentWorkingDir()) || '.';
-              const dirSeparator = cwd.includes('\\') ? '\\' : '/';
-              const tempVideoPath = `${cwd}${dirSeparator}temp_source_video_${Date.now()}.${inputExt}`;
-              const videoBytes = await readBinaryMediaFile(sourceVideoFile);
-              await TauriNativeBridge.saveFileDirect(tempVideoPath, videoBytes);
-              actualVideoPath = tempVideoPath;
-            } catch (readErr) {
-              console.warn('[RenderManager] Не удалось прочесть File для временной записи, пробуем интерактивный поиск:', readErr);
-            }
+          if (actualVideoPath && typeof actualVideoPath === 'string') {
+            const dirSeparator = actualVideoPath.includes('\\') ? '\\' : '/';
+            const lastIdx = actualVideoPath.lastIndexOf(dirSeparator);
+            const dirPath = lastIdx > 0 ? actualVideoPath.substring(0, lastIdx) : '.';
+            const tempWavPath = `${dirPath}${dirSeparator}temp_master_${Date.now()}.wav`;
+            const finalOutputPath = `${dirPath}${dirSeparator}${outputFileName}`;
+
+            await TauriNativeBridge.saveFileDirect(tempWavPath, audioBytes);
+            this.addLog(`Мастер-аудио записан на диск: ${tempWavPath}`);
+
+            await TauriNativeBridge.runNativeFFmpegMux(actualVideoPath, tempWavPath, finalOutputPath, isLossless);
+            this.addLog(`🎉 Нативный FFmpeg успешно собрал видеофайл: ${finalOutputPath}`);
+
+            // Создаем легковесный результат с потоковым URL Tauri asset:// без выделения гигабайтов в JS RAM
+            const assetUrl = TauriNativeBridge.convertFileSrc(finalOutputPath);
+            const resultBlob = new Blob([], { type: ext === 'mkv' ? 'video/x-matroska' : 'video/mp4' });
+            (resultBlob as any).nativePath = finalOutputPath;
+            (resultBlob as any).path = finalOutputPath;
+            (resultBlob as any).name = outputFileName;
+            (resultBlob as any).assetUrl = assetUrl;
+            (resultBlob as any).sizeBytes = (sourceVideoFile.size || 0) + audioBytes.byteLength;
+
+            this.notifyProgress('completed', 100, 'Видео успешно сведено и экспортировано!');
+            return resultBlob;
           }
-
-          const dirSeparator = actualVideoPath.includes('\\') ? '\\' : '/';
-          const lastIdx = actualVideoPath.lastIndexOf(dirSeparator);
-          const dirPath = lastIdx > 0 ? actualVideoPath.substring(0, lastIdx) : '.';
-          const tempWavPath = `${dirPath}${dirSeparator}temp_master_${Date.now()}.wav`;
-          const finalOutputPath = `${dirPath}${dirSeparator}${outputFileName}`;
-
-          await TauriNativeBridge.saveFileDirect(tempWavPath, audioBytes);
-          this.addLog(`Мастер-аудио записан на диск: ${tempWavPath}`);
-
-          await TauriNativeBridge.runNativeFFmpegMux(actualVideoPath, tempWavPath, finalOutputPath, isLossless);
-          this.addLog(`🎉 Нативный FFmpeg успешно собрал видеофайл: ${finalOutputPath}`);
-
-          // Читаем готовый файл в Blob
-          const fileBytes = await TauriNativeBridge.readFileBinary(finalOutputPath);
-          const resultBlob = new Blob([fileBytes as unknown as BlobPart], { type: ext === 'mkv' ? 'video/x-matroska' : 'video/mp4' });
-          this.notifyProgress('completed', 100, 'Видео успешно сведено и экспортировано!');
-          return resultBlob;
         }
       } catch (nativeErr: any) {
         this.addLog(`Нативный FFmpeg вернул предупреждение (${nativeErr?.message || nativeErr}), переключаемся на WebAssembly...`);

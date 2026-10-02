@@ -51,6 +51,7 @@ import { MediaNormalizer } from '../services/MediaNormalizer';
 import { globalProjectManager, SubtitleCue, TrackMetadata, VideoMetadata } from '../services/ProjectManager';
 import { systemLogger } from '../services/SystemLogger';
 import { toSafeArray } from '../utils/safeIterables';
+import { TauriNativeBridge } from '../services/TauriNativeBridge';
 
 /**
  * Режимы импорта
@@ -243,6 +244,25 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
       addFilesToQueue(e.target.files);
       e.target.value = '';
     }
+  };
+
+  const handleOpenPicker = async () => {
+    if (TauriNativeBridge.isTauriEnvironment()) {
+      try {
+        const picked = await TauriNativeBridge.pickMediaFilesNative({
+          multiple: true,
+          title: 'Выберите медиафайлы проекта (видео / аудио / субтитры)'
+        });
+        if (picked && picked.length > 0) {
+          const files = picked.map((p) => p.file);
+          addFilesToQueue(files);
+          return;
+        }
+      } catch (err) {
+        console.warn('[MediaImportModal] Ошибка нативного диалога:', err);
+      }
+    }
+    fileInputRef.current?.click();
   };
 
   /**
@@ -544,7 +564,7 @@ export const MediaImportModal: React.FC<MediaImportModalProps> = ({
           {/* Зона Drag & Drop и выбора файлов */}
           <div
             id="dropzone-media-import"
-            onClick={() => fileInputRef.current?.click()}
+            onClick={handleOpenPicker}
             className={`border-2 border-dashed rounded-xl p-7 text-center cursor-pointer transition-all duration-200 flex flex-col items-center justify-center gap-3 ${
               isDragging
                 ? 'border-cyan-400 bg-cyan-950/30 scale-[0.99]'

@@ -2318,35 +2318,41 @@ const MinimalStudioComponent: React.FC = () => {
     }
 
     if (!finalVideoBlob) {
-      throw new Error('FFmpeg WebAssembly не смог сформировать выходной видеофайл.');
+      throw new Error('FFmpeg не смог сформировать выходной видеофайл.');
     }
 
-    // Автоматическое скачивание браузером, если включено в параметрах ноды
-    if (exportParams?.autoDownload !== false) {
+    const nativeAssetUrl = (finalVideoBlob as any).assetUrl;
+    const finalUrl = nativeAssetUrl || URL.createObjectURL(finalVideoBlob);
+
+    // Автоматическое скачивание браузером только для веб-окружения
+    if (exportParams?.autoDownload !== false && !(finalVideoBlob as any).nativePath && finalVideoBlob.size > 0) {
       globalRenderManager.downloadBlob(finalVideoBlob, outputFileName);
     }
 
     setExportedVideoBlob(finalVideoBlob);
-    const finalUrl = URL.createObjectURL(finalVideoBlob);
     setExportedVideoUrl(finalUrl);
 
-    // Сохраняем готовый MP4 в подпапку project/ и корень
-    await globalProjectManager.saveRenderedAsset(outputFileName, finalVideoBlob, true);
-    await globalProjectManager.saveRenderedAsset(outputFileName, finalVideoBlob, false);
+    // Сохраняем готовый MP4 в подпапку project/ и корень при наличии дескриптора папки
+    if (!(finalVideoBlob as any).nativePath && finalVideoBlob.size > 0) {
+      await globalProjectManager.saveRenderedAsset(outputFileName, finalVideoBlob, true);
+      await globalProjectManager.saveRenderedAsset(outputFileName, finalVideoBlob, false);
+    }
 
     // Кэшируем ассет в SQL БД с защитой от сбоев
-    try {
-      await AssetDatabase.getInstance().saveAsset({
-        id: `render_${Date.now()}`,
-        name: outputFileName,
-        type: 'render',
-        mimeType: 'video/mp4',
-        sizeBytes: finalVideoBlob.size,
-        timestamp: Date.now(),
-        blob: finalVideoBlob
-      });
-    } catch (dbErr) {
-      console.warn('[MinimalStudio] Не удалось сохранить ассет в IndexedDB:', dbErr);
+    if (finalVideoBlob.size > 0) {
+      try {
+        await AssetDatabase.getInstance().saveAsset({
+          id: `render_${Date.now()}`,
+          name: outputFileName,
+          type: 'render',
+          mimeType: 'video/mp4',
+          sizeBytes: finalVideoBlob.size,
+          timestamp: Date.now(),
+          blob: finalVideoBlob
+        });
+      } catch (dbErr) {
+        console.warn('[MinimalStudio] Не удалось сохранить ассет в IndexedDB:', dbErr);
+      }
     }
 
     setIsExporting(false);

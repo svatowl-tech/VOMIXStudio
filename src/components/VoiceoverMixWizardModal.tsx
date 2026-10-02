@@ -2324,17 +2324,30 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
                   <div className="flex items-center justify-between text-xs text-slate-300 pt-1">
                     <span className="truncate max-w-[200px] font-mono">{resultFileName}</span>
                     {resultBlob && (
-                      <span className="text-slate-400">{(resultBlob.size / (1024 * 1024)).toFixed(2)} МБ</span>
+                      <span className="text-slate-400">
+                        {((((resultBlob as any).sizeBytes || resultBlob.size) / (1024 * 1024)) || 0).toFixed(2)} МБ
+                      </span>
                     )}
                   </div>
-                  <a
-                    href={resultVideoUrl}
-                    download={resultFileName}
-                    className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-emerald-950/50"
-                  >
-                    <Download size={15} />
-                    Скачать {resultFileName?.endsWith('.wav') ? 'мастер-аудио WAV' : `готовое видео ${resultFileName?.split('.').pop()?.toUpperCase() || ''}`}
-                  </a>
+                  {((resultBlob as any)?.nativePath) ? (
+                    <div className="p-2.5 bg-slate-950/80 border border-emerald-500/30 rounded-xl text-center space-y-1">
+                      <div className="text-[11px] font-mono text-emerald-400 font-semibold truncate">
+                        📁 {(resultBlob as any).nativePath}
+                      </div>
+                      <div className="text-[10px] text-slate-400">
+                        Файл сохранен напрямую на диске без потери качества
+                      </div>
+                    </div>
+                  ) : (
+                    <a
+                      href={resultVideoUrl}
+                      download={resultFileName}
+                      className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-emerald-950/50"
+                    >
+                      <Download size={15} />
+                      Скачать {resultFileName?.endsWith('.wav') ? 'мастер-аудио WAV' : `готовое видео ${resultFileName?.split('.').pop()?.toUpperCase() || ''}`}
+                    </a>
+                  )}
                 </div>
               )}
 

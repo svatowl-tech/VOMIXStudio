@@ -8,7 +8,7 @@
  * ============================================================================
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import * as tauriPath from '@tauri-apps/api/path';
 import * as tauriFs from '@tauri-apps/plugin-fs';
@@ -558,6 +558,18 @@ export class TauriNativeBridge {
   }
 
   /**
+   * Преобразование локального пути файла в безопасный потоковый URL для <video> и <audio> тегов в Tauri
+   */
+  public static convertFileSrc(filePath: string): string {
+    if (!this.isTauriEnvironment() || !filePath) return filePath;
+    try {
+      return convertFileSrc(filePath);
+    } catch {
+      return filePath;
+    }
+  }
+
+  /**
    * Нативный системный диалог выбора медиафайлов (видео, аудио, субтитры) с сохранением реального пути на диске
    */
   public static async pickMediaFilesNative(options?: {
@@ -599,16 +611,24 @@ export class TauriNativeBridge {
         const ext = name.split('.').pop()?.toLowerCase() || '';
         const mime = ext === 'mp4' ? 'video/mp4' : ext === 'mkv' ? 'video/x-matroska' : ext === 'wav' ? 'audio/wav' : ext === 'mp3' ? 'audio/mpeg' : 'application/octet-stream';
         
-        try {
-          const bytes = await this.readFileBinary(p);
-          const file = new File([bytes as unknown as BlobPart], name, { type: mime });
-          (file as any).path = p;
-          results.push({ file, path: p, name });
-        } catch {
-          const file = new File([], name, { type: mime });
-          (file as any).path = p;
-          results.push({ file, path: p, name });
+        // Для небольших текстовых файлов (субтитры SRT/ASS) можно безопасно прочесть содержимое
+        const isSmallText = ext === 'srt' || ext === 'ass' || ext === 'vtt' || ext === 'json' || ext === 'txt';
+        if (isSmallText) {
+          try {
+            const bytes = await this.readFileBinary(p);
+            const file = new File([bytes as unknown as BlobPart], name, { type: mime });
+            (file as any).path = p;
+            results.push({ file, path: p, name });
+            continue;
+          } catch {
+            // fallback к легковесному объекту
+          }
         }
+
+        // Для видео и тяжелых файлов создаем легковесный File дескриптор с реальным системным путем
+        const file = new File([], name, { type: mime });
+        (file as any).path = p;
+        results.push({ file, path: p, name });
       }
 
       return results;
