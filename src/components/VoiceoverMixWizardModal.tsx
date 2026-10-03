@@ -133,6 +133,7 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
   const [autoTimingSummary, setAutoTimingSummary] = useState<string | null>(null);
   const [acousticProfiles, setAcousticProfiles] = useState<TrackAcousticProfile[]>([]);
   const [totalStrippedPhrases, setTotalStrippedPhrases] = useState<number>(0);
+  const [enableLipsyncTimeStretch, setEnableLipsyncTimeStretch] = useState<boolean>(true);
 
   // Финальный результат
   const [resultVideoUrl, setResultVideoUrl] = useState<string | null>(null);
@@ -836,17 +837,21 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
   const handleAutoTimingInWizard = async () => {
     setIsAutoTimingRunning(true);
     setStatusMessage('Запуск автоматического тайминга: сопоставление актёров и разведение коллизий...');
-    addLog('⚡ Запуск C++ алгоритма сценарного тайминга и устранения наездов...');
+    addLog(`⚡ Запуск C++ алгоритма сценарного тайминга (SoundTouch WSOLA Липсинк: ${enableLipsyncTimeStretch ? 'ВКЛ' : 'ВЫКЛ'})...`);
     try {
       let updated: TrackState[];
       if (onRunAutoTiming) {
         updated = await onRunAutoTiming(tracks);
       } else {
-        const res = globalAutoTimingService.runAutoTimingPipeline(tracks, subtitles);
+        const res = globalAutoTimingService.runAutoTimingPipeline(tracks, subtitles, 48000, {
+          enableTimeStretchLipsync: enableLipsyncTimeStretch,
+          minTimeStretchRatio: 0.78,
+          maxTimeStretchRatio: 1.25
+        });
         updated = res.updatedTracks;
         setTracks(updated);
         setAutoTimingSummary(
-          `Синхронизировано ${res.totalPhrasesAligned} фраз, устранено ${res.resolvedCollisionsCount} наездов, сохранено ${res.preservedScriptOverlapsCount} сценарных перекрытий.`
+          `Синхронизировано ${res.totalPhrasesAligned} фраз (Time-Stretch: ${res.stretchedPhrasesCount || 0}), устранено ${res.resolvedCollisionsCount} наездов, сохранено ${res.preservedScriptOverlapsCount} сценарных перекрытий.`
         );
       }
       if (onUpdateAllTracks) {
@@ -1709,6 +1714,31 @@ export const VoiceoverMixWizardModal: React.FC<VoiceoverMixWizardModalProps> = (
                         </button>
                       </div>
                     ))}
+                  </div>
+
+                  {/* Опция SoundTouch / WSOLA Time-Stretch Липсинка */}
+                  <div className="p-3 bg-slate-950/70 border border-slate-800 rounded-xl flex items-center justify-between gap-3 text-xs">
+                    <div className="space-y-0.5">
+                      <div className="font-semibold text-slate-200 flex items-center gap-1.5">
+                        <Sparkles size={14} className="text-amber-400" />
+                        <span>Липсинк & Time-Stretch (SoundTouch / WSOLA)</span>
+                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono">
+                          100% Pitch Lock
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400">
+                        Автоматически микро-подгонять темп фраз даббера (±22%) под оригинальный хронометраж без изменения высоты голоса.
+                      </p>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                      <input
+                        type="checkbox"
+                        checked={enableLipsyncTimeStretch}
+                        onChange={(e) => setEnableLipsyncTimeStretch(e.target.checked)}
+                        className="sr-only peer"
+                      />
+                      <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-gradient-to-r peer-checked:from-cyan-500 peer-checked:to-emerald-500"></div>
+                    </label>
                   </div>
 
                   {autoTimingSummary && (

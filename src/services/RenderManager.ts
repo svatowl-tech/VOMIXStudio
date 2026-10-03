@@ -281,23 +281,36 @@ export class RenderManager {
   /**
    * Безопасное чтение срендеренных данных из кучи C++ с обновлением ссылок памяти и защитой границ
    */
-  public readWasmBytesSafely(byteOffset: number, byteLength: number): Uint8Array {
+  public readWasmBytesSafely(byteOffset: number, byteLength: number, freeAfterRead: boolean = false): Uint8Array {
     const bridge = globalNativeDAWBridge;
     const mod = bridge.getModule();
     if (mod && mod.memory) {
       mod.HEAPF32 = new Float32Array(mod.memory.buffer);
       mod.HEAPU8 = new Uint8Array(mod.memory.buffer);
     }
+    bridge.refreshMemoryViews();
+
     const memBuffer = mod.memory?.buffer || mod.buffer || mod.wasmMemory?.buffer;
     if (!memBuffer) {
       throw new Error('[RenderManager] WebAssembly memory buffer недоступен');
     }
     const totalBufferBytes = memBuffer.byteLength;
     if (byteOffset + byteLength > totalBufferBytes) {
-      throw new Error(`WASM Buffer Overflow: попытка прочесть [${byteOffset} .. ${byteOffset + byteLength}] при размере памяти ${totalBufferBytes}`);
+      throw new Error(`[RenderManager] offset is out of bounds: попытка прочесть [${byteOffset} .. ${byteOffset + byteLength}] при размере памяти ${totalBufferBytes}`);
     }
+
     // Использовать slice() для создания независимой копии в JS-памяти перед передачей в FFmpeg:
-    return new Uint8Array(memBuffer.slice(byteOffset, byteOffset + byteLength));
+    const safeBytes = new Uint8Array(memBuffer.slice(byteOffset, byteOffset + byteLength));
+
+    if (freeAfterRead && typeof mod._free === 'function') {
+      try {
+        mod._free(byteOffset);
+      } catch (freeErr) {
+        console.warn('[RenderManager] Ошибка освобождения указателя в C++ куче:', freeErr);
+      }
+    }
+
+    return safeBytes;
   }
 
   /**
@@ -322,7 +335,6 @@ export class RenderManager {
     this.addLog(`Начало экспорта видео с пресетом: [${params.preset}] (Кодек: ${params.videoCodec}, Разрешение: ${params.resolution}, Проходы: ${params.encodingPasses}x)...`);
     this.notifyProgress('muxing_video', 5, 'Проверка WebAssembly памяти и инициализация FFmpeg...');
 
-    // Защита от переполнения памяти WebAssembly (2GB heap limit)
     const audioByteLength = masterWavBlob instanceof Blob ? masterWavBlob.size : masterWavBlob.byteLength;
     const totalSizeMb = (sourceVideoFile.size + audioByteLength) / (1024 * 1024);
     this.addLog(`Общий объем исходных медиафайлов: ${totalSizeMb.toFixed(1)} МБ`);
@@ -333,17 +345,20 @@ export class RenderManager {
     const defaultExt = inputExt === 'mkv' ? 'mkv' : inputExt === 'webm' ? 'webm' : 'mp4';
     const ext = (params.container || defaultExt).toLowerCase();
 
-    // 1. Попытка нативного муксинга через системный 64-битный FFmpeg (Tauri Desktop)
-    if (TauriNativeBridge.isTauriEnvironment()) {
+    // 1. Проверка окружения десктопа (Tauri):
+    // Нативный 64-битный FFmpeg без загрузки сотен мегабайт видео и аудио в память браузера (0% OOM, 3-5 сек)
+    const isTauriEnv = typeof window !== 'undefined' && (Boolean((window as any).__TAURI_INTERNALS__) || TauriNativeBridge.isTauriEnvironment());
+
+    if (isTauriEnv) {
       try {
         const hasNativeFFmpeg = await TauriNativeBridge.isFFmpegAvailable();
         if (hasNativeFFmpeg) {
-          this.addLog(`⚡ Обнаружен нативный 64-битный FFmpeg в системе. Выполняем прямой аппаратный муксинг без лимитов памяти WASM...`);
+          this.addLog(`⚡ [Tauri Desktop] Обнаружен нативный 64-битный FFmpeg. Выполняем прямой аппаратный муксинг без лимитов памяти WASM...`);
           this.notifyProgress('muxing_video', 30, 'Нативный FFmpeg муксинг без ограничений памяти...');
 
           let actualVideoPath = videoFilePath;
 
-          // Если путь файла недоступен напрямую из объекта File, интерактивно запрашиваем его у пользователя через нативный диалог
+          // Если путь к файлу недоступен напрямую, запрашиваем его через нативный системный диалог
           if (!actualVideoPath || typeof actualVideoPath !== 'string') {
             this.addLog(`Запрос расположения исходного видеофайла [${sourceVideoFile.name}] для нативного FFmpeg...`);
             const picked = await TauriNativeBridge.pickMediaFilesNative({
@@ -370,15 +385,38 @@ export class RenderManager {
             const tempWavPath = `${dirPath}${dirSeparator}temp_master_${Date.now()}.wav`;
             const finalOutputPath = `${dirPath}${dirSeparator}${outputFileName}`;
 
-            this.notifyProgress('muxing_video', 40, 'Запись мастер-аудио на диск...');
+            this.notifyProgress('muxing_video', 40, 'Потоковая запись мастер-аудио на диск...');
             await TauriNativeBridge.saveFileDirect(tempWavPath, masterWavBlob, (pct) => {
               this.notifyProgress('muxing_video', 40 + Math.round(pct * 0.2), `Запись мастер-аудио на диск: ${pct}%`);
             });
             this.addLog(`Мастер-аудио записан на диск: ${tempWavPath}`);
 
-            this.notifyProgress('muxing_video', 65, 'Нативный FFmpeg муксинг аудио в видео...');
+            // Освобождаем wavPtr в WASM куче сразу после записи файла на диск
+            const wavPtr = options?.wavPtr ?? (masterWavBlob as any)?.wavPtr;
+            if (wavPtr && typeof wavPtr === 'number' && wavPtr > 0) {
+              try {
+                const mod = globalNativeDAWBridge.getModule();
+                if (mod && typeof mod._free === 'function') {
+                  mod._free(wavPtr);
+                  this.addLog(`Освобожден временный указатель C++ кучи для WAV: 0x${wavPtr.toString(16)}`);
+                }
+              } catch (freeErr) {
+                console.warn('[RenderManager] Ошибка освобождения wavPtr:', freeErr);
+              }
+            }
+
+            this.notifyProgress('muxing_video', 65, 'Нативный FFmpeg аппаратный муксинг видео и аудио...');
             await TauriNativeBridge.runNativeFFmpegMux(actualVideoPath, tempWavPath, finalOutputPath, isLossless);
             this.addLog(`🎉 Нативный FFmpeg успешно собрал видеофайл: ${finalOutputPath}`);
+
+            // Удаляем временный файл WAV с диска
+            try {
+              if (typeof (window as any).__TAURI_INTERNALS__ !== 'undefined') {
+                await TauriNativeBridge.removeFile(tempWavPath);
+              }
+            } catch {
+              // Игнорируем ошибку удаления temp файла
+            }
 
             // Создаем легковесный результат с потоковым URL Tauri asset:// без выделения гигабайтов в JS RAM
             const assetUrl = TauriNativeBridge.convertFileSrc(finalOutputPath);
@@ -394,12 +432,13 @@ export class RenderManager {
           }
         }
       } catch (nativeErr: any) {
-        this.addLog(`Нативный FFmpeg вернул предупреждение (${nativeErr?.message || nativeErr}), переключаемся на WebAssembly...`);
+        this.addLog(`Нативный FFmpeg вернул предупреждение (${nativeErr?.message || nativeErr}), переключаемся на браузерный WebAssembly FFmpeg...`);
       }
     }
 
+    // 2. Web-режим (браузерный фолбек через @ffmpeg/ffmpeg WebAssembly)
     if (totalSizeMb > 1500) {
-      const warnMsg = `Внимание: размер исходных файлов (${totalSizeMb.toFixed(1)} МБ) близок к 32-битному лимиту памяти WASM. Рекомендуется использовать видеофайл меньшего размера.`;
+      const warnMsg = `Внимание: размер исходных файлов (${totalSizeMb.toFixed(1)} МБ) близок к 32-битному лимиту памяти WASM. Рекомендуется использовать видеофайл меньшего размера или десктоп-версию.`;
       this.addLog(warnMsg);
     }
 
@@ -409,15 +448,20 @@ export class RenderManager {
     }
 
     const inputFileName = `input_video.${inputExt}`;
+    const tempOutputFile = `output.${ext}`;
+    let isVideoWritten = false;
+    let isAudioWritten = false;
+    let isOutputWritten = false;
 
     try {
       this.notifyProgress('muxing_video', 20, 'Запись видео и аудио в виртуальную файловую систему MEMFS...');
 
-      // Запись исходного видео с правильным расширением контейнера
+      // Запись исходного видео
       this.addLog(`Запись входного видео [${sourceVideoFile.name}] в виртуальную ФС как ${inputFileName}...`);
       try {
         const videoBuffer = await readBinaryMediaFile(sourceVideoFile);
         await this.ffmpeg.writeFile(inputFileName, videoBuffer);
+        isVideoWritten = true;
       } catch (allocErr: any) {
         const isMem = allocErr?.name === 'RangeError' || String(allocErr).includes('allocation failed') || String(allocErr).includes('out of memory') || String(allocErr).includes('could not be read');
         if (isMem) {
@@ -432,7 +476,7 @@ export class RenderManager {
             `Размер видео (${videoMb} МБ) превысил лимит памяти браузерного WebAssembly. ` +
             `Сведенный мастер-микс WAV сохранен и скачан!\n\n` +
             `Для мгновенного объединения без пересжатия используйте команду:\n` +
-            `ffmpeg -i "${sourceVideoFile.name}" -i "master_mix.wav" -c:v copy -map 0:v:0 -map 1:a:0 "${outputFileName}"`
+            `ffmpeg -i "${sourceVideoFile.name}" -i "master_mix.wav" -c:v copy -c:a aac -b:a 320k -map 0:v:0 -map 1:a:0 "${outputFileName}"`
           );
         }
         throw allocErr;
@@ -444,6 +488,7 @@ export class RenderManager {
       try {
         const audioBuffer = await readBinaryMediaFile(audioBlob);
         await this.ffmpeg.writeFile('audio_mix.wav', audioBuffer);
+        isAudioWritten = true;
       } catch (audioAllocErr: any) {
         this.downloadBlob(audioBlob, `master_mix_${sourceVideoFile.name.replace(/\.[^/.]+$/, '')}.wav`);
         throw new Error(
@@ -458,20 +503,12 @@ export class RenderManager {
           const mod = globalNativeDAWBridge.getModule();
           if (mod && typeof mod._free === 'function') {
             mod._free(wavPtr);
-          } else {
-            globalNativeDAWBridge.freeBytes(wavPtr);
+            this.addLog(`Освобожден временный указатель C++ кучи для WAV: 0x${wavPtr.toString(16)}`);
           }
-          this.addLog(`Освобожден временный указатель C++ кучи для WAV: 0x${wavPtr.toString(16)}`);
         } catch (freeErr) {
           console.warn('[RenderManager] Ошибка освобождения wavPtr в C++ куче:', freeErr);
         }
       }
-
-      const hasTimelineOriginal = options?.timelineHasOriginalAudio ?? true;
-      const isLossless = params.preset === 'lossless_original' || params.videoCodec === 'copy';
-      const defaultExt = inputExt === 'mkv' ? 'mkv' : inputExt === 'webm' ? 'webm' : 'mp4';
-      const ext = (params.container || defaultExt).toLowerCase();
-      const tempOutputFile = `output.${ext}`;
 
       // Построение видео-флагов
       const videoArgs: string[] = [];
@@ -549,37 +586,21 @@ export class RenderManager {
       }
 
       this.notifyProgress('muxing_video', 55, 'Финальный проход муксинга: объединение видео с C++ мастер-миксом...');
-      this.addLog(`Запуск FFmpeg: замена аудиопотока на сведенный мастер-микс C++ DSP (1-в-1 с превью) в [${tempOutputFile}]...`);
+      this.addLog(`Запуск FFmpeg: прямая замена аудиопотока на сведенный мастер-микс C++ DSP (строго 1-в-1 баланс, без amix) в [${tempOutputFile}]...`);
 
       // СТРОГОЕ СООТВЕТСТВИЕ 1-В-1:
-      // Если дорожка оригинала была на таймлайне, она уже сведена с нужным фейдером в audio_mix.wav.
-      // Если же оригинал не был извлечен на таймлайн, адаптивно подмешиваем исходный аудиопоток видео 0:a:0.
-      let ffmpegArgs: string[];
-      if (hasTimelineOriginal) {
-        ffmpegArgs = [
-          '-i', inputFileName,
-          '-i', 'audio_mix.wav',
-          '-map', '0:v:0',
-          '-map', '1:a:0',
-          ...videoArgs,
-          ...audioArgs,
-          '-metadata:s:a:0', `title=${track1Title}`,
-          '-shortest'
-        ];
-      } else {
-        this.addLog('Звук оригинала видео подмешивается напрямую через FFmpeg amix к дорожкам дубляжа...');
-        ffmpegArgs = [
-          '-i', inputFileName,
-          '-i', 'audio_mix.wav',
-          '-filter_complex', '[0:a:0]volume=1.0[a0];[1:a:0]volume=1.0[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[aout]',
-          '-map', '0:v:0',
-          '-map', '[aout]',
-          ...videoArgs,
-          ...audioArgs,
-          '-metadata:s:a:0', `title=${track1Title}`,
-          '-shortest'
-        ];
-      }
+      // Аудиопоток видео уже смикширован в audio_mix.wav ядром C++.
+      // В FFmpeg подменяем дорожку через -map 0:v:0 -map 1:a:0 без двойного суммирования (amix исключен).
+      const ffmpegArgs: string[] = [
+        '-i', inputFileName,
+        '-i', 'audio_mix.wav',
+        '-map', '0:v:0',
+        '-map', '1:a:0',
+        ...videoArgs,
+        ...audioArgs,
+        '-metadata:s:a:0', `title=${track1Title}`,
+        '-shortest'
+      ];
 
       if (params.fastStart && (ext === 'mp4' || ext === 'mov' || ext === 'm4v')) {
         ffmpegArgs.push('-movflags', '+faststart');
@@ -588,6 +609,7 @@ export class RenderManager {
 
       this.addLog(`Выполнение команды FFmpeg: ffmpeg ${ffmpegArgs.join(' ')}`);
       await this.ffmpeg.exec(ffmpegArgs);
+      isOutputWritten = true;
 
       this.notifyProgress('muxing_video', 90, `Чтение готового ${ext.toUpperCase()} файла из виртуальной памяти...`);
       this.addLog(`Чтение результата ${tempOutputFile}...`);
@@ -602,16 +624,6 @@ export class RenderManager {
       const mimeType = ext === 'mkv' ? 'video/x-matroska' : ext === 'webm' ? 'video/webm' : 'video/mp4';
       const outputBlob = new Blob([pureBuffer], { type: mimeType });
 
-      // Очистка виртуальной файловой системы для освобождения WASM памяти
-      this.addLog('Очистка временных файлов виртуальной ФС...');
-      try {
-        await this.ffmpeg.deleteFile(inputFileName);
-        await this.ffmpeg.deleteFile('audio_mix.wav');
-        await this.ffmpeg.deleteFile(tempOutputFile);
-      } catch (cleanupErr) {
-        // Игнорируем ошибки очистки
-      }
-
       this.addLog(`Финальное видео успешно собрано: ${Math.round(outputBlob.size / 1024)} КБ!`);
       this.notifyProgress('completed', 100, 'Видео успешно создано!');
 
@@ -622,6 +634,17 @@ export class RenderManager {
       systemLogger.error('FFmpeg', `Критическая ошибка FFmpeg видеомуксинга: ${errMessage}`, err, err instanceof Error ? err.stack : undefined);
       this.notifyProgress('error', 0, `Ошибка FFmpeg: ${errMessage}`);
       throw err;
+    } finally {
+      // Гарантированная очистка виртуальной файловой системы MEMFS для предотвращения OOM и утечек памяти
+      if (this.ffmpeg && this.isFFmpegLoaded) {
+        try {
+          if (isVideoWritten) await this.ffmpeg.deleteFile(inputFileName).catch(() => {});
+          if (isAudioWritten) await this.ffmpeg.deleteFile('audio_mix.wav').catch(() => {});
+          if (isOutputWritten) await this.ffmpeg.deleteFile(tempOutputFile).catch(() => {});
+        } catch {
+          // Игнорируем ошибки очистки
+        }
+      }
     }
   }
 }

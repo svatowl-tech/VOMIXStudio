@@ -235,6 +235,22 @@ export class TauriNativeBridge {
   }
 
   /**
+   * Удаление временного файла на диске
+   */
+  public static async removeFile(filePath: string): Promise<boolean> {
+    if (!this.isTauriEnvironment()) return false;
+    try {
+      if (tauriFs && typeof (tauriFs as any).remove === 'function') {
+        await (tauriFs as any).remove(filePath);
+        return true;
+      }
+    } catch {
+      // Игнорируем ошибку
+    }
+    return false;
+  }
+
+  /**
    * Полное нативное индексирование проекта на диске через C++ модуль ProjectIndexer
    */
   public static async indexProjectDirectoryNative(rootPath: string, recursive: boolean = true): Promise<any> {
@@ -745,6 +761,22 @@ export class TauriNativeBridge {
       audioWavPath,
       outputPath,
       isLossless
+    });
+  }
+
+  /**
+   * Быстрый аппаратный ремуксинг контейнера (-c:v copy) в MP4 с faststart для мгновенного старта и плавного скраббинга
+   */
+  public static async runNativeFFmpegRemux(
+    inputPath: string,
+    outputPath: string
+  ): Promise<string> {
+    if (!this.isTauriEnvironment()) {
+      throw new Error('Нативный FFmpeg доступен только в настольном приложении Tauri.');
+    }
+    return await invoke<string>('run_native_ffmpeg_remux', {
+      inputPath,
+      outputPath
     });
   }
 }

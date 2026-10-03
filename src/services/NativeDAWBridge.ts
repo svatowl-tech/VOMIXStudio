@@ -1064,11 +1064,47 @@ export class NativeDAWBridge {
     // Защита чтения среза: проверять границы перед созданием Uint8Array:
     const totalBufferBytes = memBuffer.byteLength;
     if (byteOffset + byteLength > totalBufferBytes) {
-      throw new Error(`WASM Buffer Overflow: попытка прочесть [${byteOffset} .. ${byteOffset + byteLength}] при размере памяти ${totalBufferBytes}`);
+      throw new Error(`WASM Buffer Overflow (offset is out of bounds): попытка прочесть [${byteOffset} .. ${byteOffset + byteLength}] при размере памяти ${totalBufferBytes}`);
     }
 
-    // Использовать slice() для создания независимой копии в JS-памяти перед передачей в FFmpeg:
+    // Использовать slice() для создания независимой копии в JS-памяти:
     return new Uint8Array(memBuffer.slice(byteOffset, byteOffset + byteLength));
+  }
+
+  /**
+   * Безопасное чтение скомпилированного WAV буфера из кучи WebAssembly с мгновенным обновлением ссылок HEAPU8 и освобождением указателя
+   */
+  public readWasmWavBufferSafely(wavPtr: number, wavByteLength: number, freeAfterRead: boolean = true): Uint8Array {
+    if (!wavPtr || wavByteLength <= 0) return new Uint8Array(0);
+
+    if (this.wasmModule && this.wasmModule.memory) {
+      this.wasmModule.HEAPU8 = new Uint8Array(this.wasmModule.memory.buffer);
+      this.wasmModule.HEAPF32 = new Float32Array(this.wasmModule.memory.buffer);
+    }
+    this.refreshMemoryViews();
+
+    const memBuffer = this.wasmModule?.memory?.buffer;
+    if (!memBuffer) {
+      throw new Error('[NativeDAWBridge] WebAssembly memory.buffer недоступен');
+    }
+
+    if (wavPtr + wavByteLength > memBuffer.byteLength) {
+      throw new Error(`[NativeDAWBridge] offset is out of bounds: попытка прочесть [${wavPtr} .. ${wavPtr + wavByteLength}] при размере памяти ${memBuffer.byteLength}`);
+    }
+
+    // Копировать байты только безопасным срезом (detached-safe):
+    const safeBytes = new Uint8Array(memBuffer.slice(wavPtr, wavPtr + wavByteLength));
+
+    // Сразу освобождаем память кучи WebAssembly, если запрошено
+    if (freeAfterRead && typeof this.wasmModule?._free === 'function') {
+      try {
+        this.wasmModule._free(wavPtr);
+      } catch (freeErr) {
+        console.warn('[NativeDAWBridge] Ошибка освобождения wavPtr в C++ куче:', freeErr);
+      }
+    }
+
+    return safeBytes;
   }
 
   /**
@@ -2183,7 +2219,7 @@ export class NativeDAWBridge {
   }
 
   /**
-   * Быстрое выполнение WSOLA Time-Stretch в C++ для произвольного Float32Array буфера
+   * Быстрое выполнение WSOLA / SoundTouch Time-Stretch в C++ (с JS фоллбеком) для произвольного Float32Array буфера
    */
   public processWSOLA(input: Float32Array, ratio: number, isStereo: boolean = true): Float32Array {
     if (!input || input.length === 0) return new Float32Array(0);
@@ -2193,28 +2229,107 @@ export class NativeDAWBridge {
       return new Float32Array(input);
     }
 
-    const mod = this.getModule();
-    if (!mod.processWSOLA || !mod.calculateWSOLAOutputFrames) {
-      throw new Error('[NativeDAWBridge] Нативная C++ функция processWSOLA отсутствует в WASM модуле');
+    try {
+      const mod = this.getModule();
+      if (mod && typeof mod.processWSOLA === 'function' && typeof mod.calculateWSOLAOutputFrames === 'function') {
+        const inFrames = isStereo ? Math.floor(input.length / 2) : input.length;
+        const inPtr = this.writeFloat32Direct(input);
+
+        try {
+          const outPtr = mod.processWSOLA(inPtr, inFrames, safeRatio, isStereo);
+          const outFrames = mod.calculateWSOLAOutputFrames(inFrames, safeRatio);
+          const outChannels = isStereo ? 2 : 1;
+          const totalOutSamples = outFrames * outChannels;
+
+          if (outPtr && totalOutSamples > 0) {
+            return this.readFloat32Direct(outPtr, totalOutSamples);
+          }
+        } finally {
+          this.freeFloats(inPtr);
+        }
+      }
+    } catch (wasmErr) {
+      console.warn('[NativeDAWBridge] Фоллбек к JavaScript WSOLA TimeStretch:', wasmErr);
     }
 
-    const inFrames = isStereo ? Math.floor(input.length / 2) : input.length;
-    const inPtr = this.writeFloat32Direct(input);
+    // Высококачественный алгоритмический WSOLA фоллбек с Hanning-окнами (сохранение высоты тона 100%)
+    return this.processWSOLAFallback(input, safeRatio, isStereo);
+  }
 
-    try {
-      const outPtr = mod.processWSOLA(inPtr, inFrames, safeRatio, isStereo);
-      const outFrames = mod.calculateWSOLAOutputFrames(inFrames, safeRatio);
-      const outChannels = isStereo ? 2 : 1;
-      const totalOutSamples = outFrames * outChannels;
+  /**
+   * Чистый JavaScript/TypeScript WSOLA алгоритм с сохранением высоты тона и фазы
+   */
+  public processWSOLAFallback(input: Float32Array, ratio: number, isStereo: boolean): Float32Array {
+    const channels = isStereo ? 2 : 1;
+    const inFrames = Math.floor(input.length / channels);
+    const outFrames = Math.round(inFrames * ratio);
+    const output = new Float32Array(outFrames * channels);
 
-      if (!outPtr || totalOutSamples <= 0) {
-        throw new Error('[NativeDAWBridge] C++ WSOLATimeStretch вернул некорректный указатель памяти');
+    const winSize = 1024;
+    const halfWin = winSize / 2;
+    const searchRange = 256;
+
+    // Генерация окна Ханна
+    const hanning = new Float32Array(winSize);
+    for (let i = 0; i < winSize; i++) {
+      hanning[i] = 0.5 * (1.0 - Math.cos((2.0 * Math.PI * i) / (winSize - 1)));
+    }
+
+    const normWindow = new Float32Array(outFrames);
+
+    let outPos = 0;
+    while (outPos + winSize < outFrames) {
+      const naturalInPos = Math.floor(outPos / ratio);
+      let bestInPos = naturalInPos;
+
+      if (outPos > 0 && naturalInPos > searchRange && naturalInPos + winSize + searchRange < inFrames) {
+        let maxCorr = -Infinity;
+        const minSearch = Math.max(0, naturalInPos - searchRange);
+        const maxSearch = Math.min(inFrames - winSize, naturalInPos + searchRange);
+
+        for (let cand = minSearch; cand <= maxSearch; cand += 4) {
+          let corr = 0;
+          for (let k = 0; k < halfWin; k += 4) {
+            const inSmp = input[(cand + k) * channels];
+            const prevSmp = output[(outPos + k) * channels] || 0;
+            corr += inSmp * prevSmp;
+          }
+          if (corr > maxCorr) {
+            maxCorr = corr;
+            bestInPos = cand;
+          }
+        }
       }
 
-      return this.readFloat32Direct(outPtr, totalOutSamples);
-    } finally {
-      this.freeFloats(inPtr);
+      bestInPos = Math.max(0, Math.min(inFrames - winSize, bestInPos));
+
+      for (let i = 0; i < winSize; i++) {
+        const oIdx = outPos + i;
+        if (oIdx >= outFrames) break;
+        const w = hanning[i];
+        normWindow[oIdx] += w;
+
+        for (let ch = 0; ch < channels; ch++) {
+          const inIdx = (bestInPos + i) * channels + ch;
+          const outIdx = oIdx * channels + ch;
+          output[outIdx] += (input[inIdx] || 0) * w;
+        }
+      }
+
+      outPos += halfWin;
     }
+
+    // Нормализация окон
+    for (let f = 0; f < outFrames; f++) {
+      const nw = normWindow[f];
+      if (nw > 1e-4) {
+        for (let ch = 0; ch < channels; ch++) {
+          output[f * channels + ch] /= nw;
+        }
+      }
+    }
+
+    return output;
   }
 
   /**

@@ -62,10 +62,18 @@ export interface PhraseAlignmentDetail {
   isIntentionalScriptOverlap: boolean;
 }
 
+export interface AutoTimingOptions {
+  enableTimeStretchLipsync?: boolean; // Микро-подгонка темпа фраз под оригинальный хронометраж без изменения высоты голоса
+  minTimeStretchRatio?: number;       // Минимальное допустимое сжатие (по умолчанию 0.78 = -22% длительности)
+  maxTimeStretchRatio?: number;       // Максимальное допустимое растяжение (по умолчанию 1.25 = +25% длительности)
+  minSeparationSec?: number;          // Минимальная пауза между фразами (по умолчанию 0.08 сек)
+}
+
 export interface AutoTimingResult {
   updatedTracks: TrackState[];
   actorMappings: ActorTrackMapping[];
   totalPhrasesAligned: number;
+  stretchedPhrasesCount: number;
   resolvedCollisionsCount: number;
   preservedScriptOverlapsCount: number;
   alignmentDetails: PhraseAlignmentDetail[];
@@ -688,8 +696,23 @@ export class AutoTimingService {
     tracks: TrackState[],
     subtitles: SubtitleCue[],
     sampleRate: number = 48000,
-    minSeparationSec: number = 0.08 // 80 миллисекунд естественной паузы между фразами
+    minSeparationSecOrOptions?: number | AutoTimingOptions
   ): AutoTimingResult {
+    const options: AutoTimingOptions =
+      typeof minSeparationSecOrOptions === 'object'
+        ? minSeparationSecOrOptions
+        : {
+            minSeparationSec: typeof minSeparationSecOrOptions === 'number' ? minSeparationSecOrOptions : 0.08,
+            enableTimeStretchLipsync: true,
+            minTimeStretchRatio: 0.78,
+            maxTimeStretchRatio: 1.25
+          };
+
+    const minSeparationSec = options.minSeparationSec ?? 0.08;
+    const enableTimeStretch = options.enableTimeStretchLipsync !== false;
+    const minRatio = options.minTimeStretchRatio ?? 0.78;
+    const maxRatio = options.maxTimeStretchRatio ?? 1.25;
+
     const logs: string[] = [];
     const alignmentDetails: PhraseAlignmentDetail[] = [];
     const safeSubtitles = toSafeArray<SubtitleCue>(subtitles).sort((a, b) => a.startSec - b.startSec);
@@ -699,10 +722,6 @@ export class AutoTimingService {
     }));
 
     // ВАРИАНТ 2: ЕСЛИ СУБТИТРЫ НЕ ЗАГРУЖЕНЫ (или не указаны):
-    // Работает чистый детектор коллизий:
-    // - Разводятся ТОЛЬКО парные коллизии (2 фразы наезжают друг на друга).
-    // - Массовые коллизии (3 и более дорожек одновременно) СОХРАНЯЮТСЯ (хор, гур-гур, совместный возглас).
-    // - Неконфликтующие дорожки и фразы остаются 100% нетронутыми (НЕ нарезаются и НЕ двигаются).
     if (safeSubtitles.length === 0) {
       logs.push('[AutoTiming] Субтитры не загружены: запуск интеллектуального детектора коллизий...');
       const collisionRes = resolvePairwiseCollisions(workingTracks, sampleRate, minSeparationSec);
@@ -715,6 +734,7 @@ export class AutoTimingService {
         updatedTracks: collisionRes.updatedTracks,
         actorMappings: [],
         totalPhrasesAligned: 0,
+        stretchedPhrasesCount: 0,
         resolvedCollisionsCount: collisionRes.resolvedPairwiseCount,
         preservedScriptOverlapsCount: collisionRes.preservedMassiveCount,
         alignmentDetails: [],
@@ -722,7 +742,7 @@ export class AutoTimingService {
       };
     }
 
-    logs.push(`[AutoTiming] Запуск анализа тайминга: ${safeSubtitles.length} реплик субтитров.`);
+    logs.push(`[AutoTiming] Запуск анализа тайминга: ${safeSubtitles.length} реплик субтитров (WSOLA Липсинк: ${enableTimeStretch ? 'ВКЛ' : 'ВЫКЛ'}).`);
 
     // 1. Сопоставление актёров
     const mappings = this.matchActorsToTracks(safeSubtitles, workingTracks);
@@ -757,9 +777,11 @@ export class AutoTimingService {
       scheduledStartSec: number;
       durationSec: number;
       scheduledEndSec: number;
+      isStretched: boolean;
     }
 
     const allPositionedPhrases: PositionedPhrase[] = [];
+    let stretchedPhrasesCount = 0;
 
     mappings.forEach((mapping) => {
       const actorCues = safeSubtitles.filter((c) => {
@@ -808,26 +830,37 @@ export class AutoTimingService {
         let clampedRatio = 1.0;
         let finalLength = baseLength;
         let finalBuffer = baseBuffer;
+        let isStretched = false;
 
         const isStereo = phraseClip.buffer.length >= phraseClip.lengthSamples * 2;
 
-        // Применение правил растяжения/сжатия WSOLA:
-        // - Если разница в пределах ±20%: применить WSOLA (ratio от 0.80 до 1.20)
-        // - Если разница больше 25%: НЕ растягивать, сохранить естественный темп (ratio = 1.0)
-        if (rawRatio >= 0.80 && rawRatio <= 1.20) {
+        // Применение правил растяжения/сжатия WSOLA (SoundTouch / Pitch-Preserving):
+        // - Если включен липсинк и разница в пределах допустимого диапазона (minRatio .. maxRatio):
+        if (enableTimeStretch && rawRatio >= minRatio && rawRatio <= maxRatio) {
           clampedRatio = rawRatio;
           finalLength = Math.round(baseLength * clampedRatio);
-          if (Math.abs(clampedRatio - 1.0) > 0.02) {
+          if (Math.abs(clampedRatio - 1.0) > 0.015) {
             finalBuffer = globalNativeDAWBridge.processWSOLA(baseBuffer, clampedRatio, isStereo);
+            isStretched = true;
+            stretchedPhrasesCount++;
           }
-        } else if (rawRatio < 0.75 || rawRatio > 1.25) {
+        } else if (enableTimeStretch && rawRatio > maxRatio && rawRatio <= maxRatio + 0.15) {
+          clampedRatio = maxRatio;
+          finalLength = Math.round(baseLength * clampedRatio);
+          finalBuffer = globalNativeDAWBridge.processWSOLA(baseBuffer, clampedRatio, isStereo);
+          isStretched = true;
+          stretchedPhrasesCount++;
+        } else if (enableTimeStretch && rawRatio < minRatio && rawRatio >= minRatio - 0.12) {
+          clampedRatio = minRatio;
+          finalLength = Math.round(baseLength * clampedRatio);
+          finalBuffer = globalNativeDAWBridge.processWSOLA(baseBuffer, clampedRatio, isStereo);
+          isStretched = true;
+          stretchedPhrasesCount++;
+        } else {
+          // Если разница слишком экстремальная, сохраняем естественный темп (1.0x) без искажений
           clampedRatio = 1.0;
           finalLength = baseLength;
           finalBuffer = baseBuffer;
-        } else {
-          clampedRatio = Math.min(1.20, Math.max(0.80, rawRatio));
-          finalLength = Math.round(baseLength * clampedRatio);
-          finalBuffer = globalNativeDAWBridge.processWSOLA(baseBuffer, clampedRatio, isStereo);
         }
 
         const durationSec = finalLength / sampleRate;
@@ -850,12 +883,13 @@ export class AutoTimingService {
           clip: updatedClip,
           scheduledStartSec: targetStartSec,
           durationSec,
-          scheduledEndSec: targetStartSec + durationSec
+          scheduledEndSec: targetStartSec + durationSec,
+          isStretched
         });
       });
     });
 
-    logs.push(`[AutoTiming] Выровнено ${allPositionedPhrases.length} фраз по таймкодам начала субтитров.`);
+    logs.push(`[AutoTiming] Выровнено ${allPositionedPhrases.length} фраз по таймкодам начала субтитров (WSOLA Липсинк применен к ${stretchedPhrasesCount} фразам).`);
 
     // 3. Проектный анализ и устранение нежелательных коллизий
     let resolvedCollisionsCount = 0;
@@ -973,6 +1007,7 @@ export class AutoTimingService {
       updatedTracks: workingTracks,
       actorMappings: mappings,
       totalPhrasesAligned: allPositionedPhrases.length,
+      stretchedPhrasesCount,
       resolvedCollisionsCount,
       preservedScriptOverlapsCount,
       alignmentDetails,

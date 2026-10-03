@@ -570,6 +570,40 @@ pub mod commands {
             Err(format!("Ошибка нативного FFmpeg: {}", stderr))
         }
     }
+
+    /// IPC Команда: Мгновенный аппаратный ремуксинг контейнера (-c:v copy) в MP4 с faststart для плавного скраббинга
+    #[tauri::command]
+    pub async fn run_native_ffmpeg_remux(
+        input_path: String,
+        output_path: String,
+    ) -> Result<String, String> {
+        if !Path::new(&input_path).exists() {
+            return Err(format!("Исходный файл не найден: {}", input_path));
+        }
+        if let Some(parent) = Path::new(&output_path).parent() {
+            if !parent.exists() {
+                let _ = fs::create_dir_all(parent);
+            }
+        }
+
+        let mut cmd = std::process::Command::new("ffmpeg");
+        cmd.arg("-y")
+            .arg("-i").arg(&input_path)
+            .arg("-c:v").arg("copy")
+            .arg("-c:a").arg("aac")
+            .arg("-b:a").arg("192k")
+            .arg("-sn")
+            .arg("-movflags").arg("+faststart")
+            .arg(&output_path);
+
+        let output = cmd.output().map_err(|e| format!("Не удалось запустить системный FFmpeg: {}", e))?;
+        if output.status.success() {
+            Ok(output_path)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!("Ошибка FFmpeg ремуксинга: {}", stderr))
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -629,7 +663,8 @@ fn main() {
             commands::list_project_files_native,
             commands::get_current_working_dir,
             commands::is_ffmpeg_available,
-            commands::run_native_ffmpeg_mux
+            commands::run_native_ffmpeg_mux,
+            commands::run_native_ffmpeg_remux
         ]);
 
     if let Err(e) = app.run(tauri::generate_context!()) {

@@ -80,6 +80,7 @@ import { globalRenderPipelineGraphManager } from '../services/RenderPipelineGrap
 import { ExportRoutingModal } from './ExportRoutingModal';
 import { globalStemSeparationService } from '../services/StemSeparationService';
 import { globalAudioAICleanupEngine } from '../services/AudioAICleanupEngine';
+import { TauriNativeBridge } from '../services/TauriNativeBridge';
 import { toSafeArray, toSafeMap, toSafeSet } from '../utils/safeIterables';
 
 interface TrackChannelStripProps {
@@ -704,27 +705,8 @@ const MinimalStudioComponent: React.FC = () => {
       let hasOrigTrack = false;
       const discoveredVideo = discoveredFiles.find((f) => f && f.type === 'video');
       if (discoveredVideo && discoveredVideo.fileObj) {
-        setVideoFile(discoveredVideo.fileObj);
-        setVideoSrc(URL.createObjectURL(discoveredVideo.fileObj));
-        setStatusMessage(`Обнаружено видео: ${discoveredVideo.name}. Извлечение оригинального звука...`);
-
-        // Кэшируем видеофайл в SQL/IndexedDB базу данных
-        AssetDatabase.getInstance().saveAsset({
-          id: `video_${Date.now()}`,
-          name: discoveredVideo.name,
-          type: 'video',
-          mimeType: discoveredVideo.fileObj.type || 'video/mp4',
-          sizeBytes: discoveredVideo.fileObj.size,
-          timestamp: Date.now(),
-          blob: discoveredVideo.fileObj
-        }).catch(console.error);
-
-        try {
-          await extractAndLoadVideoAudio(discoveredVideo.fileObj);
-          hasOrigTrack = true;
-        } catch (vidAudErr) {
-          console.warn('[MinimalStudio] Ошибка извлечения звука видео при открытии папки:', vidAudErr);
-        }
+        await loadAndOptimizeVideoFile(discoveredVideo.fileObj);
+        hasOrigTrack = true;
       }
 
       // 2. Обнаружение аудиофайлов и динамическое распределение по дорожкам
@@ -881,8 +863,7 @@ const MinimalStudioComponent: React.FC = () => {
       const discoveredFiles = toSafeArray(content.discoveredFiles);
       const discoveredVideo = discoveredFiles.find((f) => f && f.type === 'video');
       if (discoveredVideo && discoveredVideo.fileObj) {
-        setVideoFile(discoveredVideo.fileObj);
-        setVideoSrc(URL.createObjectURL(discoveredVideo.fileObj));
+        await loadAndOptimizeVideoFile(discoveredVideo.fileObj);
       }
 
       const audioFiles = discoveredFiles.filter((f) => f && f.type === 'audio');
@@ -1048,15 +1029,43 @@ const MinimalStudioComponent: React.FC = () => {
     }
   };
 
-  // Ручной выбор видео
-  const handleManualVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
+  // Загрузка и оптимизация видеофайла (аппаратный FastStart ремуксинг для мгновенного GPU скраббинга в Tauri)
+  const loadAndOptimizeVideoFile = async (file: File) => {
     setVideoFile(file);
-    const url = URL.createObjectURL(file);
-    setVideoSrc(url);
-    setStatusMessage(`Видео "${file.name}" загружено.`);
+    let playbackUrl = URL.createObjectURL(file);
+
+    const filePath = (file as any).path;
+    const ext = file.name.split('.').pop()?.toLowerCase() || '';
+
+    // В настольном приложении Tauri для MKV, AVI, TS, MOV или любых тяжелых файлов
+    // выполняем мгновенный нативный ремуксинг (-c:v copy) в MP4 с faststart для идеального GPU-скраббинга
+    if (TauriNativeBridge.isTauriEnvironment() && filePath && typeof filePath === 'string') {
+      try {
+        const hasFFmpeg = await TauriNativeBridge.isFFmpegAvailable();
+        if (hasFFmpeg && (ext === 'mkv' || ext === 'avi' || ext === 'mov' || ext === 'ts' || ext === 'webm' || ext === 'flv')) {
+          const dirSeparator = filePath.includes('\\') ? '\\' : '/';
+          const lastIdx = filePath.lastIndexOf(dirSeparator);
+          const dirPath = lastIdx > 0 ? filePath.substring(0, lastIdx) : '.';
+          const proxyName = `.preview_${file.name.replace(/\.[^/.]+$/, '')}.mp4`;
+          const proxyPath = `${dirPath}${dirSeparator}${proxyName}`;
+
+          setStatusMessage(`Аппаратный ремуксинг контейнера [${file.name}] для мгновенного скраббинга...`);
+          await TauriNativeBridge.runNativeFFmpegRemux(filePath, proxyPath);
+          playbackUrl = TauriNativeBridge.convertFileSrc(proxyPath);
+          setStatusMessage(`Видео "${file.name}" оптимизировано (GPU FastStart)!`);
+        } else {
+          playbackUrl = TauriNativeBridge.convertFileSrc(filePath);
+        }
+      } catch (remuxErr) {
+        console.warn('[MinimalStudio] Ошибка ремуксинга превью:', remuxErr);
+        playbackUrl = TauriNativeBridge.convertFileSrc(filePath) || URL.createObjectURL(file);
+      }
+    }
+
+    setVideoSrc(playbackUrl);
+    if (!statusMessage.includes('оптимизировано')) {
+      setStatusMessage(`Видео "${file.name}" загружено.`);
+    }
 
     AssetDatabase.getInstance().saveAsset({
       id: `video_${Date.now()}`,
@@ -1070,6 +1079,13 @@ const MinimalStudioComponent: React.FC = () => {
 
     // Автоматически извлекаем оригинальный звук на Дорожку 1
     extractAndLoadVideoAudio(file);
+  };
+
+  // Ручной выбор видео
+  const handleManualVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    await loadAndOptimizeVideoFile(file);
   };
 
   // Извлечение звука оригинала по кнопке на панели
