@@ -220,13 +220,13 @@ export function createDefaultVocalBus(): VocalBusState {
         ratio: 3.0,
         attackMs: 25.0,
         releaseMs: 150.0,
-        makeupGainDb: 1.0,
+        makeupGainDb: 0.0,
         kneeDb: 6.0,
-        enabled: true,
+        enabled: false,
         currentGainReductionDb: 0.0
       },
       limiter: {
-        enabled: true,
+        enabled: false,
         ceilingDb: -0.5,
         releaseMs: 60.0
       },

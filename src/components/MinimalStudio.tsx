@@ -1030,11 +1030,14 @@ const MinimalStudioComponent: React.FC = () => {
   };
 
   // Загрузка и оптимизация видеофайла (аппаратный FastStart ремуксинг для мгновенного GPU скраббинга в Tauri)
-  const loadAndOptimizeVideoFile = async (file: File) => {
+  const loadAndOptimizeVideoFile = async (file: File, nativePath?: string) => {
+    if (nativePath) {
+      (file as any).path = nativePath;
+    }
     setVideoFile(file);
     let playbackUrl = URL.createObjectURL(file);
 
-    const filePath = (file as any).path;
+    const filePath = nativePath || (file as any).path;
     const ext = file.name.split('.').pop()?.toLowerCase() || '';
 
     // В настольном приложении Tauri для MKV, AVI, TS, MOV или любых тяжелых файлов
@@ -1086,6 +1089,30 @@ const MinimalStudioComponent: React.FC = () => {
     const file = e.target.files?.[0];
     if (!file) return;
     await loadAndOptimizeVideoFile(file);
+  };
+
+  const handleVideoUploadClick = async () => {
+    if (TauriNativeBridge.isTauriEnvironment()) {
+      try {
+        const picked = await TauriNativeBridge.pickMediaFilesNative({
+          multiple: false,
+          title: 'Выберите видеофайл для проекта',
+          filters: [
+            {
+              name: 'Видеофайлы (*.mp4, *.mkv, *.mov, *.avi, *.webm, *.ts)',
+              extensions: ['mp4', 'mkv', 'mov', 'avi', 'webm', 'ts', 'm4v', 'flv']
+            }
+          ]
+        });
+        if (picked && picked.length > 0) {
+          await loadAndOptimizeVideoFile(picked[0].file, picked[0].path);
+          return;
+        }
+      } catch (e) {
+        console.warn('[MinimalStudio] Native pick failed, fallback to input:', e);
+      }
+    }
+    videoInputRef.current?.click();
   };
 
   // Извлечение звука оригинала по кнопке на панели
@@ -2529,7 +2556,7 @@ const MinimalStudioComponent: React.FC = () => {
             <div className="flex items-center gap-2">
               <button
                 id="btn-upload-video-manual"
-                onClick={() => videoInputRef.current?.click()}
+                onClick={handleVideoUploadClick}
                 className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-800 rounded-lg flex items-center gap-1.5 font-mono text-[11px] cursor-pointer"
               >
                 <FileVideo size={12} className="text-purple-400" />

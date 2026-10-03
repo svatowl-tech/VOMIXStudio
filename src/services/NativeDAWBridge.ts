@@ -1669,7 +1669,11 @@ export class NativeDAWBridge {
 
         for (let i = 0; i < currentBlockFrames; i++) {
           const vMax = Math.max(Math.abs(vocalBusBlockL[i]), Math.abs(vocalBusBlockR[i]));
-          duckEnv = 0.9 * duckEnv + 0.1 * vMax;
+          if (vMax > duckEnv) {
+            duckEnv = attCoeff * duckEnv + (1 - attCoeff) * vMax;
+          } else {
+            duckEnv = relCoeff * duckEnv + (1 - relCoeff) * vMax;
+          }
           const vDb = 20 * Math.log10(Math.max(1e-5, duckEnv));
           const targetGain = vDb > duckThresh ? duckDepthLin : 1.0;
 
@@ -3916,7 +3920,7 @@ function processNoiseGateBlock(bufL: Float32Array, bufR: Float32Array, numFrames
   const thresh = gate.thresholdDb !== undefined ? gate.thresholdDb : -48;
   const floorLin = Math.pow(10, (gate.floorDb || -60) / 20);
   const attTime = Math.max(0.0005, (gate.attackMs || 2) / 1000);
-  const relTime = Math.max(0.005, (gate.releaseMs || 100) / 1000);
+  const relTime = Math.max(0.02, (gate.releaseMs || 150) / 1000);
   const attCoeff = Math.exp(-1 / (attTime * sampleRate));
   const relCoeff = Math.exp(-1 / (relTime * sampleRate));
 
@@ -3925,7 +3929,11 @@ function processNoiseGateBlock(bufL: Float32Array, bufR: Float32Array, numFrames
 
   for (let i = 0; i < numFrames; i++) {
     const absVal = Math.max(Math.abs(bufL[i]), Math.abs(bufR[i]));
-    env = 0.95 * env + 0.05 * absVal;
+    if (absVal > env) {
+      env = attCoeff * env + (1 - attCoeff) * absVal;
+    } else {
+      env = relCoeff * env + (1 - relCoeff) * absVal;
+    }
     const envDb = 20 * Math.log10(Math.max(1e-5, env));
     const targetGain = envDb >= thresh ? 1.0 : floorLin;
 
